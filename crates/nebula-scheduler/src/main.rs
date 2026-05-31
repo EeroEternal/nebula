@@ -21,6 +21,33 @@ use crate::args::Args;
 use crate::metrics::{healthz_handler, metrics_handler, SharedMetrics};
 use crate::planner::{build_plan_from_deployment, build_plan_multi, list_used_resources};
 
+async fn write_placement_cas(
+    store: &EtcdMetaStore,
+    placement_key: &str,
+    placement_val: Vec<u8>,
+) -> Result<u64> {
+    let expected_revision = store
+        .get(placement_key)
+        .await?
+        .map(|(_, revision)| revision)
+        .unwrap_or(0);
+
+    let (ok, revision) = store
+        .compare_and_swap(placement_key, expected_revision, placement_val)
+        .await?;
+
+    if ok {
+        Ok(revision)
+    } else {
+        anyhow::bail!(
+            "placement CAS failed for {}: expected revision {}, current revision {}",
+            placement_key,
+            expected_revision,
+            revision
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -143,25 +170,26 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let plan = match build_plan_multi(
-                    &store, &req, args.default_port, used_ports, used_gpus,
-                ).await {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!("failed to build placement plan: {}", e);
-                        continue;
-                    }
-                };
+                let plan =
+                    match build_plan_multi(&store, &req, args.default_port, used_ports, used_gpus)
+                        .await
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            error!("failed to build placement plan: {}", e);
+                            continue;
+                        }
+                    };
 
                 // 3. Write Placement
                 let placement_key = format!("/placements/{}", plan.model_uid);
                 let placement_val = serde_json::to_vec(&plan)?;
 
-                if let Err(e) = store.put(&placement_key, placement_val, None).await {
+                if let Err(e) = write_placement_cas(&store, &placement_key, placement_val).await {
                     error!("failed to write placement: {}", e);
                     continue;
                 }
-                info!("wrote placement to {}", placement_key);
+                info!("wrote placement to {} (CAS)", placement_key);
 
                 // 3. Update Request Status
                 req.status = ModelRequestStatus::Scheduled;
@@ -196,7 +224,6 @@ async fn main() -> Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
-
 
 /// Watch `/deployments/` prefix for the new declarative model management flow.
 async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
@@ -298,7 +325,9 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                         let placement_key = format!("/placements/{}", plan.model_uid);
                         match serde_json::to_vec(&plan) {
                             Ok(val) => {
-                                if let Err(e) = store.put(&placement_key, val, None).await {
+                                if let Err(e) =
+                                    write_placement_cas(&store, &placement_key, val).await
+                                {
                                     error!(
                                         model_uid=%deployment.model_uid,
                                         error=%e,
@@ -307,7 +336,7 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                                 } else {
                                     info!(
                                         model_uid=%deployment.model_uid,
-                                        "wrote placement to {}",
+                                        "wrote placement to {} (CAS)",
                                         placement_key
                                     );
                                 }

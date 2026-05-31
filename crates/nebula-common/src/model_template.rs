@@ -89,4 +89,3 @@ pub struct ModelTemplate {
 fn default_replicas() -> u32 {
     1
 }
-

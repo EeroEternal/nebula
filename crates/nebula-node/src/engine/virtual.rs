@@ -1,18 +1,18 @@
-use std::time::Duration;
+use async_trait::async_trait;
 use axum::{
-    extract::{State, Request},
+    body::Body,
+    extract::{Request, State},
+    response::{IntoResponse, Response},
     routing::post,
     Router,
-    response::{Response, IntoResponse},
-    body::Body,
 };
-use async_trait::async_trait;
+use reqwest::Client;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use reqwest::Client;
 
-use crate::engine::{Engine, EngineHandle, EngineStartContext, EngineProcess};
 use crate::args::Args;
+use crate::engine::{Engine, EngineHandle, EngineProcess, EngineStartContext};
 
 pub struct VirtualEngine {}
 
@@ -29,19 +29,22 @@ struct ProxyState {
     api_key: Option<String>,
 }
 
-async fn proxy_handler(
-    State(state): State<ProxyState>,
-    req: Request<Body>,
-) -> Response {
+async fn proxy_handler(State(state): State<ProxyState>, req: Request<Body>) -> Response {
     let path = req.uri().path().to_string();
-    let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let query = req
+        .uri()
+        .query()
+        .map(|q| format!("?{}", q))
+        .unwrap_or_default();
     let url = format!("{}{}{}", state.target_base, path, query);
 
     let mut proxy_req = state.http.request(req.method().clone(), url);
 
     // Forward headers except host and authorization (which we handle separately)
     for (k, v) in req.headers() {
-        if k.as_str().eq_ignore_ascii_case("host") || k.as_str().eq_ignore_ascii_case("authorization") {
+        if k.as_str().eq_ignore_ascii_case("host")
+            || k.as_str().eq_ignore_ascii_case("authorization")
+        {
             continue;
         }
         proxy_req = proxy_req.header(k, v);
@@ -61,7 +64,9 @@ async fn proxy_handler(
 
     let body = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
         Ok(b) => b,
-        Err(_) => return (axum::http::StatusCode::BAD_REQUEST, "failed to read body").into_response(),
+        Err(_) => {
+            return (axum::http::StatusCode::BAD_REQUEST, "failed to read body").into_response()
+        }
     };
 
     let proxy_req = proxy_req.body(body);
@@ -77,11 +82,17 @@ async fn proxy_handler(
                 builder = builder.header(k, v);
             }
             let body = Body::from_stream(resp.bytes_stream());
-            builder.body(body).unwrap_or_else(|_| Response::new(Body::empty()))
+            builder
+                .body(body)
+                .unwrap_or_else(|_| Response::new(Body::empty()))
         }
         Err(e) => {
             tracing::error!(error=%e, "upstream proxy request failed");
-            (axum::http::StatusCode::BAD_GATEWAY, "upstream request failed").into_response()
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                "upstream request failed",
+            )
+                .into_response()
         }
     }
 }
@@ -94,7 +105,7 @@ impl Engine for VirtualEngine {
 
     async fn start(&self, ctx: EngineStartContext) -> anyhow::Result<EngineHandle> {
         let port = ctx.port;
-        
+
         // Extract configuration (you could parse ctx.engine_config_path if it existed)
         // For simplicity we fallback to env vars.
         let target_base = std::env::var("VIRTUAL_ENGINE_TARGET")
@@ -112,10 +123,15 @@ impl Engine for VirtualEngine {
         let app = Router::new()
             .route("/v1/chat/completions", post(proxy_handler))
             .route("/v1/completions", post(proxy_handler))
-            .route("/v1/models", axum::routing::get(|| async { axum::Json(serde_json::json!({
-                "object": "list",
-                "data": [{"id": "virtual", "object": "model"}]
-            })) }))
+            .route(
+                "/v1/models",
+                axum::routing::get(|| async {
+                    axum::Json(serde_json::json!({
+                        "object": "list",
+                        "data": [{"id": "virtual", "object": "model"}]
+                    }))
+                }),
+            )
             .with_state(state);
 
         let listener = match TcpListener::bind(("0.0.0.0", port)).await {
@@ -142,13 +158,13 @@ impl Engine for VirtualEngine {
             }
         });
 
-        // Store token somewhere? EngineProcess::External doesn't let us store it easily 
+        // Store token somewhere? EngineProcess::External doesn't let us store it easily
         // without adding to EngineHandle. For now, External is fine, but it means
-        // it leaks a Tokio task if stopped. Since this is an MVP, we accept this leak 
+        // it leaks a Tokio task if stopped. Since this is an MVP, we accept this leak
         // or we could store the CancellationToken in a global map, but we'll leave it as External.
 
         let base_url = format!("http://127.0.0.1:{}", port);
-        
+
         Ok(EngineHandle {
             base_url,
             engine_model: ctx.model_name,
@@ -162,7 +178,10 @@ impl Engine for VirtualEngine {
 
     async fn health_check(&self, handle: &EngineHandle) -> bool {
         // Ping the local proxy /v1/models endpoint to verify it's up
-        let client = reqwest::Client::builder().timeout(Duration::from_secs(2)).build().unwrap();
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
         let url = format!("{}/v1/models", handle.base_url.trim_end_matches('/'));
         match client.get(&url).send().await {
             Ok(r) => r.status().is_success(),

@@ -154,21 +154,29 @@ impl Engine for SglangEngine {
 
             cmd = Command::new("docker");
             cmd.arg("run")
-                .arg("--name").arg(&cname)
-                .arg("--gpus").arg(&gpu_device)
-                .arg("-p").arg(format!("{}:{}", selected_port, selected_port))
-                .arg("-v").arg(format!("{}:/model", self.config.model_dir))
+                .arg("--name")
+                .arg(&cname)
+                .arg("--gpus")
+                .arg(&gpu_device)
+                .arg("-p")
+                .arg(format!("{}:{}", selected_port, selected_port))
+                .arg("-v")
+                .arg(format!("{}:/model", self.config.model_dir))
                 .arg("--ipc=host");
 
             cmd.arg("-e").arg("HF_HOME=/model/.cache/huggingface");
-            cmd.arg("-e").arg("TRANSFORMERS_CACHE=/model/.cache/huggingface");
+            cmd.arg("-e")
+                .arg("TRANSFORMERS_CACHE=/model/.cache/huggingface");
             cmd.arg("-e").arg("XDG_CACHE_HOME=/model/.cache");
 
             cmd.arg(image);
 
-            cmd.arg("--model-path").arg(&container_model)
-                .arg("--host").arg("0.0.0.0")
-                .arg("--port").arg(selected_port.to_string());
+            cmd.arg("--model-path")
+                .arg(&container_model)
+                .arg("--host")
+                .arg("0.0.0.0")
+                .arg("--port")
+                .arg(selected_port.to_string());
 
             for a in &sglang_args {
                 cmd.arg(a);
@@ -195,9 +203,12 @@ impl Engine for SglangEngine {
                 cmd.env("CUDA_VISIBLE_DEVICES", devs.join(","));
             }
             cmd.current_dir(&self.config.cwd);
-            cmd.arg("--model-path").arg(&model_tag)
-                .arg("--host").arg(&self.config.host)
-                .arg("--port").arg(selected_port.to_string());
+            cmd.arg("--model-path")
+                .arg(&model_tag)
+                .arg("--host")
+                .arg(&self.config.host)
+                .arg("--port")
+                .arg(selected_port.to_string());
 
             for a in &sglang_args {
                 cmd.arg(a);
@@ -218,7 +229,10 @@ impl Engine for SglangEngine {
 
         let process = if process_kind == "docker" {
             let cname = container_name(&ctx.model_uid, ctx.replica_id);
-            EngineProcess::DockerContainer { name: cname, wait_child: child }
+            EngineProcess::DockerContainer {
+                name: cname,
+                wait_child: child,
+            }
         } else {
             EngineProcess::Child(child)
         };
@@ -272,7 +286,8 @@ impl Engine for SglangEngine {
                 let models_url = format!("{}/v1/models", base_url);
                 let engine_model = match http.get(&models_url).send().await {
                     Ok(resp) if resp.status().is_success() => {
-                        let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                        let v: serde_json::Value =
+                            resp.json().await.unwrap_or(serde_json::Value::Null);
                         v.get("data")
                             .and_then(|d| d.get(0))
                             .and_then(|m| m.get("id"))
@@ -293,7 +308,10 @@ impl Engine for SglangEngine {
                 Some(EngineHandle {
                     base_url,
                     engine_model,
-                    process: EngineProcess::DockerContainer { name: name.clone(), wait_child },
+                    process: EngineProcess::DockerContainer {
+                        name: name.clone(),
+                        wait_child,
+                    },
                 })
             }
             _ => {
@@ -444,8 +462,8 @@ pub async fn scrape_sglang_stats(
 ///   sglang:metric_name{labels...} 123.45
 ///   sglang_metric_name{labels...} 123.45
 fn extract_sglang_metric(line: &str, metric_suffix: &str) -> Option<f64> {
-    let has_metric = line.contains(&format!(":{metric_suffix}"))
-        || line.contains(&format!("_{metric_suffix}"));
+    let has_metric =
+        line.contains(&format!(":{metric_suffix}")) || line.contains(&format!("_{metric_suffix}"));
 
     if !has_metric {
         return None;
@@ -462,7 +480,10 @@ mod tests {
     #[test]
     fn test_extract_sglang_metric() {
         assert_eq!(
-            extract_sglang_metric("sglang:num_requests_waiting{model=\"m\"} 3", "num_requests_waiting"),
+            extract_sglang_metric(
+                "sglang:num_requests_waiting{model=\"m\"} 3",
+                "num_requests_waiting"
+            ),
             Some(3.0)
         );
         assert_eq!(

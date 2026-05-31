@@ -38,8 +38,9 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let store = nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint))
-        .await?;
+    let store =
+        nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint))
+            .await?;
 
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))
@@ -61,7 +62,11 @@ async fn main() -> anyhow::Result<()> {
         http,
         router_url: args.router_url,
         session_ttl_hours: args.session_ttl_hours,
-        xtrace_url: args.common.xtrace_url.clone().unwrap_or_else(|| "http://127.0.0.1:8742".to_string()),
+        xtrace_url: args
+            .common
+            .xtrace_url
+            .clone()
+            .unwrap_or_else(|| "http://127.0.0.1:8742".to_string()),
         xtrace_token: args.common.xtrace_token.clone().unwrap_or_default(),
         xtrace_auth_mode: args.xtrace_auth_mode,
     };
@@ -86,13 +91,25 @@ async fn main() -> anyhow::Result<()> {
         // Image registry
         .route("/images", get(list_images))
         .route("/images/status", get(list_image_status))
-        .route("/images/:id", get(get_image).put(put_image).delete(delete_image))
-        .layer(middleware::from_fn_with_state(st.clone(), db_auth_middleware))
+        .route(
+            "/images/:id",
+            get(get_image).put(put_image).delete(delete_image),
+        )
+        .layer(middleware::from_fn_with_state(
+            st.clone(),
+            db_auth_middleware,
+        ))
         .with_state(st.clone());
 
     let v2_routes = Router::new()
-        .route("/observability/gateway/overview", get(handlers_v2::gateway_overview))
-        .route("/observability/gateway/traffic", get(handlers_v2::gateway_traffic))
+        .route(
+            "/observability/gateway/overview",
+            get(handlers_v2::gateway_overview),
+        )
+        .route(
+            "/observability/gateway/traffic",
+            get(handlers_v2::gateway_traffic),
+        )
         .route(
             "/observability/gateway/reliability",
             get(handlers_v2::gateway_reliability),
@@ -101,22 +118,47 @@ async fn main() -> anyhow::Result<()> {
             "/observability/gateway/protection",
             get(handlers_v2::gateway_protection),
         )
-        .route("/observability/gateway/latency", get(handlers_v2::gateway_latency))
-        .route("/models", get(handlers_v2::list_models).post(handlers_v2::create_model))
-        .route("/models/:model_uid", get(handlers_v2::get_model).put(handlers_v2::update_model).delete(handlers_v2::delete_model))
+        .route(
+            "/observability/gateway/latency",
+            get(handlers_v2::gateway_latency),
+        )
+        .route(
+            "/models",
+            get(handlers_v2::list_models).post(handlers_v2::create_model),
+        )
+        .route(
+            "/models/:model_uid",
+            get(handlers_v2::get_model)
+                .put(handlers_v2::update_model)
+                .delete(handlers_v2::delete_model),
+        )
         .route("/models/:model_uid/start", post(handlers_v2::start_model))
         .route("/models/:model_uid/stop", post(handlers_v2::stop_model))
         .route("/models/:model_uid/scale", put(handlers_v2::scale_model))
-        .route("/models/:model_uid/save-as-template", post(handlers_v2::save_as_template))
-        .route("/templates", get(handlers_v2::list_templates).post(handlers_v2::create_template))
-        .route("/templates/:id", get(handlers_v2::get_template).put(handlers_v2::update_template).delete(handlers_v2::delete_template))
+        .route(
+            "/models/:model_uid/save-as-template",
+            post(handlers_v2::save_as_template),
+        )
+        .route(
+            "/templates",
+            get(handlers_v2::list_templates).post(handlers_v2::create_template),
+        )
+        .route(
+            "/templates/:id",
+            get(handlers_v2::get_template)
+                .put(handlers_v2::update_template)
+                .delete(handlers_v2::delete_template),
+        )
         .route("/templates/:id/deploy", post(handlers_v2::deploy_template))
         .route("/nodes/:node_id/cache", get(handlers_v2::node_cache))
         .route("/nodes/:node_id/disk", get(handlers_v2::node_disk))
         .route("/cache/summary", get(handlers_v2::cache_summary))
         .route("/alerts", get(handlers_v2::list_alerts))
         .route("/migrate", post(handlers_v2::migrate_v1_to_v2))
-        .layer(middleware::from_fn_with_state(st.clone(), db_auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            st.clone(),
+            db_auth_middleware,
+        ))
         .with_state(st.clone());
 
     let auth_public_routes = Router::new()
@@ -130,7 +172,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/auth/settings", get(get_settings).put(update_settings))
         .route("/auth/users", get(list_users).post(create_user))
         .route("/auth/users/:id", put(update_user).delete(delete_user))
-        .layer(middleware::from_fn_with_state(st.clone(), db_auth_middleware))
+        .layer(middleware::from_fn_with_state(
+            st.clone(),
+            db_auth_middleware,
+        ))
         .with_state(st.clone());
 
     let api_routes = Router::new()

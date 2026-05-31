@@ -15,11 +15,19 @@ pub struct Args {
     #[arg(long, env = "NEBULA_BFF_ADDR", default_value = "0.0.0.0:18090")]
     pub listen_addr: String,
 
-    #[arg(long, env = "NEBULA_ROUTER_URL", default_value = "http://127.0.0.1:18081")]
+    #[arg(
+        long,
+        env = "NEBULA_ROUTER_URL",
+        default_value = "http://127.0.0.1:18081"
+    )]
     pub router_url: String,
 
     /// PostgreSQL connection URL for user auth/profile persistence.
-    #[arg(long, env = "BFF_DATABASE_URL", default_value = "postgresql://postgres:postgres@127.0.0.1:5432/nebula")]
+    #[arg(
+        long,
+        env = "BFF_DATABASE_URL",
+        default_value = "postgresql://postgres:postgres@127.0.0.1:5432/nebula"
+    )]
     pub database_url: String,
 
     /// Session TTL in hours for login tokens.

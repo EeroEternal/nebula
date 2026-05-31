@@ -1,13 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::{
-    body::Body,
-    extract::State,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use chrono::Utc;
 use serde::Deserialize;
 use tokio::sync::mpsc;

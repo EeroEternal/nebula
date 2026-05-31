@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -6,12 +5,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use nebula_common::{
-    DesiredState, DownloadPhase, DownloadProgress, EndpointInfo, EndpointStats,
-    ModelCacheEntry, ModelConfig, ModelDeployment, ModelSource,
-    ModelSpec, ModelTemplate, NodeDiskStatus, PlacementPlan, TemplateCategory, TemplateSource,
+    DesiredState, DownloadPhase, DownloadProgress, EndpointInfo, EndpointStats, ModelCacheEntry,
+    ModelConfig, ModelDeployment, ModelSource, ModelSpec, ModelTemplate, NodeDiskStatus,
+    PlacementPlan, TemplateCategory, TemplateSource,
 };
 use nebula_meta::MetaStore;
 
@@ -46,13 +46,27 @@ pub enum ServiceError {
 impl IntoResponse for ServiceError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
-            ServiceError::Etcd(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, "etcd_error", e.to_string()),
-            ServiceError::Serialization(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, "serialization_error", e.to_string()),
+            ServiceError::Etcd(ref e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "etcd_error",
+                e.to_string(),
+            ),
+            ServiceError::Serialization(ref e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "serialization_error",
+                e.to_string(),
+            ),
             ServiceError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
             ServiceError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
             ServiceError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
-            ServiceError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized", "Unauthorized".to_string()),
-            ServiceError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg),
+            ServiceError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Unauthorized".to_string(),
+            ),
+            ServiceError::Internal(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg)
+            }
         };
 
         let body = json!({
@@ -376,40 +390,65 @@ pub fn compute_aggregated_state(
 // Etcd DB Operations Helpers
 // ---------------------------------------------------------------------------
 
-pub async fn get_model_spec(store: &dyn MetaStore, model_uid: &str) -> Result<ModelSpec, ServiceError> {
+pub async fn get_model_spec(
+    store: &dyn MetaStore,
+    model_uid: &str,
+) -> Result<ModelSpec, ServiceError> {
     match store.get(&format!("/models/{model_uid}/spec")).await? {
         Some((data, _)) => serde_json::from_slice(&data).map_err(Into::into),
         None => Err(ServiceError::NotFound("model not found".to_string())),
     }
 }
 
-pub async fn get_model_deployment(store: &dyn MetaStore, model_uid: &str) -> Result<Option<ModelDeployment>, ServiceError> {
+pub async fn get_model_deployment(
+    store: &dyn MetaStore,
+    model_uid: &str,
+) -> Result<Option<ModelDeployment>, ServiceError> {
     match store.get(&format!("/deployments/{model_uid}")).await? {
         Some((data, _)) => Ok(Some(serde_json::from_slice(&data)?)),
         None => Ok(None),
     }
 }
 
-pub async fn get_model_template(store: &dyn MetaStore, id: &str) -> Result<ModelTemplate, ServiceError> {
+pub async fn get_model_template(
+    store: &dyn MetaStore,
+    id: &str,
+) -> Result<ModelTemplate, ServiceError> {
     match store.get(&format!("/templates/{id}")).await? {
         Some((data, _)) => serde_json::from_slice(&data).map_err(Into::into),
         None => Err(ServiceError::NotFound("template not found".to_string())),
     }
 }
 
-pub async fn put_model_spec(store: &dyn MetaStore, model_uid: &str, spec: &ModelSpec) -> Result<(), ServiceError> {
+pub async fn put_model_spec(
+    store: &dyn MetaStore,
+    model_uid: &str,
+    spec: &ModelSpec,
+) -> Result<(), ServiceError> {
     let val = serde_json::to_vec(spec)?;
-    store.put(&format!("/models/{model_uid}/spec"), val, None).await?;
+    store
+        .put(&format!("/models/{model_uid}/spec"), val, None)
+        .await?;
     Ok(())
 }
 
-pub async fn put_model_deployment(store: &dyn MetaStore, model_uid: &str, dep: &ModelDeployment) -> Result<(), ServiceError> {
+pub async fn put_model_deployment(
+    store: &dyn MetaStore,
+    model_uid: &str,
+    dep: &ModelDeployment,
+) -> Result<(), ServiceError> {
     let val = serde_json::to_vec(dep)?;
-    store.put(&format!("/deployments/{model_uid}"), val, None).await?;
+    store
+        .put(&format!("/deployments/{model_uid}"), val, None)
+        .await?;
     Ok(())
 }
 
-pub async fn put_model_template(store: &dyn MetaStore, id: &str, tpl: &ModelTemplate) -> Result<(), ServiceError> {
+pub async fn put_model_template(
+    store: &dyn MetaStore,
+    id: &str,
+    tpl: &ModelTemplate,
+) -> Result<(), ServiceError> {
     let val = serde_json::to_vec(tpl)?;
     store.put(&format!("/templates/{id}"), val, None).await?;
     Ok(())
@@ -427,7 +466,9 @@ pub async fn create_model(
     let uid = match req.model_uid {
         Some(ref uid) => {
             if !is_valid_model_uid(uid) {
-                return Err(ServiceError::BadRequest("model_uid must match [a-z0-9][a-z0-9-]* and be at most 63 chars".to_string()));
+                return Err(ServiceError::BadRequest(
+                    "model_uid must match [a-z0-9][a-z0-9-]* and be at most 63 chars".to_string(),
+                ));
             }
             uid.clone()
         }
@@ -435,7 +476,9 @@ pub async fn create_model(
     };
 
     if store.get(&format!("/models/{uid}/spec")).await?.is_some() {
-        return Err(ServiceError::Conflict(format!("model with uid '{uid}' already exists")));
+        return Err(ServiceError::Conflict(format!(
+            "model with uid '{uid}' already exists"
+        )));
     }
 
     let now = now_ms();
@@ -579,7 +622,10 @@ pub async fn list_models(
     Ok(views)
 }
 
-pub async fn get_model_detail(store: &dyn MetaStore, model_uid: &str) -> Result<ModelDetailView, ServiceError> {
+pub async fn get_model_detail(
+    store: &dyn MetaStore,
+    model_uid: &str,
+) -> Result<ModelDetailView, ServiceError> {
     let spec = get_model_spec(store, model_uid).await?;
 
     let deployment = get_model_deployment(store, model_uid).await?;
@@ -754,7 +800,10 @@ pub async fn delete_model(store: &dyn MetaStore, model_uid: &str) -> Result<usiz
             let _ = store.delete(&k).await;
         }
     }
-    if let Ok(kvs) = store.list_prefix(&format!("/download_progress/{model_uid}/")).await {
+    if let Ok(kvs) = store
+        .list_prefix(&format!("/download_progress/{model_uid}/"))
+        .await
+    {
         for (k, _, _) in kvs {
             let _ = store.delete(&k).await;
         }
@@ -809,7 +858,10 @@ pub async fn start_model(
     Ok(deployment)
 }
 
-pub async fn stop_model(store: &dyn MetaStore, model_uid: &str) -> Result<ModelDeployment, ServiceError> {
+pub async fn stop_model(
+    store: &dyn MetaStore,
+    model_uid: &str,
+) -> Result<ModelDeployment, ServiceError> {
     // Verify spec exists
     get_model_spec(store, model_uid).await?;
 
@@ -846,7 +898,11 @@ pub async fn scale_model(
 ) -> Result<ModelDeployment, ServiceError> {
     let mut dep = match get_model_deployment(store, model_uid).await? {
         Some(d) => d,
-        None => return Err(ServiceError::NotFound("deployment not found (model may not be started)".to_string())),
+        None => {
+            return Err(ServiceError::NotFound(
+                "deployment not found (model may not be started)".to_string(),
+            ))
+        }
     };
 
     dep.replicas = req.replicas;
@@ -880,7 +936,9 @@ pub async fn create_template(
         .unwrap_or_else(|| format!("tpl-{}", Uuid::new_v4()));
 
     if store.get(&format!("/templates/{tid}")).await?.is_some() {
-        return Err(ServiceError::Conflict(format!("template with id '{tid}' already exists")));
+        return Err(ServiceError::Conflict(format!(
+            "template with id '{tid}' already exists"
+        )));
     }
 
     let now = now_ms();
@@ -968,7 +1026,9 @@ pub async fn deploy_template(
         .unwrap_or_else(|| generate_model_uid(&tpl.model_name));
 
     if store.get(&format!("/models/{uid}/spec")).await?.is_some() {
-        return Err(ServiceError::Conflict(format!("model with uid '{uid}' already exists")));
+        return Err(ServiceError::Conflict(format!(
+            "model with uid '{uid}' already exists"
+        )));
     }
 
     let now = now_ms();

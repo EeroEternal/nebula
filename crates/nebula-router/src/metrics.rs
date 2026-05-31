@@ -60,9 +60,7 @@ impl Histogram {
             self.count.load(Ordering::Relaxed)
         ));
         let sum = self.sum.lock().map(|s| *s).unwrap_or(0.0);
-        out.push_str(&format!(
-            "{name}_sum{{model_uid=\"{model_uid}\"}} {sum}\n"
-        ));
+        out.push_str(&format!("{name}_sum{{model_uid=\"{model_uid}\"}} {sum}\n"));
         out.push_str(&format!(
             "{name}_count{{model_uid=\"{model_uid}\"}} {}\n",
             self.count.load(Ordering::Relaxed)
@@ -198,11 +196,15 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     body.push_str("# HELP nebula_router_upstream_error_total Upstream errors by kind.\n# TYPE nebula_router_upstream_error_total counter\n");
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"connect\"}} {}\n",
-        st.metrics.upstream_error_connect_total.load(Ordering::Relaxed),
+        st.metrics
+            .upstream_error_connect_total
+            .load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"timeout\"}} {}\n",
-        st.metrics.upstream_error_timeout_total.load(Ordering::Relaxed),
+        st.metrics
+            .upstream_error_timeout_total
+            .load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"upstream_5xx\"}} {}\n",
@@ -210,7 +212,9 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     ));
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"other\"}} {}\n",
-        st.metrics.upstream_error_other_total.load(Ordering::Relaxed),
+        st.metrics
+            .upstream_error_other_total
+            .load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_xtrace_query_errors_total xtrace query errors in stats sync loop.\n\
@@ -256,7 +260,9 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     ));
 
     // Per-model counters
-    body.push_str("# HELP nebula_route_total Per-model request count.\n# TYPE nebula_route_total counter\n");
+    body.push_str(
+        "# HELP nebula_route_total Per-model request count.\n# TYPE nebula_route_total counter\n",
+    );
     for entry in st.metrics.model_counters.iter() {
         let model = entry.key();
         let c = entry.value();
@@ -277,18 +283,29 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     // E2E latency histograms
     body.push_str("# HELP nebula_route_latency_seconds E2E request latency.\n# TYPE nebula_route_latency_seconds histogram\n");
     for entry in st.metrics.e2e_latency.iter() {
-        body.push_str(&entry.value().format_prometheus("nebula_route_latency_seconds", entry.key()));
+        body.push_str(
+            &entry
+                .value()
+                .format_prometheus("nebula_route_latency_seconds", entry.key()),
+        );
     }
 
     // TTFT histograms
     body.push_str("# HELP nebula_route_ttft_seconds Time to first token (streaming only).\n# TYPE nebula_route_ttft_seconds histogram\n");
     for entry in st.metrics.ttft.iter() {
-        body.push_str(&entry.value().format_prometheus("nebula_route_ttft_seconds", entry.key()));
+        body.push_str(
+            &entry
+                .value()
+                .format_prometheus("nebula_route_ttft_seconds", entry.key()),
+        );
     }
 
     (
         axum::http::StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }

@@ -65,16 +65,51 @@ async fn scan_and_report(
     let ts = now_ms();
 
     // 1. Scan HuggingFace Hub cache layout
-    scan_hf_cache(store, node_id, base, ts, &mut found_keys, &mut total_cache_bytes, &mut model_count).await;
+    scan_hf_cache(
+        store,
+        node_id,
+        base,
+        ts,
+        &mut found_keys,
+        &mut total_cache_bytes,
+        &mut model_count,
+    )
+    .await;
 
     // 2. Scan ModelScope cache layout
-    scan_modelscope_cache(store, node_id, base, ts, &mut found_keys, &mut total_cache_bytes, &mut model_count).await;
+    scan_modelscope_cache(
+        store,
+        node_id,
+        base,
+        ts,
+        &mut found_keys,
+        &mut total_cache_bytes,
+        &mut model_count,
+    )
+    .await;
 
     // 3. Scan direct paths
-    scan_direct_paths(store, node_id, base, ts, &mut found_keys, &mut total_cache_bytes, &mut model_count).await;
+    scan_direct_paths(
+        store,
+        node_id,
+        base,
+        ts,
+        &mut found_keys,
+        &mut total_cache_bytes,
+        &mut model_count,
+    )
+    .await;
 
     // 4. Report disk status
-    report_disk_status(store, node_id, model_dir, total_cache_bytes, model_count, ts).await;
+    report_disk_status(
+        store,
+        node_id,
+        model_dir,
+        total_cache_bytes,
+        model_count,
+        ts,
+    )
+    .await;
 
     // 5. Clean stale entries
     clean_stale_entries(store, node_id, &found_keys).await;
@@ -143,7 +178,8 @@ async fn purge_model_cache_files(
 ) -> anyhow::Result<usize> {
     let prefix = format!("/model_cache/{node_id}/");
     let entries = store.list_prefix(&prefix).await?;
-    let model_dir_canon = std::fs::canonicalize(model_dir).unwrap_or_else(|_| Path::new(model_dir).to_path_buf());
+    let model_dir_canon =
+        std::fs::canonicalize(model_dir).unwrap_or_else(|_| Path::new(model_dir).to_path_buf());
 
     let mut removed = 0usize;
     for (key, val, _) in entries {
@@ -163,9 +199,7 @@ async fn purge_model_cache_files(
                 .next()
                 .map(|tail| tail == model_name)
                 .unwrap_or(false);
-        let matches_path = model_path
-            .map(|p| p == entry.cache_path)
-            .unwrap_or(false);
+        let matches_path = model_path.map(|p| p == entry.cache_path).unwrap_or(false);
         if !matches_name && !matches_path {
             continue;
         }
@@ -201,8 +235,6 @@ async fn purge_model_cache_files(
 
     Ok(removed)
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Scan helpers
@@ -410,11 +442,7 @@ async fn write_cache_entry(
 }
 
 /// Clean stale cache entries from etcd that no longer exist on disk.
-async fn clean_stale_entries(
-    store: &EtcdMetaStore,
-    node_id: &str,
-    found_keys: &HashSet<String>,
-) {
+async fn clean_stale_entries(store: &EtcdMetaStore, node_id: &str, found_keys: &HashSet<String>) {
     let prefix = format!("/model_cache/{}/", node_id);
     let existing = match store.list_prefix(&prefix).await {
         Ok(kvs) => kvs,
@@ -549,9 +577,27 @@ async fn report_disk_status(
 
     // Check thresholds and emit alerts
     if usage_pct > DISK_CRITICAL_THRESHOLD {
-        emit_disk_alert(store, node_id, model_dir, AlertType::DiskCritical, usage_pct, available_bytes, ts).await;
+        emit_disk_alert(
+            store,
+            node_id,
+            model_dir,
+            AlertType::DiskCritical,
+            usage_pct,
+            available_bytes,
+            ts,
+        )
+        .await;
     } else if usage_pct > DISK_WARNING_THRESHOLD {
-        emit_disk_alert(store, node_id, model_dir, AlertType::DiskWarning, usage_pct, available_bytes, ts).await;
+        emit_disk_alert(
+            store,
+            node_id,
+            model_dir,
+            AlertType::DiskWarning,
+            usage_pct,
+            available_bytes,
+            ts,
+        )
+        .await;
     }
 }
 
@@ -689,7 +735,11 @@ pub async fn download_model_if_needed(
 
     if !matches!(model_source, ModelSource::Local) {
         if let Err(e) = std::fs::create_dir_all(effective_model_dir) {
-            anyhow::bail!("failed to create model directory '{}': {}", effective_model_dir, e);
+            anyhow::bail!(
+                "failed to create model directory '{}': {}",
+                effective_model_dir,
+                e
+            );
         }
 
         // Unified cache check: look in both HF and ModelScope caches regardless of source.
@@ -716,7 +766,13 @@ pub async fn download_model_if_needed(
         ModelSource::HuggingFace => {
             // Try HuggingFace first, fallback to ModelScope on failure
             match download_hf_model(
-                store, node_id, model_uid, model_name, effective_model_dir, replica_id, hf_endpoint,
+                store,
+                node_id,
+                model_uid,
+                model_name,
+                effective_model_dir,
+                replica_id,
+                hf_endpoint,
             )
             .await
             {
@@ -727,13 +783,19 @@ pub async fn download_model_if_needed(
                         "HuggingFace download failed, falling back to ModelScope"
                     );
                     download_modelscope_model(
-                        store, node_id, model_uid, model_name, effective_model_dir, replica_id,
+                        store,
+                        node_id,
+                        model_uid,
+                        model_name,
+                        effective_model_dir,
+                        replica_id,
                     )
                     .await
                     .map_err(|ms_err| {
                         anyhow::anyhow!(
                             "both download sources failed — HuggingFace: {}; ModelScope: {}",
-                            hf_err, ms_err
+                            hf_err,
+                            ms_err
                         )
                     })
                 }
@@ -742,7 +804,12 @@ pub async fn download_model_if_needed(
         ModelSource::ModelScope => {
             // Try ModelScope first, fallback to HuggingFace on failure
             match download_modelscope_model(
-                store, node_id, model_uid, model_name, effective_model_dir, replica_id,
+                store,
+                node_id,
+                model_uid,
+                model_name,
+                effective_model_dir,
+                replica_id,
             )
             .await
             {
@@ -753,13 +820,20 @@ pub async fn download_model_if_needed(
                         "ModelScope download failed, falling back to HuggingFace"
                     );
                     download_hf_model(
-                        store, node_id, model_uid, model_name, effective_model_dir, replica_id, hf_endpoint,
+                        store,
+                        node_id,
+                        model_uid,
+                        model_name,
+                        effective_model_dir,
+                        replica_id,
+                        hf_endpoint,
                     )
                     .await
                     .map_err(|hf_err| {
                         anyhow::anyhow!(
                             "both download sources failed — ModelScope: {}; HuggingFace: {}",
-                            ms_err, hf_err
+                            ms_err,
+                            hf_err
                         )
                     })
                 }
@@ -853,8 +927,17 @@ async fn download_hf_model(
 
     // Write initial progress
     write_download_progress(
-        store, &progress_key, model_uid, replica_id, node_id, model_name,
-        DownloadPhase::Downloading, 0, 0, 0, 0,
+        store,
+        &progress_key,
+        model_uid,
+        replica_id,
+        node_id,
+        model_name,
+        DownloadPhase::Downloading,
+        0,
+        0,
+        0,
+        0,
     )
     .await;
 
@@ -885,9 +968,17 @@ async fn download_hf_model(
                 (0, 0)
             };
             write_download_progress(
-                &monitor_store, &monitor_key, &monitor_model_uid, replica_id,
-                &monitor_node_id, &monitor_model_name,
-                DownloadPhase::Downloading, 0, downloaded, file_count, 0,
+                &monitor_store,
+                &monitor_key,
+                &monitor_model_uid,
+                replica_id,
+                &monitor_node_id,
+                &monitor_model_name,
+                DownloadPhase::Downloading,
+                0,
+                downloaded,
+                file_count,
+                0,
             )
             .await;
         }
@@ -917,8 +1008,17 @@ async fn download_hf_model(
                 cancel.store(true, Ordering::Relaxed);
                 // Write completion progress
                 write_download_progress(
-                    store, &progress_key, model_uid, replica_id, node_id, model_name,
-                    DownloadPhase::Complete, 0, 0, 0, 0,
+                    store,
+                    &progress_key,
+                    model_uid,
+                    replica_id,
+                    node_id,
+                    model_name,
+                    DownloadPhase::Complete,
+                    0,
+                    0,
+                    0,
+                    0,
                 )
                 .await;
                 // Find the cached path
@@ -947,8 +1047,17 @@ async fn download_hf_model(
     cancel.store(true, Ordering::Relaxed);
     // Write failure progress
     write_download_progress(
-        store, &progress_key, model_uid, replica_id, node_id, model_name,
-        DownloadPhase::Failed, 0, 0, 0, 0,
+        store,
+        &progress_key,
+        model_uid,
+        replica_id,
+        node_id,
+        model_name,
+        DownloadPhase::Failed,
+        0,
+        0,
+        0,
+        0,
     )
     .await;
     anyhow::bail!(
@@ -982,8 +1091,17 @@ async fn download_modelscope_model(
 
     // Write initial progress
     write_download_progress(
-        store, &progress_key, model_uid, replica_id, node_id, model_name,
-        DownloadPhase::Downloading, 0, 0, 0, 0,
+        store,
+        &progress_key,
+        model_uid,
+        replica_id,
+        node_id,
+        model_name,
+        DownloadPhase::Downloading,
+        0,
+        0,
+        0,
+        0,
     )
     .await;
 
@@ -1013,9 +1131,17 @@ async fn download_modelscope_model(
                 (0, 0)
             };
             write_download_progress(
-                &monitor_store, &monitor_key, &monitor_model_uid, replica_id,
-                &monitor_node_id, &monitor_model_name,
-                DownloadPhase::Downloading, 0, downloaded, file_count, 0,
+                &monitor_store,
+                &monitor_key,
+                &monitor_model_uid,
+                replica_id,
+                &monitor_node_id,
+                &monitor_model_name,
+                DownloadPhase::Downloading,
+                0,
+                downloaded,
+                file_count,
+                0,
             )
             .await;
         }
@@ -1043,8 +1169,17 @@ async fn download_modelscope_model(
             Ok(output) if output.status.success() => {
                 cancel.store(true, Ordering::Relaxed);
                 write_download_progress(
-                    store, &progress_key, model_uid, replica_id, node_id, model_name,
-                    DownloadPhase::Complete, 0, 0, 0, 0,
+                    store,
+                    &progress_key,
+                    model_uid,
+                    replica_id,
+                    node_id,
+                    model_name,
+                    DownloadPhase::Complete,
+                    0,
+                    0,
+                    0,
+                    0,
                 )
                 .await;
                 if let Some(path) = find_modelscope_cached_model(model_name, model_dir) {
@@ -1069,8 +1204,17 @@ async fn download_modelscope_model(
 
     cancel.store(true, Ordering::Relaxed);
     write_download_progress(
-        store, &progress_key, model_uid, replica_id, node_id, model_name,
-        DownloadPhase::Failed, 0, 0, 0, 0,
+        store,
+        &progress_key,
+        model_uid,
+        replica_id,
+        node_id,
+        model_name,
+        DownloadPhase::Failed,
+        0,
+        0,
+        0,
+        0,
     )
     .await;
     anyhow::bail!(

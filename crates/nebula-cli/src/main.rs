@@ -24,11 +24,7 @@ use crate::output::{
 
 /// Build a v2 API URL from the gateway base URL.
 fn v2_url(gateway_url: &str, path: &str) -> String {
-    format!(
-        "{}/v1/admin/v2{}",
-        gateway_url.trim_end_matches('/'),
-        path
-    )
+    format!("{}/v1/admin/v2{}", gateway_url.trim_end_matches('/'), path)
 }
 
 #[tokio::main]
@@ -109,22 +105,23 @@ async fn main() -> Result<()> {
                 model_uid,
                 replicas,
             } => {
-                let url =
-                    v2_url(&args.gateway_url, &format!("/models/{}/start", model_uid));
+                let url = v2_url(&args.gateway_url, &format!("/models/{}/start", model_uid));
                 let body = serde_json::json!({ "replicas": replicas });
                 let resp = auth(client.post(&url), token.as_ref())
                     .json(&body)
                     .send()
                     .await?;
                 if resp.status().is_success() {
-                    println!("✓ Model '{}' starting with {} replicas", model_uid, replicas);
+                    println!(
+                        "✓ Model '{}' starting with {} replicas",
+                        model_uid, replicas
+                    );
                 } else {
                     eprintln!("✗ Failed to start model: {}", resp.text().await?);
                 }
             }
             ModelCommand::Stop { model_uid } => {
-                let url =
-                    v2_url(&args.gateway_url, &format!("/models/{}/stop", model_uid));
+                let url = v2_url(&args.gateway_url, &format!("/models/{}/stop", model_uid));
                 let resp = auth(client.post(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     println!("✓ Model '{}' stopped", model_uid);
@@ -133,8 +130,7 @@ async fn main() -> Result<()> {
                 }
             }
             ModelCommand::Delete { model_uid } => {
-                let url =
-                    v2_url(&args.gateway_url, &format!("/models/{}", model_uid));
+                let url = v2_url(&args.gateway_url, &format!("/models/{}", model_uid));
                 let resp = auth(client.delete(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     println!("✓ Model '{}' deleted", model_uid);
@@ -146,18 +142,14 @@ async fn main() -> Result<()> {
                 model_uid,
                 replicas,
             } => {
-                let url =
-                    v2_url(&args.gateway_url, &format!("/models/{}/scale", model_uid));
+                let url = v2_url(&args.gateway_url, &format!("/models/{}/scale", model_uid));
                 let body = serde_json::json!({ "replicas": replicas });
                 let resp = auth(client.put(&url), token.as_ref())
                     .json(&body)
                     .send()
                     .await?;
                 if resp.status().is_success() {
-                    println!(
-                        "✓ Model '{}' scaled to {} replicas",
-                        model_uid, replicas
-                    );
+                    println!("✓ Model '{}' scaled to {} replicas", model_uid, replicas);
                 } else {
                     eprintln!("✗ Failed to scale model: {}", resp.text().await?);
                 }
@@ -275,7 +267,10 @@ async fn main() -> Result<()> {
                     .send()
                     .await?;
                 if resp.status().is_success() {
-                    println!("✓ Template '{}' deployed with {} replicas", template_id, replicas);
+                    println!(
+                        "✓ Template '{}' deployed with {} replicas",
+                        template_id, replicas
+                    );
                     println!("{}", resp.text().await?);
                 } else {
                     eprintln!("✗ Failed to deploy template: {}", resp.text().await?);
@@ -302,10 +297,7 @@ async fn main() -> Result<()> {
         Command::Cache { subcommand } => match subcommand {
             CacheCommand::List { node } => {
                 if let Some(node_id) = node {
-                    let url = v2_url(
-                        &args.gateway_url,
-                        &format!("/nodes/{}/cache", node_id),
-                    );
+                    let url = v2_url(&args.gateway_url, &format!("/nodes/{}/cache", node_id));
                     let resp = auth(client.get(&url), token.as_ref()).send().await?;
                     if resp.status().is_success() {
                         let data: serde_json::Value = resp.json().await?;
@@ -384,8 +376,7 @@ async fn main() -> Result<()> {
                     }
                 }
             } else {
-                let mut url =
-                    format!("{}/v1/admin/logs", args.gateway_url.trim_end_matches('/'));
+                let mut url = format!("{}/v1/admin/logs", args.gateway_url.trim_end_matches('/'));
                 if let Some(n) = lines {
                     url = format!("{}?lines={}", url, n);
                 }
@@ -400,8 +391,16 @@ async fn main() -> Result<()> {
             max_tokens,
         } => {
             let base = args.gateway_url.trim_end_matches('/').to_string();
-            chat::run_chat(&client, &base, token.as_ref(), model, system, message, max_tokens)
-                .await?;
+            chat::run_chat(
+                &client,
+                &base,
+                token.as_ref(),
+                model,
+                system,
+                message,
+                max_tokens,
+            )
+            .await?;
         }
         Command::Scale { id, replicas } => {
             let url = format!(
@@ -437,10 +436,7 @@ async fn main() -> Result<()> {
                 .send()
                 .await?;
             if resp.status().is_success() {
-                println!(
-                    "✓ Draining endpoint {}/replica-{}",
-                    model_uid, replica_id
-                );
+                println!("✓ Draining endpoint {}/replica-{}", model_uid, replica_id);
             } else {
                 eprintln!("✗ Failed to drain: {}", resp.text().await?);
             }

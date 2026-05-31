@@ -254,9 +254,7 @@ pub async fn proxy_v2(
 ) -> Response {
     let bff_base = st.bff_url.trim_end_matches('/');
     let uri_path = req.uri().path().to_string();
-    let rest = uri_path
-        .strip_prefix("/v2")
-        .unwrap_or(&uri_path);
+    let rest = uri_path.strip_prefix("/v2").unwrap_or(&uri_path);
     let uri_query = req
         .uri()
         .query()
@@ -505,7 +503,11 @@ pub async fn admin_logs_stream(
                 Ok(_) => {
                     let trimmed = line.trim_end();
                     if !trimmed.is_empty() {
-                        if tx.send(Ok(Event::default().data(trimmed.to_string()))).await.is_err() {
+                        if tx
+                            .send(Ok(Event::default().data(trimmed.to_string())))
+                            .await
+                            .is_err()
+                        {
                             // Client disconnected
                             break;
                         }
@@ -777,11 +779,7 @@ pub async fn admin_drain_endpoint(
 
     use nebula_common::EndpointStatus;
     if ep.status == EndpointStatus::Draining {
-        return (
-            StatusCode::OK,
-            Json(json!({"status": "already_draining"})),
-        )
-            .into_response();
+        return (StatusCode::OK, Json(json!({"status": "already_draining"}))).into_response();
     }
 
     ep.status = EndpointStatus::Draining;
@@ -934,11 +932,7 @@ pub async fn admin_delete_image(
             }
         }
     }
-    (
-        StatusCode::OK,
-        Json(json!({"id": id, "status": "deleted"})),
-    )
-        .into_response()
+    (StatusCode::OK, Json(json!({"id": id, "status": "deleted"}))).into_response()
 }
 
 pub async fn admin_list_image_status(

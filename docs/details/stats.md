@@ -1,68 +1,71 @@
 ## Engine Stats Pipeline 是什么
 
-简单说，就是**把 vLLM 引擎内部的运行指标，从引擎进程里"搬运"到 Nebula 控制面中**，让 Router 和 Scheduler 能基于真实数据做决策。
+Engine Stats Pipeline 是把推理引擎内部运行指标搬到 Nebula 控制面，让 Router 和 Scheduler 能基于真实负载做决策。
 
-### 当前的问题
+## 当前代码状态
 
-现在 Nebula 的数据流是这样的：
+当前 Node 已经会在 heartbeat loop 中对运行中的 engine 做健康检查和 stats scrape，并将关键指标推送到 xtrace：
 
-```
-vLLM 引擎进程
-  └── 内部有丰富的指标（KV cache 使用率、prefix cache 命中率、正在处理的请求数...）
-  └── 通过 GET /metrics 暴露为 Prometheus 格式
-  └── 但是没有人来读它 ❌
+- `pending_requests`
+- `kv_cache_usage`
+- `prefix_cache_hit_rate`
+- GPU memory、temperature、utilization
 
+Router 侧也已经具备基于 stats 的路由能力，包括 `LeastKvCache`、`PrefixCacheAware`、stale stats 过滤和 overloading admission control。
+
+但当前还没有完全收敛到“Node 写 etcd `/stats/`，Router/Scheduler watch `/stats/`”这条控制面热路径。也就是说，观测链路已经部分可用，控制面实时决策链路仍需定稿。
+
+## 推荐目标架构
+
+控制面实时状态和历史观测数据应分开：
+
+```text
+vLLM /metrics
+  └── scrape
 Node Daemon
-  └── heartbeat 只上报 GPU 显存（nvidia-smi）
-  └── 不知道引擎内部状态
+  ├── etcd /stats/{model_uid}/{replica_id}   # 最新状态，带 TTL/lease，供实时决策
+  └── xtrace / Prometheus                    # 历史观测、面板、告警
 
-Router
-  └── 路由决策只看 pending_requests（本地计数器，不是引擎真实值）
-  └── EndpointStats 里的 kv_cache_used_bytes、prefix_cache_hit_rate 全是空的
-
-Scheduler
-  └── 只看 GPU 显存决定放置
-  └── 不知道引擎是否过载
+Router / Scheduler
+  └── watch/list /stats/                     # 路由、过载保护、扩缩容
 ```
 
-**引擎有数据，但控制面看不到。** 这就是"缺数据"的本质。
+## `/stats/` 数据契约
 
-### Pipeline 做什么
+`/stats/{model_uid}/{replica_id}` 存储 `EndpointStats`，只保存最新状态，必须带 TTL 或 lease，避免失效副本留下脏数据。
 
-建立一条从引擎到控制面的数据管道：
+关键字段：
 
-```
-vLLM /metrics ──scrape──→ Node Daemon ──etcd──→ Router / Scheduler
-                                                    ↓
-                                              路由决策 / 扩缩容决策
-```
+| 字段 | 来源 | 用途 |
+|------|------|------|
+| `pending_requests` | engine metrics 或本地代理计数 | least-pending 路由、扩容判断 |
+| `kv_cache_used_bytes` | engine metrics | KV-aware 路由、过载保护 |
+| `kv_cache_free_bytes` | engine metrics | 计算 KV 使用率 |
+| `prefix_cache_hit_rate` | engine metrics | prefix-cache-aware 路由 |
+| `last_updated_ms` | Node 写入时间 | stale stats 过滤 |
 
-具体三步：
+## 消费规则
 
-**① Node 侧采集（scrape）**
+Router：
 
-Node Daemon 的 heartbeat 循环（每 3 秒一次）中，对每个正在运行的引擎发一个 `GET {base_url}/metrics`，拿到 Prometheus 文本格式的指标，解析出关键字段：
+- watch `/stats/` 并同步到本地 `Router.stats`。
+- stats 超过 `NEBULA_ROUTE_STATS_MAX_AGE_MS` 后视为 stale。
+- 有 fresh stats 时，应降低或剔除无 stats 的候选。
+- 所有候选 KV 使用率超过阈值时返回 429。
 
-| vLLM 指标名 | 含义 | 对应 EndpointStats 字段 |
-|---|---|---|
-| `vllm:num_requests_waiting` | 排队中的请求数 | `pending_requests` |
-| `vllm:gpu_cache_usage_perc` | KV cache 使用百分比 | `kv_cache_used_bytes` / `kv_cache_free_bytes` |
-| `vllm:prefix_cache_hit_rate` | 前缀缓存命中率 | `prefix_cache_hit_rate` |
+Scheduler：
 
-**② 写入 etcd（传输）**
+- list/watch `/stats/`，用于扩缩容和健康自愈辅助判断。
+- 不应依赖 xtrace 查询结果作为唯一扩缩容信号。
 
-采集到的数据填充到已有的 `EndpointStats` 结构体中，序列化后写入 etcd 的 `/stats/{model_uid}/{replica_id}` 路径。这样数据就进入了 Nebula 的元数据层。
+观测系统：
 
-**③ Router 侧同步（消费）**
+- xtrace/Prometheus 保存历史指标。
+- 前端面板通过观测后端查询趋势，不直接读取 etcd 作为历史库。
 
-Router 的 sync 模块（`sync.rs`）已经在 watch `/endpoints/` 前缀了，只需增加一个 watch `/stats/` 前缀的逻辑，把数据同步到 `Router.stats` 这个 DashMap 中。这样路由决策时就能读到真实的引擎状态。
+## 下一步
 
-### 有了这条管道之后能做什么
-
-| 消费方 | 能做的事 |
-|--------|---------|
-| **Router** | LeastKvCache 路由（选 KV cache 最空闲的 endpoint）、PrefixCacheAware 路由（选缓存命中率最高的）、Admission Control（全部过载时拒绝请求） |
-| **Scheduler** | 检测引擎是否真正健康（不只看心跳）、基于负载决定是否扩缩容 |
-| **前端/CLI** | 展示每个模型实例的真实运行状态（不只是"Ready"） |
-
-这就是为什么说它是"一切优化的前提"——**没有数据，策略再好也是盲人摸象**。
+1. Node 在 scrape stats 后写入 etcd `/stats/{model_uid}/{replica_id}`。
+2. Router 增加 `/stats/` watch loop，优先使用 etcd 最新 stats。
+3. Scheduler reconcile 读取 `/stats/`，xtrace 只作为历史观测与辅助查询。
+4. 更新测试，覆盖 stale stats、TTL 过期、stats 缺失降级和全过载 429。

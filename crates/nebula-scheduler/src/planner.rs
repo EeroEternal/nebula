@@ -226,8 +226,7 @@ pub async fn build_plan_multi(
     let mut assignments = Vec::with_capacity(replicas as usize);
 
     for replica_id in 0..replicas {
-        let (node_id, gpu_indices) =
-            select_node_and_gpus(store, req, &used_gpus).await?;
+        let (node_id, gpu_indices) = select_node_and_gpus(store, req, &used_gpus).await?;
 
         let port = allocate_port(default_port, &used_ports);
         used_ports.insert(port);

@@ -100,7 +100,10 @@ pub fn print_model_detail_v2(model: &Value) {
     println!("\n=== Model Detail ===\n");
     println!("  UID:      {}", model["model_uid"].as_str().unwrap_or(""));
     println!("  Name:     {}", model["model_name"].as_str().unwrap_or(""));
-    println!("  State:    {}", model["state"].as_str().unwrap_or("unknown"));
+    println!(
+        "  State:    {}",
+        model["state"].as_str().unwrap_or("unknown")
+    );
     println!(
         "  Engine:   {}",
         model["engine_type"].as_str().unwrap_or("vllm")
@@ -119,10 +122,7 @@ pub fn print_model_detail_v2(model: &Value) {
     }
 
     if let Some(cache) = model.get("cache") {
-        println!(
-            "  Cached:   {}",
-            cache["cached"].as_bool().unwrap_or(false)
-        );
+        println!("  Cached:   {}", cache["cached"].as_bool().unwrap_or(false));
         if let Some(pct) = cache.get("progress_percent") {
             println!("  Cache %:  {}%", pct.as_f64().unwrap_or(0.0));
         }
@@ -131,10 +131,7 @@ pub fn print_model_detail_v2(model: &Value) {
     if let Some(endpoints) = model.get("endpoints").and_then(|e| e.as_array()) {
         if !endpoints.is_empty() {
             println!("\n  [Endpoints]");
-            println!(
-                "  {:<10} {:<12} {:<30}",
-                "Replica", "Status", "URL"
-            );
+            println!("  {:<10} {:<12} {:<30}", "Replica", "Status", "URL");
             for ep in endpoints {
                 println!(
                     "  {:<10} {:<12} {:<30}",
@@ -222,10 +219,7 @@ pub fn print_node_cache(data: &Value) {
 
 pub fn print_disk_status(data: &Value) {
     println!("\n=== Disk Status ===\n");
-    println!(
-        "{}",
-        serde_json::to_string_pretty(data).unwrap_or_default()
-    );
+    println!("{}", serde_json::to_string_pretty(data).unwrap_or_default());
     println!();
 }
 

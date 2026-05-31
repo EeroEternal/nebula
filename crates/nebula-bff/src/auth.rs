@@ -1,13 +1,7 @@
 use std::convert::Infallible;
 
 use argon2::{password_hash::SaltString, Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use axum::{
-    body::Body,
-    extract::State,
-    http::Request,
-    middleware::Next,
-    response::Response,
-};
+use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use chrono::{DateTime, Utc};
 use rand::rngs::OsRng;
 use sqlx::Row;
@@ -122,10 +116,12 @@ pub async fn initialize_auth_schema(state: &AppState) -> anyhow::Result<()> {
         .execute(&state.db)
         .await?;
 
-        sqlx::query("INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING")
-            .bind(admin_id)
-            .execute(&state.db)
-            .await?;
+        sqlx::query(
+            "INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+        )
+        .bind(admin_id)
+        .execute(&state.db)
+        .await?;
     }
 
     Ok(())

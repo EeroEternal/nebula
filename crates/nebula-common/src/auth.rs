@@ -58,9 +58,23 @@ pub struct RateWindow {
 
 // ── Environment parsing ─────────────────────────────────────────────
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 pub fn parse_auth_from_env() -> AuthConfig {
     let tokens_raw = std::env::var("NEBULA_AUTH_TOKENS").ok();
-    let enabled = tokens_raw.is_some();
+    let disabled_for_dev =
+        env_flag_enabled("NEBULA_AUTH_DISABLED") || env_flag_enabled("NEBULA_DEV_AUTH_DISABLED");
+    let enabled = !disabled_for_dev;
 
     let mut tokens = HashMap::new();
     if let Some(raw) = tokens_raw {
@@ -91,8 +105,22 @@ pub fn parse_auth_from_env() -> AuthConfig {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(120);
 
-    if !enabled {
-        tracing::warn!("auth disabled: NEBULA_AUTH_TOKENS not set");
+    if disabled_for_dev {
+        tracing::warn!(
+            auth_mode = "disabled_for_dev",
+            "auth disabled by explicit environment flag; do not use this in production"
+        );
+    } else if tokens.is_empty() {
+        tracing::error!(
+            auth_mode = "enabled",
+            "auth enabled but NEBULA_AUTH_TOKENS has no valid entries; protected routes will reject requests"
+        );
+    } else {
+        tracing::info!(
+            auth_mode = "enabled",
+            token_count = tokens.len(),
+            "auth enabled"
+        );
     }
 
     AuthConfig {
@@ -212,4 +240,57 @@ pub fn too_many_requests() -> Response {
         Json(serde_json::json!({"error": {"message": "rate limited"}})),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn clear_auth_env() {
+        std::env::remove_var("NEBULA_AUTH_TOKENS");
+        std::env::remove_var("NEBULA_AUTH_DISABLED");
+        std::env::remove_var("NEBULA_DEV_AUTH_DISABLED");
+        std::env::remove_var("NEBULA_AUTH_RATE_LIMIT_PER_MINUTE");
+    }
+
+    #[test]
+    fn auth_defaults_to_enabled_without_tokens() {
+        let _guard = env_lock().lock().unwrap();
+        clear_auth_env();
+
+        let auth = parse_auth_from_env();
+
+        assert!(auth.enabled);
+        assert!(auth.tokens.is_empty());
+    }
+
+    #[test]
+    fn explicit_disable_turns_auth_off_for_dev() {
+        let _guard = env_lock().lock().unwrap();
+        clear_auth_env();
+        std::env::set_var("NEBULA_AUTH_DISABLED", "true");
+
+        let auth = parse_auth_from_env();
+
+        assert!(!auth.enabled);
+    }
+
+    #[test]
+    fn parses_valid_tokens_when_enabled() {
+        let _guard = env_lock().lock().unwrap();
+        clear_auth_env();
+        std::env::set_var("NEBULA_AUTH_TOKENS", "admin-token:admin,view-token:viewer");
+
+        let auth = parse_auth_from_env();
+
+        assert!(auth.enabled);
+        assert_eq!(auth.tokens.get("admin-token"), Some(&Role::Admin));
+        assert_eq!(auth.tokens.get("view-token"), Some(&Role::Viewer));
+    }
 }

@@ -1,113 +1,158 @@
-# Nebula 架构优化建议
+# Nebula 架构优化建议（更新版）
 
 ## 总体判断
 
-Nebula 当前的总体方向是合理的：Rust 负责控制面，Python/推理引擎负责执行面，etcd 作为权威状态源，Scheduler 写入期望状态，Node 通过 watch + reconcile 对齐实际状态，Router 基于 endpoint 状态进行请求路由。
+Nebula 当前架构方向合理，且比早期分析时更接近可运行闭环：`cargo check --workspace` 已通过，Gateway、Router、Scheduler、Node、BFF 都具备基本服务能力。旧版文档中关于 Gateway 编译失败、缺少基础 metrics、Router 无熔断/重试等结论已经部分过期。
 
-主要风险不在大方向，而在部分边界开始重叠，尤其是 Gateway、Router 与 UniGateway 的职责关系尚未收敛。当前工作树中 `nebula-gateway` 也处于集成未闭合状态，已经影响整个 workspace 编译。
+当前主要风险不再是“缺少组件”，而是几个关键边界和热路径还没有完全收敛：
 
-## 优先级建议
+- Gateway、Router、BFF、UniGateway 的职责边界仍需固定。
+- Router/Scheduler 的 stats 决策路径不应强依赖 xtrace 这类观测后端。
+- Scheduler 仍存在非 CAS 的 placement 写路径。
+- 推理入口鉴权默认值偏开发友好，生产默认不够安全。
+- Router 仍会为解析 `model` 缓冲完整请求体。
 
-### P0：先修复 Gateway 编译与集成闭环
+## 当前已完成的关键改进
 
-当前 `cargo check --workspace` 失败点集中在 `crates/nebula-gateway`：
+### Gateway
 
-- `unigateway` 1.7 API 与当前代码不匹配。
-- `pool_sync` 模块被调用但未声明或不存在。
-- `st` 在定义前被使用。
-- `async_trait` 依赖缺失。
-- BFF 代理逻辑引用的 header/error helper 函数缺失。
+- 已接入共享 auth middleware。
+- 已有 `/metrics`，包含请求量、状态码、鉴权、请求体超限、上游错误等指标。
+- 已有请求体大小上限。
+- 已注入 trace context。
+- 已代理部分 BFF v2 API。
 
-建议先把 Gateway 恢复到可编译状态，再继续推进 UniGateway 集成。否则后续架构讨论会被未完成代码干扰。
+### Router
 
-### P0：明确 Gateway、Router、UniGateway 边界
+- 路由策略已插件化，支持 `least_pending`、`least_kv_cache`、`prefix_cache_aware`。
+- 已支持 endpoint Ready 状态过滤、plan_version 过滤、session affinity。
+- 已有可配置重试、失败 endpoint 排除、短时熔断。
+- 已有 overloading admission control 和 stale stats 降级。
+- 已暴露 Router metrics、E2E latency、TTFT histogram。
 
-当前项目原本已有独立 `nebula-router`，同时 `nebula-gateway` 正在引入 `unigateway`。这会形成潜在的两套路由层。
+### Scheduler
 
-建议明确三者关系：
+- 已有周期 reconcile loop。
+- `reconcile.rs` 中 placement 更新已使用 CAS。
+- 已支持健康自愈和基于负载信号的副本调整逻辑。
 
-- Gateway：对外 OpenAI-compatible HTTP/SSE、鉴权、审计、错误映射、请求上下文提取。
-- Router：基于 endpoint、placement、stats 做模型实例选择、重试、熔断、过载保护。
-- UniGateway：如果继续引入，应定位为协议执行或高性能转发库，而不是再实现一套集群路由决策。
+### Node
 
-如果 UniGateway 要替代 `nebula-router`，应显式规划迁移路径；如果只是嵌入 Gateway，则不要让它绕过 Router 的调度与观测语义。
+- 已采集 GPU 显存、温度、利用率。
+- 已执行引擎健康检查，连续失败后标记 Unhealthy，并尝试 restart。
+- 已 scrape 引擎 stats 并推送 xtrace。
+- 已提供 Node API metrics snapshot。
 
-### P1：将 Placement 写入改为 CAS
+## P0：当前最高优先级
 
-`docs/architecture.md` 已经规定 Scheduler 更新 placement 必须使用 CAS，`nebula-meta` 也提供了 `compare_and_swap`。但当前 scheduler 中仍存在直接 `put` placement 的路径。
+### P0-1 鉴权默认策略改为生产安全（已完成）
 
-单 Scheduler 场景下风险较低，但未来引入 HA scheduler、并发 reconcile 或自动扩缩容后，直接 `put` 会带来 last-write-wins 风险。
+当前共享 auth 已默认 fail-closed。`NEBULA_AUTH_TOKENS` 未设置或没有有效 token 时，受保护路由会拒绝请求；只有显式设置 `NEBULA_AUTH_DISABLED=true` 或 `NEBULA_DEV_AUTH_DISABLED=true` 时才进入开发免鉴权模式。
 
 建议：
 
-- 所有 `/placements/{model_uid}` 更新统一通过 `compare_and_swap`。
-- 明确 `PlacementPlan.version` 的语义，是逻辑版本还是时间戳。
-- 对 CAS 失败路径增加重读、重算和重试策略。
+- docker-compose、部署文档和示例 env 必须继续提供安全配置。
 
-### P1：收敛 Gateway 与 BFF 的 API 职责
+### P0-2 统一 stats 控制面契约
 
-当前前端主要访问 BFF 的 `/api` 和 `/api/v2`，Gateway 又代理部分 `/v2` 到 BFF，同时 Gateway 自己也暴露 `/v1/admin`。这会导致鉴权、审计、错误语义和 API 所有权重复。
+Router 和 Scheduler 的实时决策应依赖控制面状态，不应依赖 xtrace 查询链路。
 
-建议选择一种清晰模式：
+建议：
 
-- 模式 A：Gateway 只负责推理入口和少量运维只读 API，BFF 负责控制台、用户、模板、资源管理。
-- 模式 B：Gateway 作为统一入口，BFF 完全内网化，所有控制台 API 都经 Gateway 转发。
+- Node 写 etcd `/stats/{model_uid}/{replica_id}`，使用 TTL/lease。
+- Router watch `/stats/`，用于路由策略、过载保护、stale stats 判断。
+- Scheduler 读取 `/stats/`，用于扩缩容。
+- xtrace/Prometheus 只作为历史观测和面板查询，不作为唯一决策源。
 
-无论选择哪种，都应保证同一类 API 只有一个 owner。
+### P0-3 placement 更新路径全部 CAS 化（已完成）
 
-### P1：统一可观测性与鉴权初始化
+`scheduler/src/main.rs` 的 placement 写路径已改为 CAS；`scheduler/src/reconcile.rs` 已检查 CAS 返回的 `ok=false` 冲突结果，不再误判为成功。
 
-Gateway、Router、Scheduler、Node 多数使用 `nebula_common::telemetry::init_tracing`，但 BFF 当前直接使用 `tracing_subscriber::fmt()` 初始化。
+建议：
 
-建议统一服务初始化方式，避免跨服务 trace、日志格式、xtrace token 处理和环境变量行为不一致。
+- 明确 `PlacementPlan.version` 语义，避免“时间戳版本”和“逻辑版本”混用。
 
-鉴权也应明确区分：
+### P0-4 Router 改为 header-driven routing
 
-- 推理 API token 鉴权。
-- 控制台用户 session 鉴权。
-- 服务间内部调用 token。
+Router 现在为了获取 `model` 会完整读取 POST body。这个实现简单，但对长上下文、多模态和恶意大 body 不友好。
 
-这三类鉴权不要混用同一套隐式规则。
+建议：
 
-### P2：拆分过重的 `nebula-common`
+- Gateway 解析请求体中的 `model`，注入 `X-Nebula-Model` 或 `X-Nebula-Model-Uid`。
+- Router 优先使用 header 做 endpoint 选择。
+- Router 对请求体使用 streaming proxy。
+- 保留最大 body 限制作为最后防线。
 
-`nebula-common` 当前同时包含领域类型、auth、telemetry 等内容。短期方便，但长期会让所有依赖 common 的 crate 被横切基础设施拖重。
+## P1：边界与一致性收敛
 
-建议后续拆分为：
+### P1-1 明确 Gateway / Router / BFF / UniGateway 关系
 
-- `nebula-common-types`：纯领域类型，如 placement、endpoint、model request、node status。
-- `nebula-common-auth`：鉴权与角色模型。
-- `nebula-common-telemetry`：tracing、xtrace、OpenTelemetry 初始化。
+推荐边界：
 
-拆分不必马上做，但应避免继续把新基础设施逻辑放入 common。
+| 组件 | Owner |
+|------|-------|
+| Gateway | 外部协议、鉴权、审计、错误映射、请求上下文 |
+| Router | endpoint 选择、重试、熔断、过载保护、上游代理 |
+| BFF | 控制台 API、用户/session、模型管理视图 |
+| UniGateway | 可选协议/转发库，不拥有 Nebula 集群调度语义 |
 
-### P2：增强测试与架构回归保护
+如果 UniGateway 要替代 Router，应另写迁移计划；如果只是嵌入 Gateway，则不能绕过 Router 的 placement、endpoint、stats 语义。
 
-当前仓库已有部分单元测试，但整体缺少覆盖关键控制面契约的测试。
+### P1-2 收敛 Gateway 与 BFF API owner
 
-建议优先补齐：
+现在 Gateway 内有 admin API，也代理 BFF v2 API。短期可接受，但需要避免同一资源由两个服务各自实现。
 
-- Router 策略、熔断、过载保护和 plan_version 过滤测试。
-- Scheduler placement CAS 与 reconcile 冲突测试。
-- Node watch 断线后 full reconcile 测试。
-- Gateway OpenAI-compatible streaming 事件序列测试。
-- BFF/Gateway 鉴权边界测试。
+建议选择一种模式：
 
-这些测试比简单 handler 测试更能保护架构稳定性。
+- 模式 A：Gateway 只暴露推理入口和少量运维只读 API，BFF 负责控制台 API。
+- 模式 B：Gateway 做统一入口，BFF 完全内网化，控制台 API 全部经 Gateway 转发。
 
-### P2：前端按视图拆包
+无论选择哪种，同一类 API 只能有一个 owner。
 
-前端 `npm run build` 可以通过，但主 JS chunk 已超过 500KB。控制台项目短期可接受，后续页面继续增加时建议按视图 dynamic import，降低首屏加载成本。
+### P1-3 统一 telemetry 与 auth 初始化
+
+BFF 仍直接使用 `tracing_subscriber::fmt()`，其他 Rust 服务多使用 `nebula_common::telemetry::init_tracing`。
+
+建议：
+
+- BFF 改为统一 telemetry 初始化。
+- trace context 在 Gateway、Router、BFF、Node 间统一传递。
+- 推理 token、控制台 session、服务间 token 分离。
+
+## P2：测试与维护性
+
+### P2-1 架构回归测试
+
+优先补：
+
+- Router：策略选择、熔断恢复、stale stats、overload 429、header-driven routing。
+- Scheduler：CAS 冲突、reconcile 并发、扩缩容边界。
+- Node：健康失败、Unhealthy 上报、restart cooldown。
+- Gateway：鉴权默认策略、SSE 透传、BFF proxy 错误映射。
+
+### P2-2 拆分过重的 `nebula-common`
+
+短期先保持现状，避免大重构打断主线。后续可以拆分为：
+
+- `nebula-common-types`
+- `nebula-common-auth`
+- `nebula-common-telemetry`
+
+### P2-3 前端与观测面板
+
+前端主 chunk 后续可能继续增长，建议按视图 dynamic import。观测面板应基于现有 `/metrics` 和 xtrace 查询，优先展示 Router/Gateway 的 5xx、retry、circuit、TTFT、E2E、auth 拒绝等核心指标。
 
 ## 建议执行顺序
 
-1. 修复 `nebula-gateway` 编译问题。
-2. 决定 `Gateway / Router / UniGateway` 的职责边界。
-3. 将 placement 更新路径改为 CAS。
-4. 收敛 Gateway 与 BFF 的 API owner。
-5. 统一 telemetry/auth 初始化。
-6. 拆分 `nebula-common`，并补关键架构测试。
+1. 改 auth 默认值，生产默认 fail-closed。（已完成）
+2. 定稿并实现 `/stats/` 控制面契约。
+3. 将 placement 更新路径全部 CAS 化。（已完成）
+4. Router 改为 header-driven routing，逐步移除 full body buffer。
+5. 固定 Gateway / Router / BFF / UniGateway 边界。
+6. 统一 BFF telemetry/auth 初始化。
+7. 补关键架构测试。
+8. 再做 common 拆分、配置收敛、前端拆包。
 
 ## 结论
 
-Nebula 的控制面架构方向值得继续推进，但当前最需要避免的是在 Gateway 中不断叠加协议、路由、BFF 代理和控制台职责。只要先把 Gateway/Router/UniGateway 边界固定下来，再补齐 placement 一致性和测试保护，整体架构可以稳定演进。
+Nebula 当前已经从“架构雏形”进入“生产化收敛”阶段。后续不要再优先堆 feature list，而应先把安全默认值、stats 热路径、placement 一致性和组件边界固定下来。只要这四点收敛，后面的路由智能化、自动扩缩容和观测面板都会更稳定。

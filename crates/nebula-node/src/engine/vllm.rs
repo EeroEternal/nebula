@@ -115,7 +115,11 @@ impl Engine for VllmEngine {
         }
         // Determine tensor parallel size: from gpu_indices, or from config
         let tp_size = if let Some(ref indices) = ctx.gpu_indices {
-            if indices.len() > 1 { Some(indices.len() as u32) } else { self.config.tensor_parallel_size }
+            if indices.len() > 1 {
+                Some(indices.len() as u32)
+            } else {
+                self.config.tensor_parallel_size
+            }
         } else {
             self.config.tensor_parallel_size
         };
@@ -123,7 +127,8 @@ impl Engine for VllmEngine {
             vllm_args.push("--tensor-parallel-size".into());
             vllm_args.push(tp.to_string());
         }
-        let gpu_memory_utilization = self.config
+        let gpu_memory_utilization = self
+            .config
             .gpu_memory_utilization
             .or(cfg_gpu_memory_utilization);
         if let Some(v) = gpu_memory_utilization {
@@ -172,10 +177,14 @@ impl Engine for VllmEngine {
 
             cmd = Command::new("docker");
             cmd.arg("run")
-                .arg("--name").arg(&cname)
-                .arg("--gpus").arg(&gpu_device)
-                .arg("-p").arg(format!("{}:{}", selected_port, selected_port))
-                .arg("-v").arg(format!("{}:/model", self.config.model_dir));
+                .arg("--name")
+                .arg(&cname)
+                .arg("--gpus")
+                .arg(&gpu_device)
+                .arg("-p")
+                .arg(format!("{}:{}", selected_port, selected_port))
+                .arg("-v")
+                .arg(format!("{}:/model", self.config.model_dir));
 
             if self.config.use_modelscope {
                 cmd.arg("-e").arg("VLLM_USE_MODELSCOPE=True");
@@ -185,15 +194,19 @@ impl Engine for VllmEngine {
             }
 
             cmd.arg("-e").arg("HF_HOME=/model/.cache/huggingface");
-            cmd.arg("-e").arg("TRANSFORMERS_CACHE=/model/.cache/huggingface");
+            cmd.arg("-e")
+                .arg("TRANSFORMERS_CACHE=/model/.cache/huggingface");
             cmd.arg("-e").arg("XDG_CACHE_HOME=/model/.cache");
             cmd.arg("-e").arg("HF_HUB_DISABLE_XET=1");
 
             cmd.arg(image);
 
-            cmd.arg("--model").arg(&container_model)
-                .arg("--host").arg("0.0.0.0")
-                .arg("--port").arg(selected_port.to_string());
+            cmd.arg("--model")
+                .arg(&container_model)
+                .arg("--host")
+                .arg("0.0.0.0")
+                .arg("--port")
+                .arg(selected_port.to_string());
 
             for a in &vllm_args {
                 cmd.arg(a);
@@ -218,8 +231,10 @@ impl Engine for VllmEngine {
             cmd.current_dir(&self.config.cwd);
             cmd.arg("serve")
                 .arg(&model_tag)
-                .arg("--host").arg(&self.config.host)
-                .arg("--port").arg(selected_port.to_string());
+                .arg("--host")
+                .arg(&self.config.host)
+                .arg("--port")
+                .arg(selected_port.to_string());
 
             for a in &vllm_args {
                 cmd.arg(a);
@@ -242,7 +257,10 @@ impl Engine for VllmEngine {
             let cname = container_name(&ctx.model_uid, ctx.replica_id);
             // The original child is `docker run` which stays alive.
             // We keep it as a DockerContainer variant.
-            EngineProcess::DockerContainer { name: cname, wait_child: child }
+            EngineProcess::DockerContainer {
+                name: cname,
+                wait_child: child,
+            }
         } else {
             EngineProcess::Child(child)
         };
@@ -299,7 +317,8 @@ impl Engine for VllmEngine {
                 let models_url = format!("{}/v1/models", base_url);
                 let engine_model = match http.get(&models_url).send().await {
                     Ok(resp) if resp.status().is_success() => {
-                        let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+                        let v: serde_json::Value =
+                            resp.json().await.unwrap_or(serde_json::Value::Null);
                         v.get("data")
                             .and_then(|d| d.get(0))
                             .and_then(|m| m.get("id"))
@@ -321,7 +340,10 @@ impl Engine for VllmEngine {
                 Some(EngineHandle {
                     base_url,
                     engine_model,
-                    process: EngineProcess::DockerContainer { name: name.clone(), wait_child },
+                    process: EngineProcess::DockerContainer {
+                        name: name.clone(),
+                        wait_child,
+                    },
                 })
             }
             _ => {
@@ -505,8 +527,8 @@ pub async fn scrape_vllm_stats(
 ///   vllm:metric_name 123.45
 fn extract_metric(line: &str, metric_suffix: &str) -> Option<f64> {
     // Check if line contains the metric name
-    let has_metric = line.contains(&format!(":{metric_suffix}"))
-        || line.contains(&format!("_{metric_suffix}"));
+    let has_metric =
+        line.contains(&format!(":{metric_suffix}")) || line.contains(&format!("_{metric_suffix}"));
 
     if !has_metric {
         return None;
@@ -524,11 +546,17 @@ mod tests {
     #[test]
     fn test_extract_metric() {
         assert_eq!(
-            extract_metric("vllm:num_requests_waiting{model=\"m\"} 3", "num_requests_waiting"),
+            extract_metric(
+                "vllm:num_requests_waiting{model=\"m\"} 3",
+                "num_requests_waiting"
+            ),
             Some(3.0)
         );
         assert_eq!(
-            extract_metric("vllm:kv_cache_usage_perc{engine=\"0\"} 0.45", "kv_cache_usage_perc"),
+            extract_metric(
+                "vllm:kv_cache_usage_perc{engine=\"0\"} 0.45",
+                "kv_cache_usage_perc"
+            ),
             Some(0.45)
         );
         assert_eq!(
@@ -536,15 +564,24 @@ mod tests {
             Some(0.45)
         );
         assert_eq!(
-            extract_metric("vllm:prefix_cache_hits_total{engine=\"0\"} 100.0", "prefix_cache_hits_total"),
+            extract_metric(
+                "vllm:prefix_cache_hits_total{engine=\"0\"} 100.0",
+                "prefix_cache_hits_total"
+            ),
             Some(100.0)
         );
         assert_eq!(
-            extract_metric("vllm:prefix_cache_queries_total{engine=\"0\"} 200.0", "prefix_cache_queries_total"),
+            extract_metric(
+                "vllm:prefix_cache_queries_total{engine=\"0\"} 200.0",
+                "prefix_cache_queries_total"
+            ),
             Some(200.0)
         );
         assert_eq!(
-            extract_metric("# HELP vllm:num_requests_waiting help text", "num_requests_waiting"),
+            extract_metric(
+                "# HELP vllm:num_requests_waiting help text",
+                "num_requests_waiting"
+            ),
             None, // comment lines are skipped before calling this
         );
         assert_eq!(

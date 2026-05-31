@@ -79,9 +79,12 @@ fn parse_nebula_container_name(name: &str) -> (Option<String>, Option<u32>) {
 async fn list_containers() -> Vec<ContainerInfo> {
     let output = Command::new("docker")
         .args([
-            "ps", "-a",
-            "--format", "{{.Names}}\t{{.Image}}\t{{.ID}}\t{{.Status}}\t{{.State}}\t{{.Ports}}\t{{.CreatedAt}}",
-            "--filter", "name=nebula-",
+            "ps",
+            "-a",
+            "--format",
+            "{{.Names}}\t{{.Image}}\t{{.ID}}\t{{.Status}}\t{{.State}}\t{{.Ports}}\t{{.CreatedAt}}",
+            "--filter",
+            "name=nebula-",
         ])
         .output()
         .await;
@@ -118,8 +121,10 @@ async fn list_images() -> Vec<ImageInfo> {
     let output = Command::new("docker")
         .args([
             "images",
-            "--format", "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.CreatedAt}}",
-            "--filter", "dangling=false",
+            "--format",
+            "{{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}\t{{.CreatedAt}}",
+            "--filter",
+            "dangling=false",
         ])
         .output()
         .await;
@@ -187,38 +192,69 @@ async fn get_metrics(State(metrics): State<SharedNodeMetrics>) -> impl IntoRespo
 
     // GPU metrics
     if !snap.gpus.is_empty() {
-        let _ = writeln!(out, "# HELP nebula_node_gpu_temperature GPU temperature in Celsius.");
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_gpu_temperature GPU temperature in Celsius."
+        );
         let _ = writeln!(out, "# TYPE nebula_node_gpu_temperature gauge");
         for gpu in &snap.gpus {
             if let Some(temp) = gpu.temperature_c {
-                let _ = writeln!(out, "nebula_node_gpu_temperature{{gpu_index=\"{}\"}} {}", gpu.index, temp);
+                let _ = writeln!(
+                    out,
+                    "nebula_node_gpu_temperature{{gpu_index=\"{}\"}} {}",
+                    gpu.index, temp
+                );
             }
         }
 
-        let _ = writeln!(out, "# HELP nebula_node_gpu_utilization GPU compute utilization percentage.");
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_gpu_utilization GPU compute utilization percentage."
+        );
         let _ = writeln!(out, "# TYPE nebula_node_gpu_utilization gauge");
         for gpu in &snap.gpus {
             if let Some(util) = gpu.utilization_gpu {
-                let _ = writeln!(out, "nebula_node_gpu_utilization{{gpu_index=\"{}\"}} {}", gpu.index, util);
+                let _ = writeln!(
+                    out,
+                    "nebula_node_gpu_utilization{{gpu_index=\"{}\"}} {}",
+                    gpu.index, util
+                );
             }
         }
 
-        let _ = writeln!(out, "# HELP nebula_node_gpu_memory_used_mb GPU memory used in MiB.");
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_gpu_memory_used_mb GPU memory used in MiB."
+        );
         let _ = writeln!(out, "# TYPE nebula_node_gpu_memory_used_mb gauge");
         for gpu in &snap.gpus {
-            let _ = writeln!(out, "nebula_node_gpu_memory_used_mb{{gpu_index=\"{}\"}} {}", gpu.index, gpu.memory_used_mb);
+            let _ = writeln!(
+                out,
+                "nebula_node_gpu_memory_used_mb{{gpu_index=\"{}\"}} {}",
+                gpu.index, gpu.memory_used_mb
+            );
         }
 
-        let _ = writeln!(out, "# HELP nebula_node_gpu_memory_total_mb GPU total memory in MiB.");
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_gpu_memory_total_mb GPU total memory in MiB."
+        );
         let _ = writeln!(out, "# TYPE nebula_node_gpu_memory_total_mb gauge");
         for gpu in &snap.gpus {
-            let _ = writeln!(out, "nebula_node_gpu_memory_total_mb{{gpu_index=\"{}\"}} {}", gpu.index, gpu.memory_total_mb);
+            let _ = writeln!(
+                out,
+                "nebula_node_gpu_memory_total_mb{{gpu_index=\"{}\"}} {}",
+                gpu.index, gpu.memory_total_mb
+            );
         }
     }
 
     // Engine metrics
     if !snap.engines.is_empty() {
-        let _ = writeln!(out, "# HELP nebula_node_engine_pending_requests Number of pending requests.");
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_engine_pending_requests Number of pending requests."
+        );
         let _ = writeln!(out, "# TYPE nebula_node_engine_pending_requests gauge");
         for eng in &snap.engines {
             let _ = writeln!(
@@ -228,7 +264,10 @@ async fn get_metrics(State(metrics): State<SharedNodeMetrics>) -> impl IntoRespo
             );
         }
 
-        let _ = writeln!(out, "# HELP nebula_node_engine_kv_cache_usage KV cache usage ratio.");
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_engine_kv_cache_usage KV cache usage ratio."
+        );
         let _ = writeln!(out, "# TYPE nebula_node_engine_kv_cache_usage gauge");
         for eng in &snap.engines {
             if let Some(usage) = eng.kv_cache_usage {
@@ -240,7 +279,10 @@ async fn get_metrics(State(metrics): State<SharedNodeMetrics>) -> impl IntoRespo
             }
         }
 
-        let _ = writeln!(out, "# HELP nebula_node_engine_prefix_cache_hit_rate Prefix cache hit rate.");
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_engine_prefix_cache_hit_rate Prefix cache hit rate."
+        );
         let _ = writeln!(out, "# TYPE nebula_node_engine_prefix_cache_hit_rate gauge");
         for eng in &snap.engines {
             if let Some(rate) = eng.prefix_cache_hit_rate {
@@ -254,7 +296,10 @@ async fn get_metrics(State(metrics): State<SharedNodeMetrics>) -> impl IntoRespo
     }
 
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         out,
     )
 }

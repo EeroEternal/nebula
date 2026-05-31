@@ -2,7 +2,10 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
-#[command(name = "nebula-observe", about = "Nebula observability service (powered by xtrace)")]
+#[command(
+    name = "nebula-observe",
+    about = "Nebula observability service (powered by xtrace)"
+)]
 struct Args {
     /// PostgreSQL connection URL
     #[arg(long, env = "DATABASE_URL")]

@@ -59,7 +59,10 @@ pub async fn reconcile_loop(
 ) {
     // Wait a bit before first reconcile to let the system stabilize.
     tokio::time::sleep(Duration::from_secs(10)).await;
-    info!("reconcile loop started (interval={}s)", RECONCILE_INTERVAL.as_secs());
+    info!(
+        "reconcile loop started (interval={}s)",
+        RECONCILE_INTERVAL.as_secs()
+    );
 
     loop {
         metrics.reconcile_total.fetch_add(1, Ordering::Relaxed);
@@ -71,7 +74,12 @@ pub async fn reconcile_loop(
     }
 }
 
-async fn reconcile_once(store: &EtcdMetaStore, default_port: u16, xtrace: Option<&XtraceQueryConfig>, metrics: &SharedMetrics) -> anyhow::Result<()> {
+async fn reconcile_once(
+    store: &EtcdMetaStore,
+    default_port: u16,
+    xtrace: Option<&XtraceQueryConfig>,
+    metrics: &SharedMetrics,
+) -> anyhow::Result<()> {
     let now = now_ms();
 
     // 1. Load all placements
@@ -84,7 +92,9 @@ async fn reconcile_once(store: &EtcdMetaStore, default_port: u16, xtrace: Option
     }
 
     // Update placement gauge
-    metrics.placements_total.store(plans.len() as u64, Ordering::Relaxed);
+    metrics
+        .placements_total
+        .store(plans.len() as u64, Ordering::Relaxed);
 
     if plans.is_empty() {
         return Ok(());
@@ -183,7 +193,9 @@ async fn reconcile_once(store: &EtcdMetaStore, default_port: u16, xtrace: Option
                             "endpoint stale/unhealthy, removing assignment"
                         );
                         stale_replica_ids.push(assignment.replica_id);
-                        metrics.unhealthy_endpoints_total.fetch_add(1, Ordering::Relaxed);
+                        metrics
+                            .unhealthy_endpoints_total
+                            .fetch_add(1, Ordering::Relaxed);
                     } else {
                         healthy_assignments.push(assignment.clone());
                     }
@@ -200,7 +212,9 @@ async fn reconcile_once(store: &EtcdMetaStore, default_port: u16, xtrace: Option
                             "no endpoint registered after startup grace period, removing assignment"
                         );
                         stale_replica_ids.push(assignment.replica_id);
-                        metrics.unhealthy_endpoints_total.fetch_add(1, Ordering::Relaxed);
+                        metrics
+                            .unhealthy_endpoints_total
+                            .fetch_add(1, Ordering::Relaxed);
                     } else {
                         // Still within startup grace period, keep it.
                         healthy_assignments.push(assignment.clone());
@@ -217,8 +231,8 @@ async fn reconcile_once(store: &EtcdMetaStore, default_port: u16, xtrace: Option
             // Stats are now in xtrace, no etcd key to clean up.
         }
 
-        let need_update = !stale_replica_ids.is_empty()
-            || (healthy_assignments.len() as u32) < desired_replicas;
+        let need_update =
+            !stale_replica_ids.is_empty() || (healthy_assignments.len() as u32) < desired_replicas;
 
         if !need_update {
             continue;
@@ -271,9 +285,10 @@ async fn reconcile_once(store: &EtcdMetaStore, default_port: u16, xtrace: Option
         };
 
         let placement_key = format!("/placements/{}", plan.model_uid);
-        
+
         // Find the revision of the plan we originally read
-        let expected_revision = placement_kvs.iter()
+        let expected_revision = placement_kvs
+            .iter()
             .find(|(key, _, _)| key == &placement_key)
             .map(|(_, _, revision)| *revision)
             .unwrap_or(0);
@@ -281,15 +296,29 @@ async fn reconcile_once(store: &EtcdMetaStore, default_port: u16, xtrace: Option
         match serde_json::to_vec(&updated_plan) {
             Ok(val) => {
                 // Use CAS: ensure the key has not been modified since we read it
-                if let Err(e) = store.compare_and_swap(&placement_key, expected_revision, val).await {
-                    warn!(model_uid=%plan.model_uid, error=%e, "reconcile: CAS update failed, skipping cycle");
-                } else {
-                    info!(
-                        model_uid=%plan.model_uid,
-                        old_assignments=plan.assignments.len(),
-                        new_assignments=updated_plan.assignments.len(),
-                        "reconcile: updated placement (CAS)"
-                    );
+                match store
+                    .compare_and_swap(&placement_key, expected_revision, val)
+                    .await
+                {
+                    Ok((true, _revision)) => {
+                        info!(
+                            model_uid=%plan.model_uid,
+                            old_assignments=plan.assignments.len(),
+                            new_assignments=updated_plan.assignments.len(),
+                            "reconcile: updated placement (CAS)"
+                        );
+                    }
+                    Ok((false, current_revision)) => {
+                        warn!(
+                            model_uid=%plan.model_uid,
+                            expected_revision,
+                            current_revision,
+                            "reconcile: CAS conflict, skipping cycle"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(model_uid=%plan.model_uid, error=%e, "reconcile: CAS update failed, skipping cycle");
+                    }
                 }
             }
             Err(e) => {
@@ -775,8 +804,8 @@ fn compute_desired_replicas(
     };
 
     // Compute average pending requests
-    let avg_pending: f64 = stats.iter().map(|s| s.pending_requests as f64).sum::<f64>()
-        / stats.len() as f64;
+    let avg_pending: f64 =
+        stats.iter().map(|s| s.pending_requests as f64).sum::<f64>() / stats.len() as f64;
 
     // Scale-up: if avg KV cache usage > threshold OR avg pending > threshold
     if avg_kv_usage > SCALE_UP_KV_THRESHOLD || avg_pending > SCALE_UP_PENDING_THRESHOLD {

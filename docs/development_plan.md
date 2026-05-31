@@ -125,17 +125,17 @@
 - ✅ **CLI 能力**：`metrics`、`logs --follow`、`chat`（流式对话）、`drain`（端点优雅下线）、`scale`（副本调整）、`whoami` 全部完成。
 - ✅ **测试与验收**：编译通过，现有测试不回归。
 
-## 9. 控制面优化路线（借鉴 AIBrix）
+## 9. 控制面优化路线（当前基线）
 
 > 详见 [optimization_plan.md](./optimization_plan.md)
 
-基于对 AIBrix 项目的深度分析，针对 Nebula 控制面的分层优化计划，按依赖关系排列：
+基于当前代码状态，控制面优化已从“补齐基础能力”进入“收敛生产化风险”阶段。详见 [optimization_plan.md](./optimization_plan.md)。
 
-### 关键路径：信号基础设施 → 路由智能化 → Scheduler 动态调节
+### 当前完成度与剩余风险
 
 | 阶段 | 内容 | 工作量 | 依赖 | 状态 |
 |------|------|--------|------|------|
-| **1.1 Engine Stats Pipeline** | Node heartbeat 采集 vLLM /metrics，写入 etcd /stats/，Router watch 同步 | 2 天 | 无 | ✅ 已完成 |
+| **1.1 Engine Stats Pipeline** | Node 已采集 engine stats 并推送 xtrace；仍需定稿 etcd `/stats/` 作为 Router/Scheduler 热路径 | 1.5-2 天 | 无 | ⚠️ 需收敛 |
 | **1.2 Router 请求级指标** | E2E latency / TTFT histogram，per-model 维度 | 1 天 | 无 | ✅ 已完成 |
 | **2.1 路由策略插件化** | RoutingStrategy trait + LeastPending/LeastKvCache/PrefixCacheAware | 2 天 | 1.1 | ✅ 已完成 |
 | **3.1 Scheduler 健康自愈** | reconcile loop，endpoint 超时自动清理与副本补充 | 2 天 | 1.1 | ✅ 已完成 |
@@ -146,9 +146,12 @@
 | **4.4 容器资产感知** | Node HTTP API 暴露容器/镜像信息（/api/containers, /api/images），BFF 按需拉取 | 0.5 天 | 无 | ✅ 已完成 |
 | **5.1 Admission Control** | 所有 endpoint 过载时返回 429 + Retry-After | 1 天 | 1.1 | ✅ 已完成 |
 | **6.1 可观测性** | 各组件暴露 Prometheus /metrics，日志接入 Loki，Tracing 接入 Jaeger | 3 天 | 无 | ✅ 已完成（Prometheus /metrics + xtrace OTLP） |
+| **7.1 安全默认值** | Auth 默认 fail-closed，显式 dev 开关才允许免鉴权 | 0.5 天 | 无 | ✅ 已完成 |
+| **7.2 Placement 全路径 CAS** | Scheduler 所有 placement 更新统一 compare-and-swap | 1 天 | 无 | ✅ 已完成 |
+| **7.3 Header-driven routing** | Gateway 注入模型 header，Router 避免 full body buffer | 2-3 天 | Gateway/Router 边界 | ⏳ 待做 |
 
 ### 建议融入时间线
 
-- **Week 3-4**（与容量感知并行）：~~1.1 Engine Stats Pipeline~~ + 1.2 请求级指标 + 4.2 GPU 状态增强
-- **Week 5-6**（与 Web Console 并行）：2.1 路由策略插件化 + 6.1 可观测性基础
-- **Week 7+**：3.1 健康自愈 + 3.2 扩缩容 + 5.1 Admission Control
+- **下一轮 P0**：`/stats/` 控制面契约。
+- **下一轮 P1**：Gateway 注入模型 header，Router 改为 header-driven streaming proxy。
+- **下一轮 P2**：补架构回归测试、统一 BFF telemetry/auth 初始化、完善观测面板。

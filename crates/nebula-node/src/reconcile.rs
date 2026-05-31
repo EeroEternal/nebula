@@ -4,7 +4,10 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use nebula_common::{EndpointInfo, EndpointKind, EndpointStatus, ModelRequest, ModelRequestStatus, ModelSpec, PlacementPlan};
+use nebula_common::{
+    EndpointInfo, EndpointKind, EndpointStatus, ModelRequest, ModelRequestStatus, ModelSpec,
+    PlacementPlan,
+};
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::args::Args;
@@ -94,7 +97,9 @@ pub async fn reconcile_model(
 
     let desired_signature = assignment_signature(assignment);
     let needs_restart = match running.get(model_uid) {
-        Some(rm) => rm.replica_id != assignment.replica_id || rm.assignment_signature != desired_signature,
+        Some(rm) => {
+            rm.replica_id != assignment.replica_id || rm.assignment_signature != desired_signature
+        }
         None => true,
     };
 
@@ -112,8 +117,11 @@ pub async fn reconcile_model(
     // Create engine instance based on assignment's engine_type and optional docker image override
     let engine_type = assignment.engine_type.as_deref();
     let docker_image_override = assignment.docker_image.as_deref();
-    let engine: Arc<dyn Engine> =
-        Arc::from(crate::engine::create_engine(args, engine_type, docker_image_override));
+    let engine: Arc<dyn Engine> = Arc::from(crate::engine::create_engine(
+        args,
+        engine_type,
+        docker_image_override,
+    ));
 
     let ctx = EngineStartContext {
         model_uid: model_uid.to_string(),
@@ -198,7 +206,12 @@ pub async fn reconcile_model(
         }
     };
 
-    write_engine_env(&args.engine_env_path, &handle.base_url, &handle.engine_model).await?;
+    write_engine_env(
+        &args.engine_env_path,
+        &handle.base_url,
+        &handle.engine_model,
+    )
+    .await?;
 
     let info = EndpointInfo {
         model_uid: plan.model_uid.clone(),

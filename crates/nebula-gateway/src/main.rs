@@ -20,7 +20,6 @@ use clap::Parser;
 
 use crate::args::Args;
 use crate::audit::AuditWriter;
-use nebula_common::auth::parse_auth_from_env;
 use crate::engine::{EngineClient, OpenAIEngineClient};
 use crate::handlers::{
     admin_audit_logs, admin_cluster_status, admin_delete_image, admin_delete_request,
@@ -32,6 +31,7 @@ use crate::handlers::{
 use crate::metrics::{metrics_handler, track_requests};
 use crate::state::AppState;
 use crate::util::read_engine_env_file;
+use nebula_common::auth::parse_auth_from_env;
 
 #[tokio::main]
 async fn main() {
@@ -85,7 +85,10 @@ async fn main() {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4 * 1024 * 1024);
 
-    let audit = AuditWriter::spawn(args.common.xtrace_url.as_deref(), args.common.xtrace_token.as_deref());
+    let audit = AuditWriter::spawn(
+        args.common.xtrace_url.as_deref(),
+        args.common.xtrace_token.as_deref(),
+    );
 
     let st = AppState {
         _noop: Arc::new(()),
@@ -151,9 +154,17 @@ async fn main() {
         .route("/v1/rerank", post(proxy_post))
         .route("/v1/models", get(list_models))
         .nest("/v1/admin", admin_routes)
-        .layer(middleware::from_fn_with_state(st.clone(), audit::audit_middleware))
-        .layer(middleware::from_fn_with_state(st.clone(), nebula_common::auth::auth_middleware::<AppState>))
-        .layer(middleware::from_fn(nebula_common::telemetry::trace_context_middleware));
+        .layer(middleware::from_fn_with_state(
+            st.clone(),
+            audit::audit_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            st.clone(),
+            nebula_common::auth::auth_middleware::<AppState>,
+        ))
+        .layer(middleware::from_fn(
+            nebula_common::telemetry::trace_context_middleware,
+        ));
 
     let public_routes = Router::new()
         .route("/healthz", get(healthz))

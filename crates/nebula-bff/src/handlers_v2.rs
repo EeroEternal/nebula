@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::cmp::Ordering;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -8,21 +6,23 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::cmp::Ordering;
+use std::collections::HashMap;
 
 use crate::auth::{require_role, AuthContext, Role};
-use crate::state::AppState;
 use crate::service::{
-    self, CreateModelRequest, UpdateModelRequest, StartModelRequest, ScaleModelRequest,
-    DeployTemplateRequest, SaveAsTemplateRequest, CreateTemplateRequest, UpdateTemplateRequest,
-    ListModelsQuery, ServiceError,
+    self, CreateModelRequest, CreateTemplateRequest, DeployTemplateRequest, ListModelsQuery,
+    SaveAsTemplateRequest, ScaleModelRequest, ServiceError, StartModelRequest, UpdateModelRequest,
+    UpdateTemplateRequest,
 };
+use crate::state::AppState;
 
 use nebula_meta::MetaStore;
 use uuid::Uuid;
 
 use nebula_common::{
-    DesiredState, DiskAlert, ModelCacheEntry, ModelDeployment, ModelRequest,
-    ModelRequestStatus, ModelSource, ModelSpec, NodeDiskStatus,
+    DesiredState, DiskAlert, ModelCacheEntry, ModelDeployment, ModelRequest, ModelRequestStatus,
+    ModelSource, ModelSpec, NodeDiskStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -94,7 +94,8 @@ pub async fn delete_model(
             "status": "deleted",
             "queued_gc_nodes": queued_gc_nodes
         })),
-    ).into_response())
+    )
+        .into_response())
 }
 
 pub async fn start_model(
@@ -196,7 +197,11 @@ pub async fn delete_template(
         return Ok(resp);
     }
     service::delete_template(&*st.store, &id).await?;
-    Ok((StatusCode::OK, Json(json!({"template_id": id, "status": "deleted"}))).into_response())
+    Ok((
+        StatusCode::OK,
+        Json(json!({"template_id": id, "status": "deleted"})),
+    )
+        .into_response())
 }
 
 pub async fn deploy_template(
@@ -265,7 +270,9 @@ pub async fn node_disk(
             let d: NodeDiskStatus = serde_json::from_slice(&data)?;
             Ok((StatusCode::OK, Json(json!(d))).into_response())
         }
-        None => Err(ServiceError::NotFound("disk status not found for node".to_string())),
+        None => Err(ServiceError::NotFound(
+            "disk status not found for node".to_string(),
+        )),
     }
 }
 
@@ -685,7 +692,10 @@ async fn fetch_router_metrics_text(st: &AppState) -> Result<String, Response> {
         return Err(error_response(
             StatusCode::BAD_GATEWAY,
             "upstream_error",
-            &format!("router metrics responded with status {}", resp.status().as_u16()),
+            &format!(
+                "router metrics responded with status {}",
+                resp.status().as_u16()
+            ),
         ));
     }
 
@@ -798,10 +808,18 @@ pub async fn gateway_traffic(
         value,
     };
 
-    let requests_total = normalize_zero(parse_metric_sum(&text, "nebula_router_requests_total") / window_seconds as f64);
-    let responses_2xx = normalize_zero(parse_metric_sum(&text, "nebula_router_responses_2xx") / window_seconds as f64);
-    let responses_4xx = normalize_zero(parse_metric_sum(&text, "nebula_router_responses_4xx") / window_seconds as f64);
-    let responses_5xx = normalize_zero(parse_metric_sum(&text, "nebula_router_responses_5xx") / window_seconds as f64);
+    let requests_total = normalize_zero(
+        parse_metric_sum(&text, "nebula_router_requests_total") / window_seconds as f64,
+    );
+    let responses_2xx = normalize_zero(
+        parse_metric_sum(&text, "nebula_router_responses_2xx") / window_seconds as f64,
+    );
+    let responses_4xx = normalize_zero(
+        parse_metric_sum(&text, "nebula_router_responses_4xx") / window_seconds as f64,
+    );
+    let responses_5xx = normalize_zero(
+        parse_metric_sum(&text, "nebula_router_responses_5xx") / window_seconds as f64,
+    );
 
     let response = GatewayTrafficResponse {
         window,
@@ -848,21 +866,36 @@ pub async fn gateway_reliability(
         value,
     };
 
-    let retry_total = normalize_zero(parse_metric_sum(&text, "nebula_router_retry_total") / window_seconds as f64);
-    let retry_success_total =
-        normalize_zero(parse_metric_sum(&text, "nebula_router_retry_success_total") / window_seconds as f64);
-    let upstream_error_connect =
-        normalize_zero(parse_metric_sum_with_label(&text, "nebula_router_upstream_error_total", "kind", "connect")
-            / window_seconds as f64);
-    let upstream_error_timeout =
-        normalize_zero(parse_metric_sum_with_label(&text, "nebula_router_upstream_error_total", "kind", "timeout")
-            / window_seconds as f64);
-    let upstream_error_5xx =
-        normalize_zero(parse_metric_sum_with_label(&text, "nebula_router_upstream_error_total", "kind", "5xx")
-            / window_seconds as f64);
-    let upstream_error_other =
-        normalize_zero(parse_metric_sum_with_label(&text, "nebula_router_upstream_error_total", "kind", "other")
-            / window_seconds as f64);
+    let retry_total = normalize_zero(
+        parse_metric_sum(&text, "nebula_router_retry_total") / window_seconds as f64,
+    );
+    let retry_success_total = normalize_zero(
+        parse_metric_sum(&text, "nebula_router_retry_success_total") / window_seconds as f64,
+    );
+    let upstream_error_connect = normalize_zero(
+        parse_metric_sum_with_label(
+            &text,
+            "nebula_router_upstream_error_total",
+            "kind",
+            "connect",
+        ) / window_seconds as f64,
+    );
+    let upstream_error_timeout = normalize_zero(
+        parse_metric_sum_with_label(
+            &text,
+            "nebula_router_upstream_error_total",
+            "kind",
+            "timeout",
+        ) / window_seconds as f64,
+    );
+    let upstream_error_5xx = normalize_zero(
+        parse_metric_sum_with_label(&text, "nebula_router_upstream_error_total", "kind", "5xx")
+            / window_seconds as f64,
+    );
+    let upstream_error_other = normalize_zero(
+        parse_metric_sum_with_label(&text, "nebula_router_upstream_error_total", "kind", "other")
+            / window_seconds as f64,
+    );
 
     let response = GatewayReliabilityResponse {
         window,
@@ -902,8 +935,10 @@ pub async fn gateway_protection(
         Err(resp) => return resp,
     };
 
-    let request_too_large_count = parse_metric_sum(&text, "nebula_router_request_too_large_total") as u64;
-    let circuit_skipped_count = parse_metric_sum(&text, "nebula_router_route_circuit_skipped_total") as u64;
+    let request_too_large_count =
+        parse_metric_sum(&text, "nebula_router_request_too_large_total") as u64;
+    let circuit_skipped_count =
+        parse_metric_sum(&text, "nebula_router_route_circuit_skipped_total") as u64;
     let circuit_open_count = parse_metric_sum(&text, "nebula_router_circuit_open_total") as u64;
 
     let response = GatewayProtectionResponse {
@@ -939,11 +974,19 @@ pub async fn gateway_latency(
         Err(resp) => return resp,
     };
 
-    let latency_p50_ms = normalize_zero(parse_histogram_quantile(&text, "nebula_route_latency_seconds", 0.50) * 1000.0);
-    let latency_p95_ms = normalize_zero(parse_histogram_quantile(&text, "nebula_route_latency_seconds", 0.95) * 1000.0);
-    let latency_p99_ms = normalize_zero(parse_histogram_quantile(&text, "nebula_route_latency_seconds", 0.99) * 1000.0);
-    let ttft_p50_ms = normalize_zero(parse_histogram_quantile(&text, "nebula_route_ttft_seconds", 0.50) * 1000.0);
-    let ttft_p95_ms = normalize_zero(parse_histogram_quantile(&text, "nebula_route_ttft_seconds", 0.95) * 1000.0);
+    let latency_p50_ms = normalize_zero(
+        parse_histogram_quantile(&text, "nebula_route_latency_seconds", 0.50) * 1000.0,
+    );
+    let latency_p95_ms = normalize_zero(
+        parse_histogram_quantile(&text, "nebula_route_latency_seconds", 0.95) * 1000.0,
+    );
+    let latency_p99_ms = normalize_zero(
+        parse_histogram_quantile(&text, "nebula_route_latency_seconds", 0.99) * 1000.0,
+    );
+    let ttft_p50_ms =
+        normalize_zero(parse_histogram_quantile(&text, "nebula_route_ttft_seconds", 0.50) * 1000.0);
+    let ttft_p95_ms =
+        normalize_zero(parse_histogram_quantile(&text, "nebula_route_ttft_seconds", 0.95) * 1000.0);
 
     let ts = now_rfc3339();
     let to_point = |value: f64| TimePoint {

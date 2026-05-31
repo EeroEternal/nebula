@@ -100,16 +100,18 @@ pub async fn proxy_chat_completions(
     let (method_reqwest, body_bytes, model_uid) = match method {
         axum::http::Method::GET => (reqwest::Method::GET, None, st.model_uid.clone()),
         axum::http::Method::POST => {
-            let body_bytes = match axum::body::to_bytes(req.into_body(), st.max_request_body_bytes).await {
-                Ok(b) => b,
-                Err(_) => {
-                    st.metrics
-                        .request_too_large_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    st.metrics.record_model_status(&st.model_uid, 413);
-                    return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
-                }
-            };
+            let body_bytes =
+                match axum::body::to_bytes(req.into_body(), st.max_request_body_bytes).await {
+                    Ok(b) => b,
+                    Err(_) => {
+                        st.metrics
+                            .request_too_large_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        st.metrics.record_model_status(&st.model_uid, 413);
+                        return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+                            .into_response();
+                    }
+                };
 
             let raw_model =
                 if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
@@ -126,7 +128,9 @@ pub async fn proxy_chat_completions(
 
             // Rewrite the body's "model" field using serde_json::Value
             let body_bytes = {
-                let model_name = st.router.get_model_name(&model_uid)
+                let model_name = st
+                    .router
+                    .get_model_name(&model_uid)
                     .unwrap_or_else(|| raw_model.clone());
                 if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                     json["model"] = serde_json::Value::String(model_name);
@@ -163,8 +167,11 @@ pub async fn proxy_chat_completions(
                     .route_with_plan_version(&_ctx, &model_uid, plan_version)
             }
         } else if let Some((exclude_model_uid, exclude_replica_id)) = excluded_endpoint.as_ref() {
-            st.router
-                .route_excluding(&_ctx, &model_uid, (exclude_model_uid.as_str(), *exclude_replica_id))
+            st.router.route_excluding(
+                &_ctx,
+                &model_uid,
+                (exclude_model_uid.as_str(), *exclude_replica_id),
+            )
         } else {
             st.router.route(&_ctx, &model_uid)
         };
@@ -226,7 +233,8 @@ pub async fn proxy_chat_completions(
                         st.metrics
                             .retry_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tokio::time::sleep(std::time::Duration::from_millis(st.retry_backoff_ms)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(st.retry_backoff_ms))
+                            .await;
                         continue;
                     }
                 } else if attempt > 0 {
@@ -257,7 +265,8 @@ pub async fn proxy_chat_completions(
                 }
 
                 st.metrics.record_model_status(&model_uid, 502);
-                st.metrics.observe_e2e_latency(&model_uid, request_start.elapsed().as_secs_f64());
+                st.metrics
+                    .observe_e2e_latency(&model_uid, request_start.elapsed().as_secs_f64());
                 return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
             }
         }

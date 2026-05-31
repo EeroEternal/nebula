@@ -151,7 +151,13 @@ mod tests {
         }
     }
 
-    fn make_stats(model: &str, replica: u32, pending: u64, kv_used: Option<u64>, prefix_hit: Option<f64>) -> EndpointStats {
+    fn make_stats(
+        model: &str,
+        replica: u32,
+        pending: u64,
+        kv_used: Option<u64>,
+        prefix_hit: Option<f64>,
+    ) -> EndpointStats {
         EndpointStats {
             model_uid: model.to_string(),
             replica_id: replica,
@@ -172,8 +178,14 @@ mod tests {
         let s1 = make_stats("m", 1, 3, None, None);
 
         let candidates = vec![
-            Candidate { endpoint: &ep0, stats: Some(&s0) },
-            Candidate { endpoint: &ep1, stats: Some(&s1) },
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
         ];
 
         assert_eq!(LeastPending.select(&candidates), Some(1));
@@ -187,8 +199,14 @@ mod tests {
         let s1 = make_stats("m", 1, 10, Some(2000), None);
 
         let candidates = vec![
-            Candidate { endpoint: &ep0, stats: Some(&s0) },
-            Candidate { endpoint: &ep1, stats: Some(&s1) },
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
         ];
 
         assert_eq!(LeastKvCache.select(&candidates), Some(1));
@@ -202,8 +220,14 @@ mod tests {
         let s1 = make_stats("m", 1, 3, None, None);
 
         let candidates = vec![
-            Candidate { endpoint: &ep0, stats: Some(&s0) },
-            Candidate { endpoint: &ep1, stats: Some(&s1) },
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
         ];
 
         // No KV data → falls back to least pending
@@ -218,8 +242,14 @@ mod tests {
         let s1 = make_stats("m", 1, 1, None, Some(0.3));
 
         let candidates = vec![
-            Candidate { endpoint: &ep0, stats: Some(&s0) },
-            Candidate { endpoint: &ep1, stats: Some(&s1) },
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
         ];
 
         assert_eq!(PrefixCacheAware.select(&candidates), Some(0));
@@ -233,8 +263,14 @@ mod tests {
         let s1 = make_stats("m", 1, 3, None, Some(0.02));
 
         let candidates = vec![
-            Candidate { endpoint: &ep0, stats: Some(&s0) },
-            Candidate { endpoint: &ep1, stats: Some(&s1) },
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
         ];
 
         // All below threshold → falls back to least pending (index 1)

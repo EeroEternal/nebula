@@ -66,4 +66,3 @@ pub struct ModelSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
 }
-

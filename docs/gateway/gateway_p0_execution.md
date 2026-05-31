@@ -1,25 +1,27 @@
 # Gateway P0 执行 Runbook
 
-> 目标：将 P0 防护能力（重试、请求体上限、错误分类指标）以低风险方式上线，并支持快速回滚。
+> 状态：P0 防护能力（重试、请求体上限、错误分类指标）已基本落地。本文现在作为灰度、回归验证和回滚 runbook 使用。
 
-## 1. 变更范围
+## 1. 已落地变更范围
 
 - Router：
   - 一次快速重试（仅可重试错误）
   - 重试排除首个失败 endpoint
   - 请求体上限（默认 4MB）
   - 指标：`retry_total` / `retry_success_total` / `upstream_error_total{kind}` / `request_too_large_total`
+  - endpoint 短时熔断与熔断指标
+  - stale stats 过滤与 route-time freshness 指标
 - Gateway：
   - 请求体上限（默认 4MB）
   - 指标：`upstream_error_total{kind}` / `request_too_large_total`
+  - 推理/admin 路由共享鉴权 middleware
 
 ---
 
-## 2. 上线前检查
+## 2. 发布前检查
 
 1. 代码编译通过：
-   - `cargo check -p nebula-router`
-   - `cargo check -p nebula-gateway`
+   - `cargo check --workspace`
 2. 确认监控已采集以下路径：
    - `router: /metrics`
    - `gateway: /metrics`
@@ -41,6 +43,9 @@
 ## 3.2 Gateway
 
 - `NEBULA_GATEWAY_MAX_REQUEST_BODY_BYTES=4194304`
+- `NEBULA_AUTH_TOKENS=<token>:operator,<token>:viewer`
+
+> 鉴权默认已改为 fail-closed。本地开发如需免鉴权应显式设置 `NEBULA_AUTH_DISABLED=true` 或 `NEBULA_DEV_AUTH_DISABLED=true`，生产环境不要使用该配置。
 
 ## 3.3 灰度节奏
 
@@ -66,9 +71,16 @@
   - `nebula_router_retry_success_total`
   - `nebula_router_upstream_error_total{kind}`
   - `nebula_router_request_too_large_total`
+  - `nebula_router_route_circuit_skipped_total`
+  - `nebula_router_circuit_open_total`
+  - `nebula_router_route_stale_stats_dropped_total`
 - Gateway：
   - `nebula_gateway_upstream_error_total{kind}`
   - `nebula_gateway_request_too_large_total`
+  - `nebula_gateway_auth_missing`
+  - `nebula_gateway_auth_invalid`
+  - `nebula_gateway_auth_forbidden`
+  - `nebula_gateway_auth_rate_limited`
 
 ## 4.3 SLO 观察窗口
 

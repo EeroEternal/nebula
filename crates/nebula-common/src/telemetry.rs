@@ -40,8 +40,8 @@ pub fn init_tracing(
         };
 
         if use_json {
-            let env_filter = EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"));
+            let env_filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
             let fmt_layer = tracing_subscriber::fmt::layer().json();
 
             let exporter = match build_exporter() {
@@ -58,7 +58,10 @@ pub fn init_tracing(
 
             let provider = TracerProvider::builder()
                 .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-                .with_resource(Resource::new([KeyValue::new("service.name", service_name.to_string())]))
+                .with_resource(Resource::new([KeyValue::new(
+                    "service.name",
+                    service_name.to_string(),
+                )]))
                 .build();
 
             let otel_layer = tracing_opentelemetry::layer()
@@ -73,8 +76,8 @@ pub fn init_tracing(
             tracing::info!(endpoint, service_name, "OTLP tracing enabled (json)");
             Some(provider)
         } else {
-            let env_filter = EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info"));
+            let env_filter =
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
             let fmt_layer = tracing_subscriber::fmt::layer();
 
             let exporter = match build_exporter() {
@@ -91,7 +94,10 @@ pub fn init_tracing(
 
             let provider = TracerProvider::builder()
                 .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-                .with_resource(Resource::new([KeyValue::new("service.name", service_name.to_string())]))
+                .with_resource(Resource::new([KeyValue::new(
+                    "service.name",
+                    service_name.to_string(),
+                )]))
                 .build();
 
             let otel_layer = tracing_opentelemetry::layer()
@@ -107,8 +113,8 @@ pub fn init_tracing(
             Some(provider)
         }
     } else if use_json {
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
         let fmt_layer = tracing_subscriber::fmt::layer().json();
         tracing_subscriber::registry()
             .with(env_filter)
@@ -116,8 +122,8 @@ pub fn init_tracing(
             .init();
         None
     } else {
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
         let fmt_layer = tracing_subscriber::fmt::layer();
         tracing_subscriber::registry()
             .with(env_filter)
@@ -173,4 +179,3 @@ pub async fn trace_context_middleware(
     tracing::Span::current().set_parent(parent_context);
     next.run(req).await
 }
-

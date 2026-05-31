@@ -185,8 +185,10 @@ pub async fn heartbeat_loop(
                     }
 
                     // Scrape metrics only when healthy
-                    if let Some(stats) =
-                        rm.engine.scrape_stats(&http, &rm.handle, &rm.model_uid, rm.replica_id).await
+                    if let Some(stats) = rm
+                        .engine
+                        .scrape_stats(&http, &rm.handle, &rm.model_uid, rm.replica_id)
+                        .await
                     {
                         // Collect engine stats for xtrace
                         if xtrace.is_some() {
@@ -202,9 +204,15 @@ pub async fn heartbeat_loop(
                                 value: stats.pending_requests as f64,
                                 timestamp: ts,
                             });
-                            if let (Some(used), Some(free)) = (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes) {
+                            if let (Some(used), Some(free)) =
+                                (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes)
+                            {
                                 let total = used + free;
-                                let usage = if total > 0 { used as f64 / total as f64 } else { 0.0 };
+                                let usage = if total > 0 {
+                                    used as f64 / total as f64
+                                } else {
+                                    0.0
+                                };
                                 metric_points.push(xtrace_client::MetricPoint {
                                     name: "kv_cache_usage".to_string(),
                                     labels: labels.clone(),
@@ -223,10 +231,15 @@ pub async fn heartbeat_loop(
                         }
 
                         // Collect for Prometheus /metrics snapshot
-                        let kv_usage = match (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes) {
+                        let kv_usage = match (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes)
+                        {
                             (Some(used), Some(free)) => {
                                 let total = used + free;
-                                if total > 0 { Some(used as f64 / total as f64) } else { None }
+                                if total > 0 {
+                                    Some(used as f64 / total as f64)
+                                } else {
+                                    None
+                                }
                             }
                             _ => None,
                         };

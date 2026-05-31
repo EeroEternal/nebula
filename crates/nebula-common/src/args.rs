@@ -3,7 +3,11 @@ use clap::Args;
 #[derive(Debug, Args, Clone)]
 pub struct CommonArgs {
     /// etcd endpoint for cluster coordination
-    #[arg(long = "etcd-endpoint", env = "ETCD_ENDPOINT", default_value = "http://127.0.0.1:2379")]
+    #[arg(
+        long = "etcd-endpoint",
+        env = "ETCD_ENDPOINT",
+        default_value = "http://127.0.0.1:2379"
+    )]
     pub etcd_endpoint: String,
 
     /// OTLP/xtrace endpoint for exporting traces/metrics (e.g. "http://127.0.0.1:8742").

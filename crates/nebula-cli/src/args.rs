@@ -257,7 +257,6 @@ pub enum DiskCommand {
     Status,
 }
 
-
 #[derive(Debug, Subcommand)]
 pub enum AdminCommand {
     /// Migrate v1 model_requests to v2 ModelSpec + ModelDeployment

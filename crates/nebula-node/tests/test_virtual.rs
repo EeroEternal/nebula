@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::Mutex;
-use nebula_common::{PlacementPlan, PlacementAssignment, EndpointInfo};
-use crate::engine::{VirtualEngine, Engine};
 use crate::args::Args;
+use crate::engine::{Engine, VirtualEngine};
 use crate::reconcile::{reconcile_model, RunningModel};
+use nebula_common::{EndpointInfo, PlacementAssignment, PlacementPlan};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 // Mock dependencies
 pub struct MockMetaStore;
@@ -22,7 +22,7 @@ async fn test_virtual_engine_reconciliation() {
 
     let mut running: HashMap<String, RunningModel> = HashMap::new();
     let endpoint_state = Arc::new(Mutex::new(HashMap::<String, EndpointInfo>::new()));
-    
+
     // 2. Create Virtual Placement Plan
     let plan = PlacementPlan {
         model_uid: "virtual-test-model".to_string(),
@@ -40,12 +40,12 @@ async fn test_virtual_engine_reconciliation() {
 
     // 3. Simulate reconciliation (simplified)
     println!("Simulating reconciliation for virtual engine...");
-    
+
     // In actual code this would call reconcile_model
     // We expect it to create the VirtualEngine and register an endpoint
-    
+
     let engine = VirtualEngine::new(&args);
     assert_eq!(engine.engine_type(), "virtual");
-    
+
     println!("Successfully initialized VirtualEngine.");
 }

@@ -80,4 +80,3 @@ pub async fn metrics_handler(State(metrics): State<Arc<SharedMetrics>>) -> impl 
 pub async fn healthz_handler() -> impl IntoResponse {
     (axum::http::StatusCode::OK, "ok")
 }
-

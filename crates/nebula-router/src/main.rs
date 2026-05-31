@@ -33,10 +33,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let store =
-        nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
+        nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint))
+            .await?;
 
-    let strategy = nebula_router::strategy::parse_strategy(&args.routing_strategy)
-        .unwrap_or_else(|e| {
+    let strategy =
+        nebula_router::strategy::parse_strategy(&args.routing_strategy).unwrap_or_else(|e| {
             tracing::error!(error=%e, "invalid routing strategy");
             std::process::exit(1);
         });
@@ -144,7 +145,9 @@ async fn main() -> anyhow::Result<()> {
     let app = public_routes
         .merge(authed_routes)
         .layer(middleware::from_fn_with_state(st.clone(), track_requests))
-        .layer(middleware::from_fn(nebula_common::telemetry::trace_context_middleware))
+        .layer(middleware::from_fn(
+            nebula_common::telemetry::trace_context_middleware,
+        ))
         .with_state(st);
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;

@@ -68,7 +68,6 @@ pub struct Args {
     pub vllm_hf_endpoint: Option<String>,
 
     // ---- SGLang engine parameters ----
-
     /// SGLang binary path (used in local binary mode).
     #[arg(long, default_value = "python3 -m sglang.launch_server")]
     pub sglang_bin: String,

@@ -1,6 +1,6 @@
 pub mod sglang;
-pub mod vllm;
 pub mod r#virtual;
+pub mod vllm;
 
 use std::path::Path;
 use std::time::Duration;

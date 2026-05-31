@@ -60,8 +60,7 @@ pub async fn run_chat(
         }
 
         messages.push(serde_json::json!({"role": "user", "content": line}));
-        let reply =
-            send_streaming(client, base_url, token, &model, &messages, max_tokens).await?;
+        let reply = send_streaming(client, base_url, token, &model, &messages, max_tokens).await?;
         messages.push(serde_json::json!({"role": "assistant", "content": reply}));
         println!();
         println!();
@@ -70,11 +69,7 @@ pub async fn run_chat(
     Ok(())
 }
 
-async fn resolve_model(
-    client: &Client,
-    base_url: &str,
-    token: Option<&String>,
-) -> Result<String> {
+async fn resolve_model(client: &Client, base_url: &str, token: Option<&String>) -> Result<String> {
     let url = format!("{base_url}/v1/models");
     let resp = auth(client.get(&url), token).send().await?;
     let body: Value = resp.json().await?;
@@ -109,10 +104,7 @@ async fn send_streaming(
         "max_tokens": max_tokens,
     });
 
-    let resp = auth(client.post(&url), token)
-        .json(&body)
-        .send()
-        .await?;
+    let resp = auth(client.post(&url), token).json(&body).send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();

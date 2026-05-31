@@ -160,8 +160,7 @@ impl Router {
     }
 
     pub fn inc_xtrace_truncated(&self) {
-        self.xtrace_truncated_total
-            .fetch_add(1, Ordering::Relaxed);
+        self.xtrace_truncated_total.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn xtrace_query_errors_total(&self) -> u64 {
@@ -265,7 +264,9 @@ impl Router {
 
     /// Get the user-facing model_name for a given model_uid.
     pub fn get_model_name(&self, model_uid: &str) -> Option<String> {
-        self.model_uids_to_names.get(model_uid).map(|v| v.value().clone())
+        self.model_uids_to_names
+            .get(model_uid)
+            .map(|v| v.value().clone())
     }
 
     /// Collect all stats as a slice snapshot (for admission control, etc.).
@@ -326,9 +327,7 @@ impl Router {
                         .get(&(aff_model_uid.clone(), *aff_replica_id))
                         .map(|v| v.value().clone())
                     {
-                        let plan_ok = plan_version
-                            .map(|v| ep.plan_version == v)
-                            .unwrap_or(true);
+                        let plan_ok = plan_version.map(|v| ep.plan_version == v).unwrap_or(true);
                         if ep.status == EndpointStatus::Ready && plan_ok {
                             return Ok(ep);
                         }
@@ -385,10 +384,8 @@ impl Router {
             .map(|ep| self.get_fresh_stats(&ep.model_uid, ep.replica_id))
             .collect();
 
-        let mut candidates_data: Vec<(EndpointInfo, Option<EndpointStats>)> = filtered
-            .into_iter()
-            .zip(stats_snapshot)
-            .collect();
+        let mut candidates_data: Vec<(EndpointInfo, Option<EndpointStats>)> =
+            filtered.into_iter().zip(stats_snapshot).collect();
 
         // Stats-missing degradation: when any fresh stats exist, deprioritize stale/missing stats
         // by dropping missing-stats candidates from this routing decision.
@@ -451,8 +448,10 @@ impl Router {
             .ok_or(RouteError::NoEndpoint)?;
 
         if let Some(session_id) = ctx.session_id.clone() {
-            self.session_affinity
-                .insert(session_id, (selected.model_uid.clone(), selected.replica_id));
+            self.session_affinity.insert(
+                session_id,
+                (selected.model_uid.clone(), selected.replica_id),
+            );
         }
 
         Ok(selected)
@@ -477,7 +476,11 @@ impl Router {
         self.route_internal(ctx, model_uid, Some(plan_version), Some(exclude))
     }
 
-    pub fn route(&self, ctx: &ExecutionContext, model_uid: &str) -> Result<EndpointInfo, RouteError> {
+    pub fn route(
+        &self,
+        ctx: &ExecutionContext,
+        model_uid: &str,
+    ) -> Result<EndpointInfo, RouteError> {
         self.route_internal(ctx, model_uid, None, None)
     }
 

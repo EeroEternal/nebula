@@ -59,8 +59,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(Mutex::new(HashMap::new()));
 
     // shared running state (used by both main reconcile loop and heartbeat)
-    let running: Arc<Mutex<HashMap<String, RunningModel>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let running: Arc<Mutex<HashMap<String, RunningModel>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let xtrace = init_xtrace_client(&args);
 
@@ -173,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
                 None => {
                     let key = ev.key;
                     let model_uid = key.strip_prefix(prefix).unwrap_or(&key);
-                    
+
                     if running.lock().await.contains_key(model_uid) {
                         tracing::info!(model=%model_uid, "placement deleted event affecting local node");
                         let model_uid = model_uid.to_string();

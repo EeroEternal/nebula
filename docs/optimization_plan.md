@@ -1,267 +1,171 @@
-# Nebula 优化计划（借鉴 AIBrix）
+# Nebula 优化计划（当前代码基线）
 
-> 基于对 AIBrix 项目的深度分析，结合 Nebula 当前代码状态，制定的分层优化路线。
+> 本文基于当前代码状态更新。旧版计划中部分能力已经落地，后续优化重点从“补功能”转为“收敛边界、巩固控制面热路径、补关键测试”。
 
-## 核心判断
+## 当前判断
 
-Nebula 和 AIBrix 解决同一层问题（LLM serving 控制面），但运行假设完全不同：
+Nebula 的主方向仍然成立：Rust 控制面、Python/推理引擎执行面、etcd 作为权威状态源，Scheduler 写期望状态，Node reconcile 实际状态，Router 基于 endpoint 与 stats 做请求路由。
 
-| | AIBrix | Nebula |
-|--|--------|--------|
-| **底座** | K8s（Pod/Deployment/HPA/Envoy 全套） | etcd + 自研 Daemon（裸机/docker-compose） |
-| **扩缩容** | K8s HPA/KPA 做 Pod 级别 | Scheduler 写 PlacementPlan，Node reconcile |
-| **网关** | Envoy Gateway + External Processing | 自研 Rust Gateway + Router |
-| **引擎管理** | Sidecar（AI Runtime） | Node Daemon 直接管理子进程/容器 |
+当前 `cargo check --workspace` 已通过。旧文档中 “Gateway 编译未闭合” 已不是当前 P0。现阶段更重要的问题是：
 
-Nebula 的优化不应复刻 AIBrix 的 feature list，而是**利用自身架构优势，把 AIBrix 验证过的高价值思路用 Nebula 的方式实现**。
+| 领域 | 当前状态 | 下一步重点 |
+|------|----------|------------|
+| Gateway | 已有鉴权、审计、metrics、请求体上限、BFF 代理 | 默认安全策略与职责边界收敛 |
+| Router | 已有策略插件化、重试、熔断、过载保护、TTFT/E2E metrics | 避免 full body buffer，稳定 stats 热路径 |
+| Scheduler | 已有周期 reconcile，部分 CAS 更新 | 所有 placement 写路径统一 CAS |
+| Node | 已有 GPU 增强、引擎健康检查、stats scrape、xtrace metrics push | 明确 stats 控制面存储契约 |
+| Observability | 已有 `/metrics` 与 trace context 注入/提取 | 统一 BFF 初始化与面板/告警口径 |
 
----
+## 已落地能力
 
-## 第一层：信号基础设施（一切优化的前提）
+### Router 防护与策略
 
-当前最大短板是**缺数据**。Router 路由决策只有 `pending_requests` 一个信号，Scheduler 放置决策只有 GPU 显存一个信号。
+- `RoutingStrategy` 已拆出，支持 `least_pending`、`least_kv_cache`、`prefix_cache_aware`。
+- Router 会过滤非 Ready endpoint、plan_version 不匹配 endpoint、熔断中的 endpoint。
+- 已支持一次或多次可配置重试，并在重试时排除首次失败 endpoint。
+- 已有请求体大小上限、429 admission control、E2E latency 与 TTFT histogram。
+- `/metrics` 已暴露 Router 请求量、状态码、重试、上游错误、熔断、stale stats 等指标。
 
-### 1.1 引擎指标采集（Engine Stats Pipeline）
+### Node 健康与信号
 
-**现状**：`EndpointStats` 已定义 `prefix_cache_hit_rate`、`kv_cache_used_bytes` 等字段，但没有任何地方填充。
+- `nvidia-smi` 已采集显存、温度、GPU 利用率。
+- heartbeat loop 已执行引擎 health check，连续失败后标记 Unhealthy，并在更高阈值后尝试 restart。
+- Node 已 scrape 引擎 stats，并推送 pending、KV cache usage、prefix cache hit rate 到 xtrace。
+- Node API 已暴露 Prometheus metrics snapshot。
 
-**设计**：Node Daemon heartbeat 循环中，对每个 running engine 主动拉取 vLLM `/metrics`，解析关键指标，写入 etcd。
+### Scheduler reconcile
 
-```
-heartbeat_loop (每 3s)
-  ├── read_gpu_statuses()          ← 已有
-  ├── scrape_engine_metrics()      ← 新增
-  │     对每个 running engine:
-  │       GET {base_url}/metrics
-  │       解析: pending, running, kv_cache_usage, prefix_cache_hit_rate
-  │       写入 EndpointStats → etcd /stats/{model_uid}/{replica_id}
-  └── register_endpoint()          ← 已有
-```
+- Scheduler 已有周期 reconcile loop，能基于 endpoint 状态和负载信号做自愈与扩缩容尝试。
+- `reconcile.rs` 中 placement 更新已使用 `compare_and_swap`。
+- 已支持 `min_replicas` / `max_replicas` 风格的副本边界。
 
-**改动范围**：
-- `nebula-node/src/heartbeat.rs` — 增加 `scrape_engine_metrics()`
-- `nebula-router/src/sync.rs` — 增加 watch `/stats/` 前缀，同步到 `Router.stats`
+### Gateway 基础防护
 
-**优先级**：最高。这是所有后续优化的数据管道，没有它 cache-aware 路由、KV-aware 路由、autoscaling 全都无法实现。
+- Gateway 推理和 admin 路由已接入共享 auth middleware。
+- Gateway 已有请求体大小上限、上游错误分类指标、请求量和状态码 metrics。
+- Gateway 已注入 trace context，并暴露 `/metrics`。
 
-### 1.2 Router 侧请求级指标
+## P0：必须先修的风险
 
-**现状**：Gateway `track_requests` 只统计 total/inflight/status code，无延迟、无 per-model 维度。
+### P0-1 鉴权默认改为 fail-closed（已完成）
 
-**设计**：在 Router 的 `proxy_chat_completions` handler 中记录：
-- **E2E latency**（请求进入到响应完成）
-- **TTFT**（流式场景，第一个 SSE chunk 到达的时间）
-- 按 `model_uid` 维度聚合
+当前 auth middleware 已默认启用鉴权。`NEBULA_AUTH_TOKENS` 未配置或没有有效 token 时，受保护路由会拒绝请求；只有显式设置 `NEBULA_AUTH_DISABLED=true` 或 `NEBULA_DEV_AUTH_DISABLED=true` 时才允许开发免鉴权。
 
-实现方式：`DashMap<String, AtomicHistogram>`，histogram 用固定 bucket（1ms, 5ms, 10ms, 50ms, 100ms, 500ms, 1s, 5s, 10s, 30s），Prometheus 标准做法。
+后续只需在部署文档和 compose 示例中继续强调生产必须配置 `NEBULA_AUTH_TOKENS`。
 
-**改动范围**：
-- `nebula-router/src/handlers.rs` — proxy 前后记录时间戳
-- `nebula-router/src/metrics.rs` — histogram 结构和 Prometheus 格式输出
+### P0-2 明确 stats 控制面热路径
 
----
+旧计划设想 Node 写 `/stats/{model_uid}/{replica_id}` 到 etcd；当前代码实际更偏向 Node 推 xtrace、Router/Scheduler 从 xtrace 拉取指标。
 
-## 第二层：路由智能化（投入产出比最高）
+建议将两类数据分开：
 
-AIBrix 论文数据：prefix-cache-aware 路由 P99 降低 79%。
+- 控制面实时决策：写入 etcd `/stats/{model_uid}/{replica_id}`，带 TTL/lease，只保存最新值。
+- 历史观测与面板：推送 xtrace/Prometheus，用于查询、趋势和告警。
 
-### 2.1 路由策略插件化
+这样 Router 和 Scheduler 不依赖观测后端可用性，xtrace 限流或延迟不会直接影响路由和扩缩容。
 
-**现状**：`Router::route()` 硬编码 least-pending 逻辑。
+### P0-3 所有 placement 写路径统一 CAS（已完成）
 
-**设计**：
+`scheduler/src/main.rs` 的 placement 写路径已改为 CAS；`reconcile.rs` 也已修正 CAS 返回 `ok=false` 时被误判为成功的问题。
 
-```rust
-pub trait RoutingStrategy: Send + Sync {
-    fn select(&self, candidates: &[Candidate]) -> Option<usize>;
-    fn name(&self) -> &'static str;
-}
+建议：
 
-pub struct Candidate {
-    pub endpoint: EndpointInfo,
-    pub stats: Option<EndpointStats>,
-}
-```
+- 后续仍建议明确 `PlacementPlan.version` 是逻辑版本还是时间戳；推荐使用单调逻辑版本，时间戳另设字段。
 
-Router 负责过滤（model_uid 匹配、Ready 状态、plan_version 一致），Strategy 只负责从候选列表中选一个。
+### P0-4 Router 避免完整缓冲大请求体
 
-**初始策略集**：
-- `LeastPending` — 现有逻辑直接迁移
-- `LeastKvCache` — 选 `kv_cache_used_bytes` 最低的（依赖 1.1）
-- `PrefixCacheAware` — 选 `prefix_cache_hit_rate` 最高的，低于阈值时 fallback 到 LeastPending（依赖 1.1）
+Router 当前需要读取完整 POST body 来解析 `model` 并重写 body。长上下文、多模态或异常请求会放大内存压力。
 
-**改动范围**：
-- `nebula-router/src/strategy.rs` — 新增 trait + 3 个实现
-- `nebula-router/src/lib.rs` — Router 持有 `Arc<dyn RoutingStrategy>`，route() 重构
-- `nebula-router/src/args.rs` — 增加 `--routing-strategy` 参数
+建议：
 
-### 2.2 不实现 Random/RoundRobin
+- Gateway 在入口解析 `model`，注入 `X-Nebula-Model` 或 `X-Nebula-Model-Uid`。
+- Router 优先使用 header 做路由选择。
+- 对可直通请求体使用 streaming proxy，不再为路由决策 full buffer。
+- body rewrite 只保留在确实需要模型名兼容时的受控路径。
 
-LLM 请求计算量差异巨大（10 token vs 10000 token），盲目均分只会导致负载不均。AIBrix 虽实现了 random 但论文从未推荐使用。精力应放在 LeastKvCache 和 PrefixCacheAware 上。
+## P1：架构边界收敛
 
----
+### P1-1 固定 Gateway / Router / BFF 职责
 
-## 第三层：Scheduler 从静态放置到动态调节
+建议采用以下边界：
 
-### 3.1 现状
+| 组件 | 职责 |
+|------|------|
+| Gateway | 对外入口、OpenAI-compatible HTTP/SSE、鉴权、审计、错误映射、请求上下文提取 |
+| Router | endpoint 选择、重试、熔断、过载保护、stats 驱动路由、上游代理 |
+| BFF | 控制台 API、用户/session、模板、模型管理视图、前端聚合接口 |
 
-当前 Scheduler 是纯事件驱动的一次性放置器：watch `/model_requests/` → 选 node → 写 PlacementPlan → 完事。之后不再管理。引擎挂了没人知道，负载变化不会调整副本数。
+Gateway 可以代理 BFF API，但同一类 API 只能有一个 owner。UniGateway 如继续使用，应定位为协议执行或高性能转发库，不应绕过 Router 的集群调度语义。
 
-### 3.2 引入 Reconcile Loop
+### P1-2 统一 telemetry/auth 初始化
 
-```
-scheduler_reconcile_loop (每 30s)
-  ├── 读取所有 /placements/
-  ├── 读取所有 /endpoints/ 和 /stats/
-  ├── 对每个 model:
-  │     ├── 检查健康：endpoint 心跳超时 → 标记异常
-  │     ├── 检查负载：avg(kv_cache_usage) > 80% → 需要扩容
-  │     ├── 检查空闲：avg(pending_requests) == 0 持续 5min → 可以缩容
-  │     └── 生成调整决策 → 更新 PlacementPlan
-  └── 写入 etcd（CAS 保证一致性）
-```
+Gateway、Router、Scheduler、Node 已使用 `nebula_common::telemetry::init_tracing`，BFF 仍直接初始化 `tracing_subscriber::fmt()`。
 
-**第一阶段：健康自愈**
-- endpoint 心跳超时 > 30s → 从 PlacementPlan 移除，触发 Node 侧清理
-- `replicas` 要求未满足 → 重新选 node 补充
+建议：
 
-**第二阶段：负载驱动扩缩容**
-- 基于 `kv_cache_usage` 和 `pending_requests` 滑动窗口均值自动调整 `replicas`
-- `ModelLoadRequest` 增加 `min_replicas` / `max_replicas` 字段
+- BFF 改用统一 telemetry 初始化。
+- 推理 API token、控制台 session、服务间 token 分开建模。
+- auth metrics 在 shared middleware 内统一记录，避免 Gateway 单独包装后遗漏其他服务。
 
-**改动范围**：
-- `nebula-scheduler/src/main.rs` — 增加 reconcile loop（与现有 watch loop 并行）
-- `nebula-scheduler/src/planner.rs` — 增加 `reconcile_placements()`
-- `nebula-common/src/model_request.rs` — 增加 `min_replicas` / `max_replicas`
+### P1-3 补关键架构测试
 
----
+优先补以下测试：
 
-## 第四层：Node 侧健壮性
+- Router：策略选择、熔断、stale stats 降级、429 admission、header-driven routing。
+- Scheduler：placement CAS 冲突、reconcile 重试、扩缩容边界。
+- Node：health check 连续失败、Unhealthy 标记、restart cooldown。
+- Gateway：鉴权默认策略、SSE 透传、OpenAI-compatible 错误映射。
 
-### 4.1 引擎健康检查
+## P2：可维护性与扩展性
 
-**现状**：Node 启动引擎后只做一次 `wait_engine_ready`，之后不再检查。引擎 OOM 或 hang 住不会被发现。
+### P2-1 拆分 `nebula-common`
 
-**设计**：heartbeat loop 中对每个 running engine 探测 `/health`，连续 3 次失败 → 标记 Unhealthy → 尝试重启。
+`nebula-common` 目前同时承载领域类型、auth、telemetry、执行上下文。短期可接受，但继续膨胀会让依赖边界变重。
 
-**改动范围**：
-- `nebula-node/src/reconcile.rs` — `RunningModel` 增加 `consecutive_failures` 和 `base_url`
-- `nebula-node/src/heartbeat.rs` — 增加健康检查逻辑
+建议后续拆为：
 
-### 4.2 GPU 状态增强
+- `nebula-common-types`：placement、endpoint、model request、node status。
+- `nebula-common-auth`：鉴权、角色、token、middleware。
+- `nebula-common-telemetry`：tracing、trace context、OTLP/xtrace 初始化。
 
-**现状**：`nvidia-smi` 只查 `memory.total,memory.used`。
+### P2-2 收敛通用配置与 HTTP client
 
-**设计**：增加 `temperature.gpu` 和 `utilization.gpu`，只上报数据，评估逻辑留给 Scheduler 策略层。
+已有 `CommonArgs`，但各服务仍有不少 HTTP client builder 和超时配置散落。
 
-**改动范围**：
-- `nebula-common/src/node_status.rs` — `GpuStatus` 增加 `temperature` 和 `utilization_gpu`
-- `nebula-node/src/gpu.rs` — nvidia-smi 查询增加字段
+建议：
 
----
+- 提供统一 `build_http_client`。
+- 对 connect timeout、first byte timeout、request timeout 分层。
+- 把默认值写入文档和 `/metrics` build info。
 
-## 第五层：Gateway 防护
+### P2-3 观测面板与调参闭环
 
-### 5.1 Admission Control（基于负载的背压）
+现有 `/metrics` 已具备基础数据，下一步应补：
 
-不做传统 Token Bucket 限流（LLM 请求成本差异巨大，QPS 限流意义不大）。
+- Router 按 `model_uid` 展示 5xx、TTFT、E2E、retry、circuit。
+- Gateway 展示鉴权拒绝、限流、请求体超限、BFF proxy 错误。
+- 将配置变更事件叠加到趋势图，方便判断参数调整效果。
 
-Router 路由时，如果所有 endpoint 的 `kv_cache_usage > 95%`，直接拒绝新请求（返回 429 + Retry-After）。这是基于真实负载的背压。
+## 建议执行顺序
 
-**改动范围**：
-- `nebula-router/src/lib.rs` — route() 返回 `Result<EndpointInfo, RouteError>`
-- `nebula-router/src/handlers.rs` — 根据 RouteError 类型返回 503 或 429
-
-### 5.2 简单重试
-
-当前 route 失败直接返回 503。可加简单 retry：route 失败后 sleep 100ms 重试一次，无需复杂排队系统。
-
----
-
-## 第六层：可观测性基础设施
-
-### 6.1 统一 Metrics 暴露（Prometheus 格式）
-
-**现状**：Gateway 有基础计数器但未暴露 `/metrics`；Engine Stats Pipeline 写 etcd 供 Router 实时路由，但无历史回溯能力；容器/镜像资产无记录。
-
-**设计原则**：
-- etcd 只存控制面数据（placement、endpoint、stats），不存可观测性数据
-- 每个组件暴露 `/metrics` endpoint，由 Prometheus 统一采集和持久化
-
-**各组件指标**：
-
-```
-Node /metrics:
-  nebula_container_status{model_uid, replica_id, image}
-  nebula_container_restart_total{model_uid}
-  nebula_gpu_temperature{gpu_index}
-  nebula_gpu_utilization{gpu_index}
-  nebula_engine_kv_cache_usage{model_uid}
-  nebula_engine_pending_requests{model_uid}
-
-Router /metrics:
-  nebula_route_total{model_uid, status}
-  nebula_route_latency_seconds{model_uid, quantile}
-
-Gateway /metrics:
-  nebula_request_total{status_code}
-  nebula_request_concurrent
-```
-
-**改动范围**：
-- 各 crate 增加 `metrics.rs`，使用 `prometheus` crate 注册指标
-- 各 HTTP server 增加 `GET /metrics` handler
-
-### 6.2 日志集中收集
-
-**设计**：各组件 `tracing` 接入 OpenTelemetry exporter → 推送到 Loki。容器日志通过 Docker logging driver 或 Loki Docker plugin 采集。
-
-### 6.3 分布式 Tracing
-
-**设计**：请求从 Gateway → Router → Engine 的完整链路，通过 OpenTelemetry SDK 注入 trace context，推送到 Jaeger/Tempo。
-
----
-
-## 实施顺序与依赖关系
-
-```
-第一层：信号基础设施
-  1.1 Engine Stats Pipeline ──────┐
-  1.2 Router 请求级指标           │
-                                  ▼
-第二层：路由智能化                │
-  2.1 策略插件化 ◄────────────────┘
-      ├── LeastPending (迁移现有)
-      ├── LeastKvCache (依赖 1.1)
-      └── PrefixCacheAware (依赖 1.1)
-
-第三层：Scheduler 动态调节
-  3.1 健康自愈 (依赖 1.1)
-  3.2 负载驱动扩缩容 (依赖 1.1 + 3.1)
-
-第四层：Node 健壮性
-  4.1 引擎健康检查
-  4.2 GPU 状态增强
-
-第五层：Gateway 防护
-  5.1 Admission Control (依赖 1.1)
-  5.2 简单重试
-```
-
-**关键路径**：1.1 → 2.1 → 3.1。这三步做完，Nebula 从"能用"变成"好用"。
+1. 鉴权默认 fail-closed。（已完成）
+2. 定稿 stats 控制面路径：etcd 最新值 + xtrace/Prometheus 历史观测。
+3. Scheduler placement 写路径全量 CAS。（已完成）
+4. Gateway 注入模型 header，Router 改为 header-driven routing，逐步移除 full body buffer。
+5. 固定 Gateway / Router / BFF / UniGateway 边界。
+6. 补 Router、Scheduler、Node、Gateway 的架构回归测试。
+7. 再做 `nebula-common` 拆分和配置/HTTP client 收敛。
 
 ## 工作量估算
 
-| 阶段 | 工作量 | 说明 |
-|------|--------|------|
-| 1.1 Engine Stats Pipeline | 2 天 | scrape + 写 etcd + Router 侧 sync |
-| 1.2 请求级指标 | 1 天 | histogram + TTFT 记录 |
-| 2.1 路由策略插件化 | 2 天 | trait + 3 策略 + 参数 + 测试 |
-| 3.1 Scheduler 健康自愈 | 2 天 | reconcile loop + 补充副本 |
-| 3.2 负载驱动扩缩容 | 3 天 | 扩缩容决策 + min/max replicas |
-| 4.1 引擎健康检查 | 1 天 | /health 探测 + 重启逻辑 |
-| 4.2 GPU 状态增强 | 0.5 天 | nvidia-smi 字段扩展 |
-| 5.1 Admission Control | 1 天 | 背压逻辑 + 429 返回 |
-| **合计** | **~12.5 天** | |
+| 项目 | 预估 |
+|------|------|
+| 鉴权默认 fail-closed | 已完成 |
+| stats 控制面路径定稿与实现 | 1.5-2 天 |
+| placement 全路径 CAS | 已完成 |
+| header-driven routing + streaming proxy | 2-3 天 |
+| 边界收敛与文档同步 | 1 天 |
+| 关键架构测试 | 2-3 天 |
+| telemetry/auth 初始化统一 | 1 天 |
 
-前 5 天（1.1 + 1.2 + 2.1）完成后即可看到明显效果。
+前 4 项完成后，Nebula 的生产风险会明显下降；后续优化再围绕可维护性和运维体验推进。

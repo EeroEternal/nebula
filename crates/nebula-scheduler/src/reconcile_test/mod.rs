@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nebula_common::{PlacementPlan, PlacementAssignment};
+    use nebula_common::{PlacementAssignment, PlacementPlan};
     use nebula_meta::{MemoryMetaStore, MetaStore};
     use std::sync::Arc;
 
@@ -47,7 +47,7 @@ mod tests {
         };
         let val2 = serde_json::to_vec(&concurrent_plan).unwrap();
         store.put(&placement_key, val2, None).await.unwrap();
-        
+
         // Confirm new revision is 2
         let (_, new_revision) = store.get(&placement_key).await.unwrap().unwrap();
         assert_eq!(new_revision, 2);
@@ -58,10 +58,10 @@ mod tests {
             model_uid: model_uid.clone(),
             model_name: "test-model".into(),
             version: 1001,
-            assignments: vec![], 
+            assignments: vec![],
         };
         let val3 = serde_json::to_vec(&updated_plan).unwrap();
-        
+
         let result = store.compare_and_swap(&placement_key, revision, val3).await;
 
         // 4. Assertion: CAS must fail

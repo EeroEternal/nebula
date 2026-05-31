@@ -58,4 +58,3 @@ pub struct ModelDeployment {
 fn default_replicas() -> u32 {
     1
 }
-

@@ -16,10 +16,7 @@ const GC_INTERVAL_SECS: u64 = 3600; // 1 hour
 /// 1. On startup, scan all registered images and pull any that are missing locally.
 /// 2. Watch `/images/` for new/updated registrations and pull as needed.
 /// 3. Periodically clean up local images that are no longer in the registry.
-pub async fn image_manager_loop(
-    store: EtcdMetaStore,
-    node_id: String,
-) {
+pub async fn image_manager_loop(store: EtcdMetaStore, node_id: String) {
     // Initial scan: pull all registered images that are missing locally
     let mut start_rev: u64 = 0;
     if let Ok(kvs) = store.list_prefix("/images/").await {
@@ -66,11 +63,7 @@ pub async fn image_manager_loop(
                     if let Ok(img) = serde_json::from_slice::<EngineImage>(&val) {
                         tracing::info!(image_id=%img.id, image=%img.image, "image registry updated");
                         if img.pre_pull {
-                            tokio::spawn(pull_if_missing(
-                                store.clone(),
-                                node_id.clone(),
-                                img,
-                            ));
+                            tokio::spawn(pull_if_missing(store.clone(), node_id.clone(), img));
                         }
                     }
                 }

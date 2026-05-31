@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::auth::{require_role, AuthContext, Role};
 use crate::args::XtraceAuthMode;
+use crate::auth::{require_role, AuthContext, Role};
 use crate::state::AppState;
 use nebula_common::{
     ClusterStatus, EndpointInfo, EndpointStats, ModelLoadRequest, ModelRequest, ModelRequestStatus,
@@ -44,8 +44,6 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
     };
     (status, Json(body)).into_response()
 }
-
-
 
 pub async fn healthz() -> impl IntoResponse {
     Json(json!({"status": "ok"}))
@@ -235,7 +233,11 @@ pub async fn metrics(
 }
 
 pub async fn logs(State(_st): State<AppState>) -> impl IntoResponse {
-    error_response(StatusCode::NOT_IMPLEMENTED, "not_implemented", "logs not implemented")
+    error_response(
+        StatusCode::NOT_IMPLEMENTED,
+        "not_implemented",
+        "logs not implemented",
+    )
 }
 
 pub async fn engine_stats(
@@ -260,8 +262,10 @@ pub async fn engine_stats(
     let now = chrono::Utc::now();
     let from = now - chrono::Duration::seconds(120);
 
-    let mut pending_map: std::collections::HashMap<(String, u32), u64> = std::collections::HashMap::new();
-    let mut kv_usage_map: std::collections::HashMap<(String, u32), f64> = std::collections::HashMap::new();
+    let mut pending_map: std::collections::HashMap<(String, u32), u64> =
+        std::collections::HashMap::new();
+    let mut kv_usage_map: std::collections::HashMap<(String, u32), f64> =
+        std::collections::HashMap::new();
 
     for (metric_name, is_pending) in [("pending_requests", true), ("kv_cache_usage", false)] {
         let q = xtrace_client::MetricsQueryParams {
@@ -276,11 +280,15 @@ pub async fn engine_stats(
         match client.query_metrics(&q).await {
             Ok(resp) => {
                 for series in &resp.data {
-                    let model_uid = series.labels.get("model_uid")
+                    let model_uid = series
+                        .labels
+                        .get("model_uid")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    let replica_id: u32 = series.labels.get("replica_id")
+                    let replica_id: u32 = series
+                        .labels
+                        .get("replica_id")
                         .and_then(|v| v.as_str())
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(0);
@@ -419,7 +427,10 @@ async fn search_huggingface(http: &reqwest::Client, query: &str, limit: usize) -
                         .collect()
                 })
                 .unwrap_or_default(),
-            pipeline_tag: m.get("pipeline_tag").and_then(|p| p.as_str()).map(String::from),
+            pipeline_tag: m
+                .get("pipeline_tag")
+                .and_then(|p| p.as_str())
+                .map(String::from),
             source: "huggingface".to_string(),
         })
         .collect();
@@ -475,7 +486,10 @@ async fn search_modelscope(http: &reqwest::Client, query: &str, limit: usize) ->
                         .collect()
                 })
                 .unwrap_or_default(),
-            pipeline_tag: m.get("pipeline_tag").and_then(|p| p.as_str()).map(String::from),
+            pipeline_tag: m
+                .get("pipeline_tag")
+                .and_then(|p| p.as_str())
+                .map(String::from),
             source: "modelscope".to_string(),
         })
         .collect();
@@ -483,10 +497,7 @@ async fn search_modelscope(http: &reqwest::Client, query: &str, limit: usize) ->
     (StatusCode::OK, Json(results)).into_response()
 }
 
-async fn load_model_with_request(
-    st: AppState,
-    req: Option<ModelLoadRequest>,
-) -> Response {
+async fn load_model_with_request(st: AppState, req: Option<ModelLoadRequest>) -> Response {
     let req = match req {
         Some(req) => req,
         None => {
@@ -529,7 +540,11 @@ async fn load_model_with_request(
         );
     }
 
-    (StatusCode::OK, Json(json!({"request_id": request_id, "status": "pending"}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"request_id": request_id, "status": "pending"})),
+    )
+        .into_response()
 }
 
 /// Generic helper: proxy a GET request to xtrace, forwarding query string.
@@ -639,7 +654,13 @@ pub async fn observe_traces(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return resp;
     }
-    xtrace_proxy_get(&st, "/api/public/traces", req.uri().query(), Some(&ctx.principal)).await
+    xtrace_proxy_get(
+        &st,
+        "/api/public/traces",
+        req.uri().query(),
+        Some(&ctx.principal),
+    )
+    .await
 }
 
 pub async fn observe_trace_detail(
@@ -705,13 +726,7 @@ async fn unload_model_inner(st: AppState, id: String) -> Response {
     let key = format!("/model_requests/{}", id);
     let (data, _) = match st.store.get(&key).await {
         Ok(Some(kv)) => kv,
-        Ok(None) => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "request not found",
-            )
-        }
+        Ok(None) => return error_response(StatusCode::NOT_FOUND, "not_found", "request not found"),
         Err(e) => {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -752,7 +767,11 @@ async fn unload_model_inner(st: AppState, id: String) -> Response {
         );
     }
 
-    (StatusCode::OK, Json(json!({"status": "unloading_triggered"}))).into_response()
+    (
+        StatusCode::OK,
+        Json(json!({"status": "unloading_triggered"})),
+    )
+        .into_response()
 }
 
 pub async fn audit_logs(
@@ -770,7 +789,13 @@ pub async fn audit_logs(
     } else {
         format!("{existing_query}&tags%5B%5D=audit")
     };
-    xtrace_proxy_get(&st, "/api/public/traces", Some(&query), Some(&ctx.principal)).await
+    xtrace_proxy_get(
+        &st,
+        "/api/public/traces",
+        Some(&query),
+        Some(&ctx.principal),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

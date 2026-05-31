@@ -48,4 +48,4 @@ opentelemetry 0.27, opentelemetry_sdk 0.27, opentelemetry-otlp 0.27, tracing-ope
 
 - etcd 只存控制面数据（placement、endpoint、stats 用于实时路由决策）
 - 可观测性数据（metrics、logs、traces）走专用系统，不存 etcd
-- Engine Stats Pipeline 写入 etcd /stats/ 保留（Router 实时路由用），同时通过 /metrics 暴露（历史回溯用）
+- Engine Stats Pipeline 目标形态仍是写入 etcd `/stats/` 供 Router/Scheduler 实时决策，同时通过 xtrace/Prometheus 暴露历史观测；当前代码已具备 Node scrape 和 xtrace 推送，`/stats/` 控制面热路径仍需收敛。

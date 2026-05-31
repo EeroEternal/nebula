@@ -1,10 +1,18 @@
-use axum::{extract::{Path, State}, http::StatusCode, response::{IntoResponse, Response}, Extension, Json};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Extension, Json,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
 
-use crate::auth::{new_session_token, require_role, role_from_str, role_to_str, session_expiry, verify_password, AuthContext, Role};
+use crate::auth::{
+    new_session_token, require_role, role_from_str, role_to_str, session_expiry, verify_password,
+    AuthContext, Role,
+};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -81,13 +89,22 @@ struct ErrorBody {
 }
 
 fn err(status: StatusCode, msg: &str) -> Response {
-    (status, Json(ErrorBody { error: msg.to_string() })).into_response()
+    (
+        status,
+        Json(ErrorBody {
+            error: msg.to_string(),
+        }),
+    )
+        .into_response()
 }
 
 pub async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) -> Response {
     let username = req.username.trim();
     if username.is_empty() || req.password.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "username and password are required");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "username and password are required",
+        );
     }
 
     let row = match sqlx::query(
@@ -127,12 +144,13 @@ pub async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) ->
     let token = new_session_token();
     let expires_at = session_expiry(st.session_ttl_hours);
 
-    if let Err(e) = sqlx::query("INSERT INTO bff_sessions (token, user_id, expires_at) VALUES ($1, $2, $3)")
-        .bind(&token)
-        .bind(user_id)
-        .bind(expires_at)
-        .execute(&st.db)
-        .await
+    if let Err(e) =
+        sqlx::query("INSERT INTO bff_sessions (token, user_id, expires_at) VALUES ($1, $2, $3)")
+            .bind(&token)
+            .bind(user_id)
+            .bind(expires_at)
+            .execute(&st.db)
+            .await
     {
         tracing::error!(error=%e, "insert session failed");
         return err(StatusCode::INTERNAL_SERVER_ERROR, "database error");
@@ -222,7 +240,11 @@ pub async fn update_profile(
     Extension(ctx): Extension<AuthContext>,
     Json(req): Json<UpdateProfileRequest>,
 ) -> Response {
-    let display_name = req.display_name.as_deref().map(str::trim).map(str::to_string);
+    let display_name = req
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_string);
     let email = req.email.as_deref().map(str::trim).map(str::to_string);
 
     if let Err(e) = sqlx::query(
@@ -247,7 +269,10 @@ pub async fn update_profile(
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-pub async fn get_settings(State(st): State<AppState>, Extension(ctx): Extension<AuthContext>) -> Response {
+pub async fn get_settings(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Response {
     let user_row = match sqlx::query("SELECT id FROM bff_users WHERE username = $1 LIMIT 1")
         .bind(&ctx.principal)
         .fetch_optional(&st.db)
@@ -265,15 +290,19 @@ pub async fn get_settings(State(st): State<AppState>, Extension(ctx): Extension<
     };
     let user_id: Uuid = user_row.get("id");
 
-    let _ = sqlx::query("INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING")
-        .bind(user_id)
-        .execute(&st.db)
-        .await;
+    let _ = sqlx::query(
+        "INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(&st.db)
+    .await;
 
-    let settings = match sqlx::query("SELECT in_app_alerts, email_alerts FROM bff_user_settings WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_one(&st.db)
-        .await
+    let settings = match sqlx::query(
+        "SELECT in_app_alerts, email_alerts FROM bff_user_settings WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&st.db)
+    .await
     {
         Ok(v) => v,
         Err(e) => {
@@ -312,15 +341,19 @@ pub async fn update_settings(
     };
     let user_id: Uuid = user_row.get("id");
 
-    let _ = sqlx::query("INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING")
-        .bind(user_id)
-        .execute(&st.db)
-        .await;
+    let _ = sqlx::query(
+        "INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(&st.db)
+    .await;
 
-    let current = match sqlx::query("SELECT in_app_alerts, email_alerts FROM bff_user_settings WHERE user_id = $1")
-        .bind(user_id)
-        .fetch_one(&st.db)
-        .await
+    let current = match sqlx::query(
+        "SELECT in_app_alerts, email_alerts FROM bff_user_settings WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(&st.db)
+    .await
     {
         Ok(v) => v,
         Err(e) => {
@@ -329,8 +362,12 @@ pub async fn update_settings(
         }
     };
 
-    let in_app_alerts = req.in_app_alerts.unwrap_or_else(|| current.get("in_app_alerts"));
-    let email_alerts = req.email_alerts.unwrap_or_else(|| current.get("email_alerts"));
+    let in_app_alerts = req
+        .in_app_alerts
+        .unwrap_or_else(|| current.get("in_app_alerts"));
+    let email_alerts = req
+        .email_alerts
+        .unwrap_or_else(|| current.get("email_alerts"));
 
     if let Err(e) = sqlx::query(
         "UPDATE bff_user_settings SET in_app_alerts = $1, email_alerts = $2, updated_at = NOW() WHERE user_id = $3",
@@ -348,7 +385,10 @@ pub async fn update_settings(
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
 }
 
-pub async fn list_users(State(st): State<AppState>, Extension(ctx): Extension<AuthContext>) -> Response {
+pub async fn list_users(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Response {
     if let Some(resp) = require_role(&ctx, Role::Admin) {
         return resp;
     }
@@ -406,7 +446,10 @@ pub async fn create_user(
     let user_id = Uuid::new_v4();
     let password_hash = match crate::auth::hash_password(req.password.trim()) {
         Ok(v) => v,
-        Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password").into_response(),
+        Err(_) => {
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password")
+                .into_response()
+        }
     };
 
     let insert = sqlx::query(
@@ -429,12 +472,18 @@ pub async fn create_user(
         return err(StatusCode::CONFLICT, "user already exists").into_response();
     }
 
-    let _ = sqlx::query("INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING")
-        .bind(user_id)
-        .execute(&st.db)
-        .await;
+    let _ = sqlx::query(
+        "INSERT INTO bff_user_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+    )
+    .bind(user_id)
+    .execute(&st.db)
+    .await;
 
-    (StatusCode::CREATED, Json(serde_json::json!({"ok": true, "id": user_id}))).into_response()
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"ok": true, "id": user_id})),
+    )
+        .into_response()
 }
 
 pub async fn update_user(
@@ -451,10 +500,12 @@ pub async fn update_user(
         return err(StatusCode::BAD_REQUEST, "invalid user id").into_response();
     };
 
-    let existing = match sqlx::query("SELECT role, display_name, email, is_active FROM bff_users WHERE id = $1")
-        .bind(user_uuid)
-        .fetch_optional(&st.db)
-        .await
+    let existing = match sqlx::query(
+        "SELECT role, display_name, email, is_active FROM bff_users WHERE id = $1",
+    )
+    .bind(user_uuid)
+    .fetch_optional(&st.db)
+    .await
     {
         Ok(v) => v,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response(),
@@ -484,7 +535,9 @@ pub async fn update_user(
         .map(str::trim)
         .map(str::to_string)
         .or_else(|| existing.get::<Option<String>, _>("email"));
-    let is_active = req.is_active.unwrap_or_else(|| existing.get::<bool, _>("is_active"));
+    let is_active = req
+        .is_active
+        .unwrap_or_else(|| existing.get::<bool, _>("is_active"));
 
     if let Err(_) = sqlx::query(
         "UPDATE bff_users SET role = $1, display_name = $2, email = $3, is_active = $4, updated_at = NOW() WHERE id = $5",
@@ -500,16 +553,26 @@ pub async fn update_user(
         return err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
 
-    if let Some(password) = req.password.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+    if let Some(password) = req
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
         let hash = match crate::auth::hash_password(password) {
             Ok(v) => v,
-            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password").into_response(),
+            Err(_) => {
+                return err(StatusCode::INTERNAL_SERVER_ERROR, "failed to hash password")
+                    .into_response()
+            }
         };
-        let _ = sqlx::query("UPDATE bff_users SET password_hash = $1, updated_at = NOW() WHERE id = $2")
-            .bind(hash)
-            .bind(user_uuid)
-            .execute(&st.db)
-            .await;
+        let _ = sqlx::query(
+            "UPDATE bff_users SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(hash)
+        .bind(user_uuid)
+        .execute(&st.db)
+        .await;
     }
 
     (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
