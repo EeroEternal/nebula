@@ -179,10 +179,13 @@ pub async fn proxy_post(
         }
     };
 
+    let mut req_headers = to_reqwest_headers(&headers);
+    nebula_common::telemetry::inject_trace_context(&mut req_headers);
+
     let resp = match st
         .http
         .post(url)
-        .headers(to_reqwest_headers(&headers))
+        .headers(req_headers)
         .body(body_bytes)
         .send()
         .await
@@ -275,10 +278,13 @@ pub async fn proxy_v2(
     let reqwest_method =
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET);
 
+    let mut req_headers = to_reqwest_headers(&headers);
+    nebula_common::telemetry::inject_trace_context(&mut req_headers);
+
     let resp = match st
         .http
         .request(reqwest_method, &url)
-        .headers(to_reqwest_headers(&headers))
+        .headers(req_headers)
         .body(body_bytes)
         .send()
         .await

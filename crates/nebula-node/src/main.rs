@@ -23,8 +23,8 @@ use crate::heartbeat::heartbeat_loop;
 use crate::reconcile::{reconcile_model, RunningModel};
 
 fn init_xtrace_client(args: &Args) -> Option<xtrace_client::Client> {
-    let url = args.xtrace_url.as_deref()?;
-    let token = args.xtrace_token.as_deref().unwrap_or("");
+    let url = args.common.xtrace_url.as_deref()?;
+    let token = args.common.xtrace_token.as_deref().unwrap_or("");
     match xtrace_client::Client::new(url, token) {
         Ok(c) => {
             tracing::info!(%url, "xtrace metrics reporting enabled");
@@ -43,9 +43,9 @@ async fn main() -> anyhow::Result<()> {
 
     let _otel_guard = nebula_common::telemetry::init_tracing(
         "nebula-node",
-        args.xtrace_url.as_deref(),
-        args.xtrace_token.as_deref(),
-        &args.log_format,
+        args.common.xtrace_url.as_deref(),
+        args.common.xtrace_token.as_deref(),
+        &args.common.log_format,
     );
     println!(
         "DEBUG: nebula-node process started! node_id={}",
@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!(node_id=%args.node_id, "nebula-node starting...");
 
-    let store = EtcdMetaStore::connect(std::slice::from_ref(&args.etcd_endpoint)).await?;
+    let store = EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
 
     let endpoint_state: Arc<Mutex<HashMap<String, nebula_common::EndpointInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));

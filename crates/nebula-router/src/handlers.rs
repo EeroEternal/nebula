@@ -201,11 +201,14 @@ pub async fn proxy_chat_completions(
             }
         };
 
+        let mut req_headers = to_reqwest_headers(&headers);
+        nebula_common::telemetry::inject_trace_context(&mut req_headers);
+
         let url = format!("{base}{uri_path}{uri_query}");
         let mut builder = st
             .http
             .request(method_reqwest.clone(), url)
-            .headers(to_reqwest_headers(&headers));
+            .headers(req_headers);
 
         if let Some(b) = body_bytes.clone() {
             builder = builder.body(b);

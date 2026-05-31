@@ -3,6 +3,7 @@ mod auth;
 mod auth_handlers;
 mod handlers;
 mod handlers_v2;
+mod service;
 mod state;
 
 use std::sync::Arc;
@@ -37,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
 
-    let store = nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.etcd_endpoint))
+    let store = nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint))
         .await?;
 
     let http = reqwest::Client::builder()
@@ -60,8 +61,8 @@ async fn main() -> anyhow::Result<()> {
         http,
         router_url: args.router_url,
         session_ttl_hours: args.session_ttl_hours,
-        xtrace_url: args.xtrace_url,
-        xtrace_token: args.xtrace_token,
+        xtrace_url: args.common.xtrace_url.clone().unwrap_or_else(|| "http://127.0.0.1:8742".to_string()),
+        xtrace_token: args.common.xtrace_token.clone().unwrap_or_default(),
         xtrace_auth_mode: args.xtrace_auth_mode,
     };
 

@@ -27,13 +27,13 @@ async fn main() -> anyhow::Result<()> {
 
     let _otel_guard = nebula_common::telemetry::init_tracing(
         "nebula-router",
-        args.xtrace_url.as_deref(),
-        args.xtrace_token.as_deref(),
-        &args.log_format,
+        args.common.xtrace_url.as_deref(),
+        args.common.xtrace_token.as_deref(),
+        &args.common.log_format,
     );
 
     let store =
-        nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.etcd_endpoint)).await?;
+        nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
 
     let strategy = nebula_router::strategy::parse_strategy(&args.routing_strategy)
         .unwrap_or_else(|e| {
@@ -71,8 +71,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let router_for_stats = router.clone();
-    if let Some(url) = args.xtrace_url.clone() {
-        let token = args.xtrace_token.clone().unwrap_or_default();
+    if let Some(url) = args.common.xtrace_url.clone() {
+        let token = args.common.xtrace_token.clone().unwrap_or_default();
         tokio::spawn(async move {
             if let Err(e) = stats_sync_loop(url, token, router_for_stats).await {
                 tracing::error!(error=%e, "stats sync loop exited");
@@ -144,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
     let app = public_routes
         .merge(authed_routes)
         .layer(middleware::from_fn_with_state(st.clone(), track_requests))
+        .layer(middleware::from_fn(nebula_common::telemetry::trace_context_middleware))
         .with_state(st);
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;

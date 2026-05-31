@@ -27,14 +27,14 @@ async fn main() -> Result<()> {
 
     let _otel_guard = nebula_common::telemetry::init_tracing(
         "nebula-scheduler",
-        args.xtrace_url.as_deref(),
-        args.xtrace_token.as_deref(),
-        &args.log_format,
+        args.common.xtrace_url.as_deref(),
+        args.common.xtrace_token.as_deref(),
+        &args.common.log_format,
     );
     info!("nebula-scheduler starting...");
 
-    let store = EtcdMetaStore::connect(std::slice::from_ref(&args.etcd_endpoint)).await?;
-    info!("connected to etcd at {}", args.etcd_endpoint);
+    let store = EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
+    info!("connected to etcd at {}", args.common.etcd_endpoint);
 
     // Shared metrics for Prometheus exposition
     let shared_metrics = Arc::new(SharedMetrics::default());
@@ -62,14 +62,14 @@ async fn main() -> Result<()> {
     });
 
     // Build xtrace query config for autoscaling signals.
-    let xtrace = args.xtrace_url.as_deref().map(|url| {
+    let xtrace = args.common.xtrace_url.as_deref().map(|url| {
         let freshness_ms = std::env::var("NEBULA_XTRACE_METRIC_MAX_AGE_MS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(120_000);
         let cfg = reconcile::XtraceQueryConfig {
             url: url.to_string(),
-            token: args.xtrace_token.clone().unwrap_or_default(),
+            token: args.common.xtrace_token.clone().unwrap_or_default(),
             freshness_ms,
         };
         info!(

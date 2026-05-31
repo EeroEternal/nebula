@@ -5,9 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LOG_DIR="${ROOT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/frontend.log"
+FRONTEND_DIR="${ROOT_DIR}/frontend"
 
-cd "${SCRIPT_DIR}"
-mkdir -p "${LOG_DIR}"
+cd "${FRONTEND_DIR}"
 
 if ! command -v npm >/dev/null 2>&1; then
 	if [[ -d /home/ai/local/node-current/bin ]]; then

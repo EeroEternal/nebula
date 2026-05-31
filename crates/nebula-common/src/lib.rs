@@ -24,3 +24,5 @@ pub use placement::{PlacementAssignment, PlacementPlan};
 
 pub mod auth;
 pub mod telemetry;
+pub mod args;
+pub use args::CommonArgs;

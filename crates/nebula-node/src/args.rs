@@ -5,9 +5,6 @@ pub struct Args {
     #[arg(long, default_value = "node_1")]
     pub node_id: String,
 
-    #[arg(long, default_value = "http://127.0.0.1:2379")]
-    pub etcd_endpoint: String,
-
     #[arg(long, default_value = "/home/ai/miniconda3/envs/Lvllm/bin/vllm")]
     pub vllm_bin: String,
 
@@ -112,16 +109,6 @@ pub struct Args {
     #[arg(long, default_value_t = 9090)]
     pub api_port: u16,
 
-    /// xtrace server URL for metrics reporting (e.g. "http://10.21.11.92:8742/").
-    /// If not set, metrics reporting is disabled.
-    #[arg(long, env = "OBSERVE_URL")]
-    pub xtrace_url: Option<String>,
-
-    /// xtrace bearer token for authentication.
-    #[arg(long, env = "OBSERVE_TOKEN")]
-    pub xtrace_token: Option<String>,
-
-    /// Log output format: "text" (human-readable, default) or "json" (structured).
-    #[arg(long, env = "NEBULA_LOG_FORMAT", default_value = "text")]
-    pub log_format: String,
+    #[command(flatten)]
+    pub common: nebula_common::CommonArgs,
 }

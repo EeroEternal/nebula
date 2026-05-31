@@ -39,9 +39,9 @@ async fn main() {
 
     let _otel_guard = nebula_common::telemetry::init_tracing(
         "nebula-gateway",
-        args.xtrace_url.as_deref(),
-        args.xtrace_token.as_deref(),
-        &args.log_format,
+        args.common.xtrace_url.as_deref(),
+        args.common.xtrace_token.as_deref(),
+        &args.common.log_format,
     );
     let router_base_url = args.router_url;
 
@@ -69,7 +69,7 @@ async fn main() {
             std::process::exit(1);
         });
 
-    let store = match nebula_meta::EtcdMetaStore::connect(&[args.etcd_endpoint]).await {
+    let store = match nebula_meta::EtcdMetaStore::connect(&[args.common.etcd_endpoint]).await {
         Ok(store) => store,
         Err(e) => {
             tracing::error!(error=%e, "failed to connect to etcd");
@@ -85,7 +85,7 @@ async fn main() {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4 * 1024 * 1024);
 
-    let audit = AuditWriter::spawn(args.xtrace_url.as_deref(), args.xtrace_token.as_deref());
+    let audit = AuditWriter::spawn(args.common.xtrace_url.as_deref(), args.common.xtrace_token.as_deref());
 
     let st = AppState {
         _noop: Arc::new(()),
@@ -98,8 +98,8 @@ async fn main() {
         max_request_body_bytes,
         log_path: args.log_path,
         audit,
-        xtrace_url: args.xtrace_url.clone(),
-        xtrace_token: args.xtrace_token.clone(),
+        xtrace_url: args.common.xtrace_url.clone(),
+        xtrace_token: args.common.xtrace_token.clone(),
         bff_url: args.bff_url,
     };
 
@@ -144,19 +144,24 @@ async fn main() {
         .route("/v2/migrate", any(proxy_v2))
         .with_state(st.clone());
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/health", get(healthz))
-        .route("/metrics", get(metrics_handler))
+    let secure_routes = Router::new()
         .route("/v1/responses", get(not_implemented).post(create_responses))
         .route("/v1/chat/completions", post(proxy_post))
         .route("/v1/embeddings", post(proxy_post))
         .route("/v1/rerank", post(proxy_post))
         .route("/v1/models", get(list_models))
         .nest("/v1/admin", admin_routes)
-        // Global middleware
         .layer(middleware::from_fn_with_state(st.clone(), audit::audit_middleware))
         .layer(middleware::from_fn_with_state(st.clone(), nebula_common::auth::auth_middleware::<AppState>))
+        .layer(middleware::from_fn(nebula_common::telemetry::trace_context_middleware));
+
+    let public_routes = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/health", get(healthz))
+        .route("/metrics", get(metrics_handler));
+
+    let app = public_routes
+        .merge(secure_routes)
         .layer(middleware::from_fn_with_state(st.clone(), track_requests))
         .with_state(st);
 

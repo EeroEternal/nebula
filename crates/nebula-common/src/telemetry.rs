@@ -126,3 +126,51 @@ pub fn init_tracing(
         None
     }
 }
+
+use opentelemetry::global;
+use opentelemetry::propagation::{Extractor, Injector};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+struct HeaderInjector<'a>(&'a mut axum::http::HeaderMap);
+
+impl<'a> Injector for HeaderInjector<'a> {
+    fn set(&mut self, key: &str, value: String) {
+        if let (Ok(name), Ok(val)) = (
+            axum::http::header::HeaderName::from_bytes(key.as_bytes()),
+            axum::http::header::HeaderValue::from_bytes(value.as_bytes()),
+        ) {
+            self.0.insert(name, val);
+        }
+    }
+}
+
+pub fn inject_trace_context(headers: &mut axum::http::HeaderMap) {
+    let context = tracing::Span::current().context();
+    global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&context, &mut HeaderInjector(headers));
+    });
+}
+
+struct HeaderExtractor<'a>(&'a axum::http::HeaderMap);
+
+impl<'a> Extractor for HeaderExtractor<'a> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(|k| k.as_str()).collect()
+    }
+}
+
+pub async fn trace_context_middleware(
+    req: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let parent_context = global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(req.headers()))
+    });
+    tracing::Span::current().set_parent(parent_context);
+    next.run(req).await
+}
+
