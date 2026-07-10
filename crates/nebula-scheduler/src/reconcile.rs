@@ -10,8 +10,10 @@ use nebula_common::{
     ModelRequestStatus, PlacementPlan,
 };
 use nebula_meta::{EtcdMetaStore, MetaStore};
+use nebula_meta::LeaderGate;
 
-use crate::metrics::SharedMetrics;
+use nebula_scheduler::metrics::SharedMetrics;
+
 use crate::planner::{allocate_port, list_used_resources, select_node_and_gpus};
 use crate::util::now_ms;
 
@@ -56,6 +58,7 @@ pub async fn reconcile_loop(
     default_port: u16,
     xtrace: Option<XtraceQueryConfig>,
     metrics: Arc<SharedMetrics>,
+    leader: LeaderGate,
 ) {
     // Wait a bit before first reconcile to let the system stabilize.
     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -65,8 +68,14 @@ pub async fn reconcile_loop(
     );
 
     loop {
+        if !leader.is_leader() {
+            tokio::time::sleep(RECONCILE_INTERVAL).await;
+            continue;
+        }
         metrics.reconcile_total.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = reconcile_once(&store, default_port, xtrace.as_ref(), &metrics).await {
+        if let Err(e) =
+            reconcile_once(&store, default_port, xtrace.as_ref(), &metrics, &leader).await
+        {
             metrics.reconcile_errors.fetch_add(1, Ordering::Relaxed);
             warn!(error=%e, "reconcile cycle failed");
         }
@@ -79,7 +88,11 @@ async fn reconcile_once(
     default_port: u16,
     xtrace: Option<&XtraceQueryConfig>,
     metrics: &SharedMetrics,
+    leader: &LeaderGate,
 ) -> anyhow::Result<()> {
+    if !leader.is_leader() {
+        return Ok(());
+    }
     let now = now_ms();
 
     // 1. Load all placements
@@ -281,6 +294,7 @@ async fn reconcile_once(
             model_uid: plan.model_uid.clone(),
             model_name: plan.model_name.clone(),
             version: now_ms(),
+            leader_epoch: leader.epoch(),
             assignments: new_assignments,
         };
 
@@ -295,6 +309,13 @@ async fn reconcile_once(
 
         match serde_json::to_vec(&updated_plan) {
             Ok(val) => {
+                if !leader.is_leader() {
+                    warn!(
+                        model_uid=%plan.model_uid,
+                        "lost leadership before placement CAS; skipping"
+                    );
+                    continue;
+                }
                 // Use CAS: ensure the key has not been modified since we read it
                 match store
                     .compare_and_swap(&placement_key, expected_revision, val)

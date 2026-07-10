@@ -21,3 +21,8 @@ xtrace-client.workspace = true
 
 nebula-common = { path = "../nebula-common" }
 nebula-meta = { path = "../nebula-meta" }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -1,5 +1,4 @@
 mod args;
-mod metrics;
 mod planner;
 mod reconcile;
 mod util;
@@ -14,24 +13,37 @@ use clap::Parser;
 use futures_util::StreamExt;
 use tracing::{error, info, warn};
 
-use nebula_common::{DesiredState, ModelDeployment, ModelRequest, ModelRequestStatus, ModelSpec};
-use nebula_meta::{EtcdMetaStore, MetaStore};
+use nebula_common::{
+    DesiredState, ModelDeployment, ModelRequest, ModelRequestStatus, ModelSpec, PlacementPlan,
+};
+use nebula_meta::{
+    run_election_loop, ElectionConfig, EtcdMetaStore, LeaderGate, MetaStore,
+};
+use nebula_scheduler::metrics::{
+    healthz_handler, metrics_handler, AppState, SharedMetrics,
+};
 
 use crate::args::Args;
-use crate::metrics::{healthz_handler, metrics_handler, SharedMetrics};
 use crate::planner::{build_plan_from_deployment, build_plan_multi, list_used_resources};
 
 async fn write_placement_cas(
     store: &EtcdMetaStore,
     placement_key: &str,
-    placement_val: Vec<u8>,
+    plan: &mut PlacementPlan,
+    leader: &LeaderGate,
 ) -> Result<u64> {
+    if !leader.is_leader() {
+        anyhow::bail!("not leader; refusing placement write for {placement_key}");
+    }
+    plan.leader_epoch = leader.epoch();
+
     let expected_revision = store
         .get(placement_key)
         .await?
         .map(|(_, revision)| revision)
         .unwrap_or(0);
 
+    let placement_val = serde_json::to_vec(plan)?;
     let (ok, revision) = store
         .compare_and_swap(placement_key, expected_revision, placement_val)
         .await?;
@@ -46,6 +58,18 @@ async fn write_placement_cas(
             revision
         );
     }
+}
+
+async fn delete_placement_if_leader(
+    store: &EtcdMetaStore,
+    placement_key: &str,
+    leader: &LeaderGate,
+) -> Result<()> {
+    if !leader.is_leader() {
+        anyhow::bail!("not leader; refusing placement delete for {placement_key}");
+    }
+    store.delete(placement_key).await?;
+    Ok(())
 }
 
 #[tokio::main]
@@ -63,17 +87,27 @@ async fn main() -> Result<()> {
     let store = EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
     info!("connected to etcd at {}", args.common.etcd_endpoint);
 
-    // Shared metrics for Prometheus exposition
-    let shared_metrics = Arc::new(SharedMetrics::default());
+    let leader = LeaderGate::new();
+    let holder_id = format!("scheduler-{}", uuid::Uuid::new_v4());
+    let election_cfg = ElectionConfig::scheduler(holder_id);
+    let store_for_election = store.clone();
+    let leader_for_election = leader.clone();
+    tokio::spawn(async move {
+        run_election_loop(&store_for_election, leader_for_election, election_cfg).await;
+    });
 
-    // Spawn metrics / health HTTP server
+    let shared_metrics = Arc::new(SharedMetrics::default());
+    let app_state = AppState {
+        metrics: Arc::clone(&shared_metrics),
+        leader: leader.clone(),
+    };
+
     let listen_addr = args.listen_addr.clone();
-    let metrics_state = Arc::clone(&shared_metrics);
     tokio::spawn(async move {
         let app = Router::new()
             .route("/metrics", get(metrics_handler))
             .route("/healthz", get(healthz_handler))
-            .with_state(metrics_state);
+            .with_state(app_state);
 
         let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
             Ok(l) => l,
@@ -88,7 +122,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Build xtrace query config for autoscaling signals.
     let xtrace = args.common.xtrace_url.as_deref().map(|url| {
         let freshness_ms = std::env::var("NEBULA_XTRACE_METRIC_MAX_AGE_MS")
             .ok()
@@ -107,28 +140,28 @@ async fn main() -> Result<()> {
         cfg
     });
 
-    // Spawn reconcile loop (health self-healing)
     let store_for_reconcile = store.clone();
     let default_port_for_reconcile = args.default_port;
     let metrics_for_reconcile = Arc::clone(&shared_metrics);
+    let leader_for_reconcile = leader.clone();
     tokio::spawn(async move {
         reconcile::reconcile_loop(
             store_for_reconcile,
             default_port_for_reconcile,
             xtrace,
             metrics_for_reconcile,
+            leader_for_reconcile,
         )
         .await;
     });
 
-    // Spawn deployment watch loop (new declarative path)
     let store_for_deploy = store.clone();
     let default_port_for_deploy = args.default_port;
+    let leader_for_deploy = leader.clone();
     tokio::spawn(async move {
-        deployment_watch_loop(store_for_deploy, default_port_for_deploy).await;
+        deployment_watch_loop(store_for_deploy, default_port_for_deploy, leader_for_deploy).await;
     });
 
-    // Watch for model requests (legacy path)
     let prefix = "/model_requests/";
 
     loop {
@@ -143,6 +176,10 @@ async fn main() -> Result<()> {
         };
 
         while let Some(event) = stream.next().await {
+            if !leader.is_leader() {
+                continue;
+            }
+
             let Some(value) = event.value else { continue };
 
             let mut req: ModelRequest = match serde_json::from_slice(&value) {
@@ -170,7 +207,7 @@ async fn main() -> Result<()> {
                     }
                 };
 
-                let plan =
+                let mut plan =
                     match build_plan_multi(&store, &req, args.default_port, used_ports, used_gpus)
                         .await
                     {
@@ -181,17 +218,19 @@ async fn main() -> Result<()> {
                         }
                     };
 
-                // 3. Write Placement
                 let placement_key = format!("/placements/{}", plan.model_uid);
-                let placement_val = serde_json::to_vec(&plan)?;
-
-                if let Err(e) = write_placement_cas(&store, &placement_key, placement_val).await {
+                if let Err(e) =
+                    write_placement_cas(&store, &placement_key, &mut plan, &leader).await
+                {
                     error!("failed to write placement: {}", e);
                     continue;
                 }
-                info!("wrote placement to {} (CAS)", placement_key);
+                info!(
+                    "wrote placement to {} (CAS, epoch={})",
+                    placement_key,
+                    plan.leader_epoch
+                );
 
-                // 3. Update Request Status
                 req.status = ModelRequestStatus::Scheduled;
                 if let Ok(updated_val) = serde_json::to_vec(&req) {
                     let req_key = format!("{}{}", prefix, req.id);
@@ -205,7 +244,7 @@ async fn main() -> Result<()> {
                 );
 
                 let placement_key = format!("/placements/{}", req.request.model_uid);
-                if let Err(e) = store.delete(&placement_key).await {
+                if let Err(e) = delete_placement_if_leader(&store, &placement_key, &leader).await {
                     warn!("failed to delete placement {}: {}", placement_key, e);
                 } else {
                     info!("deleted placement {}", placement_key);
@@ -226,7 +265,7 @@ async fn main() -> Result<()> {
 }
 
 /// Watch `/deployments/` prefix for the new declarative model management flow.
-async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
+async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16, leader: LeaderGate) {
     let prefix = "/deployments/";
     loop {
         info!("watching prefix: {}", prefix);
@@ -240,9 +279,12 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
         };
 
         while let Some(event) = stream.next().await {
+            if !leader.is_leader() {
+                continue;
+            }
+
             match event.value {
                 Some(value) => {
-                    // Deployment created or updated
                     let deployment: ModelDeployment = match serde_json::from_slice(&value) {
                         Ok(d) => d,
                         Err(e) => {
@@ -258,7 +300,6 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                             "deployment running: building placement plan"
                         );
 
-                        // Read ModelSpec
                         let spec_key = format!("/models/{}/spec", deployment.model_uid);
                         let spec: ModelSpec = match store.get(&spec_key).await {
                             Ok(Some((val, _))) => match serde_json::from_slice(&val) {
@@ -301,7 +342,7 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                             }
                         };
 
-                        let plan = match build_plan_from_deployment(
+                        let mut plan = match build_plan_from_deployment(
                             &store,
                             &spec,
                             &deployment,
@@ -323,31 +364,21 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                         };
 
                         let placement_key = format!("/placements/{}", plan.model_uid);
-                        match serde_json::to_vec(&plan) {
-                            Ok(val) => {
-                                if let Err(e) =
-                                    write_placement_cas(&store, &placement_key, val).await
-                                {
-                                    error!(
-                                        model_uid=%deployment.model_uid,
-                                        error=%e,
-                                        "failed to write placement"
-                                    );
-                                } else {
-                                    info!(
-                                        model_uid=%deployment.model_uid,
-                                        "wrote placement to {} (CAS)",
-                                        placement_key
-                                    );
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    model_uid=%deployment.model_uid,
-                                    error=%e,
-                                    "failed to serialize placement plan"
-                                );
-                            }
+                        if let Err(e) =
+                            write_placement_cas(&store, &placement_key, &mut plan, &leader).await
+                        {
+                            error!(
+                                model_uid=%deployment.model_uid,
+                                error=%e,
+                                "failed to write placement"
+                            );
+                        } else {
+                            info!(
+                                model_uid=%deployment.model_uid,
+                                epoch=plan.leader_epoch,
+                                "wrote placement to {} (CAS)",
+                                placement_key
+                            );
                         }
                     } else if deployment.desired_state == DesiredState::Stopped {
                         info!(
@@ -355,7 +386,9 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                             "deployment stopped: deleting placement"
                         );
                         let placement_key = format!("/placements/{}", deployment.model_uid);
-                        if let Err(e) = store.delete(&placement_key).await {
+                        if let Err(e) =
+                            delete_placement_if_leader(&store, &placement_key, &leader).await
+                        {
                             warn!(
                                 model_uid=%deployment.model_uid,
                                 error=%e,
@@ -372,7 +405,6 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                     }
                 }
                 None => {
-                    // Deployment deleted — extract model_uid from key
                     let model_uid = event.key.strip_prefix(prefix).unwrap_or(&event.key);
                     if model_uid.is_empty() {
                         continue;
@@ -382,7 +414,9 @@ async fn deployment_watch_loop(store: EtcdMetaStore, default_port: u16) {
                         "deployment deleted: deleting placement"
                     );
                     let placement_key = format!("/placements/{}", model_uid);
-                    if let Err(e) = store.delete(&placement_key).await {
+                    if let Err(e) =
+                        delete_placement_if_leader(&store, &placement_key, &leader).await
+                    {
                         warn!(
                             model_uid=%model_uid,
                             error=%e,

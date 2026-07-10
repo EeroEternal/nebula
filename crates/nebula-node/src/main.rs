@@ -60,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     // shared running state (used by both main reconcile loop and heartbeat)
     let running: Arc<Mutex<HashMap<String, RunningModel>>> = Arc::new(Mutex::new(HashMap::new()));
+    let last_epochs: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let xtrace = init_xtrace_client(&args);
 
@@ -124,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
                             &args,
                             &mut *running.lock().await,
                             &endpoint_state,
+                            &mut *last_epochs.lock().await,
                             &mid,
                             Some(plan),
                         )
@@ -164,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
                         &args,
                         &mut *running.lock().await,
                         &endpoint_state,
+                        &mut *last_epochs.lock().await,
                         &mid,
                         Some(p),
                     )
@@ -181,6 +184,7 @@ async fn main() -> anyhow::Result<()> {
                             &args,
                             &mut *running.lock().await,
                             &endpoint_state,
+                            &mut *last_epochs.lock().await,
                             &model_uid,
                             None,
                         )

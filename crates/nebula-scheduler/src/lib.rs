@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+pub mod metrics;
+
 #[derive(Debug, Default)]
 pub struct Scheduler {}
 
@@ -12,5 +14,6 @@ impl Scheduler {
         Ok(())
     }
 }
+
 #[cfg(test)]
 mod reconcile_test;

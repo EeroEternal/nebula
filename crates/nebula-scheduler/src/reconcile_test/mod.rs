@@ -1,6 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use super::*;
     use nebula_common::{PlacementAssignment, PlacementPlan};
     use nebula_meta::{MemoryMetaStore, MetaStore};
     use std::sync::Arc;
@@ -17,6 +16,7 @@ mod tests {
             model_uid: model_uid.clone(),
             model_name: "test-model".into(),
             version: 1000,
+            leader_epoch: 1,
             assignments: vec![],
         };
         let val = serde_json::to_vec(&initial_plan).unwrap();
@@ -33,6 +33,7 @@ mod tests {
             model_uid: model_uid.clone(),
             model_name: "test-model".into(),
             version: 2000,
+            leader_epoch: 1,
             assignments: vec![PlacementAssignment {
                 replica_id: 1,
                 node_id: "node1".into(),
@@ -58,6 +59,7 @@ mod tests {
             model_uid: model_uid.clone(),
             model_name: "test-model".into(),
             version: 1001,
+            leader_epoch: 1,
             assignments: vec![],
         };
         let val3 = serde_json::to_vec(&updated_plan).unwrap();
@@ -68,5 +70,45 @@ mod tests {
         assert!(result.is_ok());
         let (success, _) = result.unwrap();
         assert!(!success, "CAS should fail because revision 1 is stale");
+    }
+
+    #[tokio::test]
+    async fn test_leader_epoch_fencing_record() {
+        // Stale leader_epoch must not overwrite a newer plan via CAS when revision moved.
+        let store = Arc::new(MemoryMetaStore::new());
+        let key = "/placements/m1".to_string();
+
+        let new_leader_plan = PlacementPlan {
+            request_id: None,
+            model_uid: "m1".into(),
+            model_name: "m".into(),
+            version: 2000,
+            leader_epoch: 2,
+            assignments: vec![],
+        };
+        store
+            .put(&key, serde_json::to_vec(&new_leader_plan).unwrap(), None)
+            .await
+            .unwrap();
+        let (_, rev) = store.get(&key).await.unwrap().unwrap();
+
+        let stale = PlacementPlan {
+            request_id: None,
+            model_uid: "m1".into(),
+            model_name: "m".into(),
+            version: 1999,
+            leader_epoch: 1,
+            assignments: vec![],
+        };
+        // Old leader still holds an older revision snapshot (rev-1) — CAS must fail.
+        let (ok, _) = store
+            .compare_and_swap(&key, rev.saturating_sub(1), serde_json::to_vec(&stale).unwrap())
+            .await
+            .unwrap();
+        assert!(!ok);
+
+        let (bytes, _) = store.get(&key).await.unwrap().unwrap();
+        let kept: PlacementPlan = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(kept.leader_epoch, 2);
     }
 }

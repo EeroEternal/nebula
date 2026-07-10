@@ -47,5 +47,9 @@ pub struct PlacementPlan {
     pub model_uid: String,
     pub model_name: String,
     pub version: u64,
+    /// Fencing token from scheduler leader election. Nodes reject plans with a
+    /// lower epoch than the last applied plan for the same model.
+    #[serde(default)]
+    pub leader_epoch: u64,
     pub assignments: Vec<PlacementAssignment>,
 }

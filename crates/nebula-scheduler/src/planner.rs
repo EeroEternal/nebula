@@ -256,6 +256,7 @@ pub async fn build_plan_multi(
         model_uid: req.request.model_uid.clone(),
         model_name: req.request.model_name.clone(),
         version: now_ms(),
+        leader_epoch: 0,
         assignments,
     })
 }
@@ -337,6 +338,7 @@ pub async fn build_plan_from_deployment(
         model_uid: spec.model_uid.clone(),
         model_name: spec.model_name.clone(),
         version: now_ms(),
+        leader_epoch: 0,
         assignments,
     })
 }

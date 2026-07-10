@@ -1483,6 +1483,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-stream",
+ "tracing",
 ]
 
 [[package]]
@@ -1558,14 +1559,17 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "http-body-util",
  "nebula-common",
  "nebula-meta",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "xtrace-client",
 ]
 

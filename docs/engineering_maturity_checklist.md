@@ -25,13 +25,13 @@
 
 | ID | 项 | 组件 | 要做的事 | 验收 | 状态 |
 |----|----|------|----------|------|------|
-| W0.1 | Scheduler 选主 | `nebula-meta`, `nebula-scheduler` | etcd election/lease；仅 leader 写控制面；暴露 `leader_epoch` | 双实例恰好 1 leader；kill 后 &lt;10s 接管 | [ ] |
-| W0.2 | follower healthz | `nebula-scheduler` | leader `/healthz`→200；follower→503（readiness） | LB/探针可摘备；单测覆盖 200/503 | [ ] |
-| W0.3 | Placement fencing | `nebula-common`, `scheduler`, `node` | 写入带 epoch/version；CAS；Node 拒落后 plan | 旧 leader 写被拒；脑裂演练通过 | [ ] |
-| W0.4 | 主路径 CAS | `nebula-scheduler` | 演示路径上 placement 禁止裸 `put`（与 P0.5 衔接） | CAS 冲突单测；失败重读或跳过本轮 | [ ] |
-| W0.5 | HA in-process 测试 | `scheduler` / `meta` tests | 2 scheduler + 测试 etcd 或可注入 meta | 选主 / failover / fencing / healthz 四条主线 | [ ] |
-| W0.6 | PR CI gate | `.github/workflows` | PR 必跑 `cargo test --workspace`（或等价最小集含 W0.5） | 红则不能合；文档写清如何跑 | [ ] |
-| W0.7 | Drain 语义修正 | `router`, `node`, `scheduler` | Draining 不接新流量；in-flight 跑完再 stop；再删 endpoint / assignment | 流式请求可完成；无孤儿 endpoint | [ ] |
+| W0.1 | Scheduler 选主 | `nebula-meta`, `nebula-scheduler` | etcd election/lease；仅 leader 写控制面；暴露 `leader_epoch` | 双实例恰好 1 leader；kill 后 &lt;10s 接管 | [x] |
+| W0.2 | follower healthz | `nebula-scheduler` | leader `/healthz`→200；follower→503（readiness） | LB/探针可摘备；单测覆盖 200/503 | [x] |
+| W0.3 | Placement fencing | `nebula-common`, `scheduler`, `node` | 写入带 epoch/version；CAS；Node 拒落后 plan | 旧 leader 写被拒；脑裂演练通过 | [x] |
+| W0.4 | 主路径 CAS | `nebula-scheduler` | 演示路径上 placement 禁止裸 `put`（与 P0.5 衔接） | CAS 冲突单测；失败重读或跳过本轮 | [x] |
+| W0.5 | HA in-process 测试 | `scheduler` / `meta` tests | 2 scheduler + 测试 etcd 或可注入 meta | 选主 / failover / fencing / healthz 四条主线 | [x] |
+| W0.6 | PR CI gate | `.github/workflows` | PR 必跑 `cargo test --workspace`（或等价最小集含 W0.5） | 红则不能合；文档写清如何跑 | [x] |
+| W0.7 | Drain 语义修正 | `router`, `node`, `scheduler` | Draining 不接新流量；in-flight 跑完再 stop；再删 endpoint / assignment | 流式请求可完成；无孤儿 endpoint | [x] |
 
 **Wave 0 完成标志**：本地 compose/脚本能跑「杀 leader + 缩容 drain」；上述测试在 CI 绿。
 
