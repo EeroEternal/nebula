@@ -330,6 +330,9 @@ async fn reconcile_once(
                         );
                     }
                     Ok((false, current_revision)) => {
+                        metrics
+                            .placement_cas_conflict_total
+                            .fetch_add(1, Ordering::Relaxed);
                         warn!(
                             model_uid=%plan.model_uid,
                             expected_revision,

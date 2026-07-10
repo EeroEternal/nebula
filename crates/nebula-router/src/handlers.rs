@@ -289,22 +289,44 @@ pub async fn proxy_chat_completions(
         let status_code = status.as_u16();
         tokio::spawn(async move {
             let mut first_chunk = true;
-            while let Some(item) = upstream.next().await {
-                match item {
-                    Ok(b) => {
-                        if first_chunk {
-                            first_chunk = false;
-                            let ttft = request_start.elapsed().as_secs_f64();
-                            metrics.observe_ttft(&model_uid_for_stream, ttft);
-                        }
-                        let _ = tx.send(Ok(b)).await;
+            let mut aborted = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => {
+                        aborted = true;
+                        break;
                     }
-                    Err(_) => break,
+                    item = upstream.next() => {
+                        match item {
+                            Some(Ok(b)) => {
+                                if first_chunk {
+                                    first_chunk = false;
+                                    let ttft = request_start.elapsed().as_secs_f64();
+                                    metrics.observe_ttft(&model_uid_for_stream, ttft);
+                                }
+                                if tx.send(Ok(b)).await.is_err() {
+                                    aborted = true;
+                                    break;
+                                }
+                            }
+                            Some(Err(_)) | None => break,
+                        }
+                    }
                 }
             }
             let e2e = request_start.elapsed().as_secs_f64();
             metrics.observe_e2e_latency(&model_uid_for_stream, e2e);
-            metrics.record_model_status(&model_uid_for_stream, status_code);
+            if aborted {
+                metrics
+                    .requests_aborted_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(model_uid=%model_uid_for_stream, "router SSE aborted: client disconnected");
+                // Abort is not a 5xx / model error.
+            } else {
+                metrics.record_model_status(&model_uid_for_stream, status_code);
+            }
+            // Dropping `upstream` closes the connection to the engine.
         });
 
         let stream = ReceiverStream::new(rx);

@@ -28,6 +28,8 @@ pub struct SharedMetrics {
     pub xtrace_stale_total: AtomicU64,
     /// xtrace truncated metric responses observed.
     pub xtrace_truncated_total: AtomicU64,
+    /// Placement CAS conflicts observed while leader.
+    pub placement_cas_conflict_total: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -76,7 +78,10 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
          nebula_scheduler_is_leader {}\n\
          # HELP nebula_scheduler_leader_epoch Current known leader fencing epoch.\n\
          # TYPE nebula_scheduler_leader_epoch gauge\n\
-         nebula_scheduler_leader_epoch {}\n",
+         nebula_scheduler_leader_epoch {}\n\
+         # HELP nebula_scheduler_placement_cas_conflict_total Placement CAS conflicts.\n\
+         # TYPE nebula_scheduler_placement_cas_conflict_total counter\n\
+         nebula_scheduler_placement_cas_conflict_total {}\n",
         metrics.reconcile_total.load(Ordering::Relaxed),
         metrics.reconcile_errors.load(Ordering::Relaxed),
         metrics.placements_total.load(Ordering::Relaxed),
@@ -89,6 +94,9 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         metrics.xtrace_truncated_total.load(Ordering::Relaxed),
         if is_leader { 1 } else { 0 },
         epoch,
+        metrics
+            .placement_cas_conflict_total
+            .load(Ordering::Relaxed),
     );
     (axum::http::StatusCode::OK, body)
 }

@@ -122,6 +122,7 @@ UG 只应出现在 **Gateway 进程内**（或 Gateway 调用的库边界内）�
 
 - 文档与代码一致：UG ≠ Router。
 - `cargo check -p nebula-gateway` / workspace 可通过。
+- Gateway/Router **已移除**未使用的 `unigateway` 依赖；需要协议能力时再按 `unigateway-sdk` / protocol-only 引入。
 - 无「绕过 Router 的 UG 直连引擎」默认路径（调试旁路须显式开关且不进生产 compose）。
 
 ### Phase B：协议能力（产品可感知）

@@ -50,6 +50,12 @@ pub struct AuthConfig {
     pub limit_per_minute: u64,
 }
 
+impl AsRef<AuthConfig> for AuthConfig {
+    fn as_ref(&self) -> &AuthConfig {
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RateWindow {
     pub window_start: Instant,
@@ -292,5 +298,74 @@ mod tests {
         assert!(auth.enabled);
         assert_eq!(auth.tokens.get("admin-token"), Some(&Role::Admin));
         assert_eq!(auth.tokens.get("view-token"), Some(&Role::Viewer));
+    }
+
+    #[tokio::test]
+    async fn auth_middleware_rejects_missing_and_invalid_token() {
+        use axum::routing::get;
+        use axum::Router;
+        use tower::ServiceExt;
+
+        let auth = AuthConfig {
+            enabled: true,
+            tokens: Arc::new(HashMap::from([("good".into(), Role::Admin)])),
+            rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            limit_per_minute: 0,
+        };
+
+        let app = Router::new()
+            .route("/x", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                auth_middleware::<AuthConfig>,
+            ))
+            .with_state(auth);
+
+        let missing = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/x")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), axum::http::StatusCode::UNAUTHORIZED);
+
+        let invalid = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/x")
+                    .header("Authorization", "Bearer bad")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let ok = app
+            .oneshot(
+                Request::builder()
+                    .uri("/x")
+                    .header("Authorization", "Bearer good")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ok.status(), axum::http::StatusCode::OK);
+    }
+
+    #[test]
+    fn require_role_forbids_viewer_for_admin() {
+        let ctx = AuthContext {
+            principal: "v".into(),
+            role: Role::Viewer,
+        };
+        let resp = require_role(&ctx, Role::Admin).expect("forbidden");
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
     }
 }

@@ -45,11 +45,11 @@
 
 | ID | 项 | 组件 | 要做的事 | 验收 | 状态 |
 |----|----|------|----------|------|------|
-| P0.4 | Request abort | `gateway`, `router` | disconnect/abort 取消下游；断开引擎连接 | 取消后停生成；abort 指标单独标签 | [ ] |
-| P0.5 | Placement CAS 清零 | `nebula-scheduler` | `arch_optimization.md` 中直接 `put` placement 路径清零 | grep/审计无裸 put；冲突可恢复 | [ ] |
-| P0.6+ | 最小契约集扩面 | `router`, `gateway`, CI | `plan_version` 过滤、CAS 冲突、SSE 序列、auth 拒绝 | 契约测试进同一 CI gate | [ ] |
-| P0.7 | API 边界收敛 | `gateway`, `bff`, `router` | 每个 API 唯一 owner；禁止 Gateway 吞 Router | 文档表 + 代码路径一致 | [ ] |
-| P0.UG | Gateway 编译/UG 边界 | `nebula-gateway` | 恢复可编译；UG 仅协议层（见 `unigateway_integration.md`） | workspace check 通过；无绕过 Router 默认路径 | [ ] |
+| P0.4 | Request abort | `gateway`, `router` | disconnect/abort 取消下游；断开引擎连接 | 取消后停生成；abort 指标单独标签 | [x] |
+| P0.5 | Placement CAS 清零 | `nebula-scheduler` | `arch_optimization.md` 中直接 `put` placement 路径清零 | grep/审计无裸 put；冲突可恢复 | [x] |
+| P0.6+ | 最小契约集扩面 | `router`, `gateway`, CI | `plan_version` 过滤、CAS 冲突、SSE 序列、auth 拒绝 | 契约测试进同一 CI gate | [x] |
+| P0.7 | API 边界收敛 | `gateway`, `bff`, `router` | 每个 API 唯一 owner；禁止 Gateway 吞 Router | 文档表 + 代码路径一致 | [x] |
+| P0.UG | Gateway 编译/UG 边界 | `nebula-gateway` | 恢复可编译；UG 仅协议层（见 `unigateway_integration.md`） | workspace check 通过；无绕过 Router 默认路径 | [x] |
 
 **Wave 1 完成标志**：P0 表（指导意见 §5）全部勾完；「杀主 + drain + abort」可演示且 CI 挡住回退。
 
