@@ -6,11 +6,12 @@ Nebula 当前架构方向合理，且比早期分析时更接近可运行闭环�
 
 当前主要风险不再是“缺少组件”，而是几个关键边界和热路径还没有完全收敛：
 
-- Gateway、Router、BFF、UniGateway 的职责边界仍需固定。
+- Gateway / BFF / Router 职责见 `api_ownership.md`；UniGateway 仅作 Gateway 协议库（`unigateway_integration.md`），gateway/router 已去掉未使用依赖。
 - Router/Scheduler 的 stats 决策路径不应强依赖 xtrace 这类观测后端。
-- Scheduler 仍存在非 CAS 的 placement 写路径。
-- 推理入口鉴权默认值偏开发友好，生产默认不够安全。
+- Placement 生产写路径已 CAS；`leader_epoch` 承担 fencing。
+- 推理入口鉴权默认 fail-closed（见 auth 测试）。
 - Router 仍会为解析 `model` 缓冲完整请求体。
+- 流式 abort：Gateway/Router 在 client disconnect 时断开上游（`requests_aborted_total`，不计 5xx）。
 
 ## 当前已完成的关键改进
 
@@ -66,11 +67,11 @@ Router 和 Scheduler 的实时决策应依赖控制面状态，不应依赖 xtra
 
 ### P0-3 placement 更新路径全部 CAS 化（已完成）
 
-`scheduler/src/main.rs` 的 placement 写路径已改为 CAS；`scheduler/src/reconcile.rs` 已检查 CAS 返回的 `ok=false` 冲突结果，不再误判为成功。
+`scheduler/src/main.rs` 的 placement 写路径已改为 CAS；`scheduler/src/reconcile.rs` 已检查 CAS 返回的 `ok=false` 冲突结果，不再误判为成功。生产路径无对 `/placements/` 的裸 `put`（仅测试 fixture 允许）。CAS 冲突计入 `nebula_scheduler_placement_cas_conflict_total`。
 
 建议：
 
-- 明确 `PlacementPlan.version` 语义，避免“时间戳版本”和“逻辑版本”混用。
+- 明确 `PlacementPlan.version` 语义，避免“时间戳版本”和“逻辑版本”混用；fencing 已由 `leader_epoch` 承担。
 
 ### P0-4 Router 改为 header-driven routing
 

@@ -45,6 +45,7 @@ pub async fn create_responses(
     if req.stream.unwrap_or(false) {
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let engine = st.engine.clone();
+        let metrics = st.metrics.clone();
 
         let builder = ResponseStreamBuilder::new(&req);
 
@@ -52,24 +53,52 @@ pub async fn create_responses(
             let mut stream = engine.stream_text(input_text);
             let mut builder = builder;
 
-            let _ = tx
+            if tx
                 .send(Ok(
                     Event::default().data(builder.created_event().to_string())
                 ))
-                .await;
-
-            while let Some(delta) = stream.next().await {
-                if delta.is_empty() {
-                    continue;
-                }
-                let ev = builder.push_delta(delta);
-                let _ = tx.send(Ok(Event::default().data(ev.to_string()))).await;
+                .await
+                .is_err()
+            {
+                metrics
+                    .requests_aborted_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
             }
 
-            let completed = builder.completed_event();
-            let _ = tx
-                .send(Ok(Event::default().data(completed.to_string())))
-                .await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => {
+                        metrics
+                            .requests_aborted_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!("responses SSE aborted: client disconnected");
+                        break;
+                    }
+                    delta = stream.next() => {
+                        match delta {
+                            Some(delta) if !delta.is_empty() => {
+                                let ev = builder.push_delta(delta);
+                                if tx.send(Ok(Event::default().data(ev.to_string()))).await.is_err() {
+                                    metrics
+                                        .requests_aborted_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    break;
+                                }
+                            }
+                            Some(_) => continue,
+                            None => {
+                                let completed = builder.completed_event();
+                                let _ = tx
+                                    .send(Ok(Event::default().data(completed.to_string())))
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         });
 
         Sse::new(ReceiverStream::new(rx))
@@ -211,15 +240,36 @@ pub async fn proxy_post(
     if is_sse {
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
+        let metrics = st.metrics.clone();
         tokio::spawn(async move {
-            while let Some(item) = upstream.next().await {
-                match item {
-                    Ok(b) => {
-                        let _ = tx.send(Ok(b)).await;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => {
+                        // Client disconnected — drop upstream to abort engine generation.
+                        metrics
+                            .requests_aborted_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!("gateway SSE aborted: client disconnected");
+                        break;
                     }
-                    Err(_) => break,
+                    item = upstream.next() => {
+                        match item {
+                            Some(Ok(b)) => {
+                                if tx.send(Ok(b)).await.is_err() {
+                                    metrics
+                                        .requests_aborted_total
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    tracing::info!("gateway SSE aborted: client dropped body");
+                                    break;
+                                }
+                            }
+                            Some(Err(_)) | None => break,
+                        }
+                    }
                 }
             }
+            // Dropping `upstream` closes the TCP connection to Router/engine.
         });
 
         let stream = ReceiverStream::new(rx);

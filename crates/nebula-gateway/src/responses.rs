@@ -210,3 +210,29 @@ pub fn build_non_stream_json(b: &BuiltResponse) -> Value {
         "usage": b.usage
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_event_sequence_is_monotonic() {
+        let req = CreateResponseRequest {
+            model: Some("m".into()),
+            input: Some(Value::String("hi".into())),
+            instructions: None,
+            stream: Some(true),
+        };
+        let mut builder = ResponseStreamBuilder::new(&req);
+        let created = builder.created_event();
+        let delta = builder.push_delta("hello".into());
+        let completed = builder.completed_event();
+
+        assert_eq!(created["type"], "response.created");
+        assert_eq!(created["sequence_number"], 0);
+        assert_eq!(delta["type"], "response.output_text.delta");
+        assert_eq!(delta["sequence_number"], 1);
+        assert_eq!(completed["type"], "response.completed");
+        assert_eq!(completed["sequence_number"], 2);
+    }
+}

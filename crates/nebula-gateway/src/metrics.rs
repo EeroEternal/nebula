@@ -27,6 +27,8 @@ pub struct Metrics {
     pub upstream_error_connect_total: AtomicU64,
     pub upstream_error_timeout_total: AtomicU64,
     pub upstream_error_other_total: AtomicU64,
+    /// Client disconnect / explicit abort — not counted as 5xx error budget.
+    pub requests_aborted_total: AtomicU64,
 }
 
 impl Metrics {
@@ -123,6 +125,12 @@ pub fn render_metrics(metrics: &Metrics) -> String {
     body.push_str(&format!(
         "nebula_gateway_upstream_error_total{{kind=\"other\"}} {}\n",
         metrics.upstream_error_other_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_gateway_requests_aborted_total Client disconnect/abort (excluded from 5xx error budget).\n\
+         # TYPE nebula_gateway_requests_aborted_total counter\n\
+         nebula_gateway_requests_aborted_total {}\n",
+        metrics.requests_aborted_total.load(Ordering::Relaxed),
     ));
 
     body

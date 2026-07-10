@@ -493,3 +493,66 @@ impl Router {
         self.route_internal(ctx, model_uid, None, Some(exclude))
     }
 }
+
+#[cfg(test)]
+mod plan_version_tests {
+    use super::*;
+    use nebula_common::{EndpointKind, EndpointStatus};
+
+    fn ready_ep(model_uid: &str, replica_id: u32, plan_version: u64) -> EndpointInfo {
+        EndpointInfo {
+            model_uid: model_uid.into(),
+            replica_id,
+            plan_version,
+            node_id: "n1".into(),
+            endpoint_kind: EndpointKind::NativeHttp,
+            api_flavor: "openai".into(),
+            status: EndpointStatus::Ready,
+            last_heartbeat_ms: 0,
+            grpc_target: None,
+            base_url: Some(format!("http://127.0.0.1:{}", 8000 + replica_id)),
+        }
+    }
+
+    #[test]
+    fn plan_version_filters_stale_endpoints() {
+        let router = Router::new();
+        router.upsert_endpoint(ready_ep("m1", 0, 1));
+        router.upsert_endpoint(ready_ep("m1", 1, 2));
+        let ctx = ExecutionContext {
+            request_id: "r1".into(),
+            session_id: None,
+            tenant_id: None,
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+        };
+
+        let ep = router.route_with_plan_version(&ctx, "m1", 2).unwrap();
+        assert_eq!(ep.replica_id, 1);
+        assert_eq!(ep.plan_version, 2);
+
+        let err = router.route_with_plan_version(&ctx, "m1", 99).unwrap_err();
+        assert!(matches!(err, RouteError::NoEndpoint));
+    }
+
+    #[test]
+    fn draining_endpoints_are_not_selected() {
+        let router = Router::new();
+        let mut ep = ready_ep("m1", 0, 1);
+        ep.status = EndpointStatus::Draining;
+        router.upsert_endpoint(ep);
+        let ctx = ExecutionContext {
+            request_id: "r1".into(),
+            session_id: None,
+            tenant_id: None,
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+        };
+        assert!(matches!(
+            router.route_with_plan_version(&ctx, "m1", 1).unwrap_err(),
+            RouteError::NoEndpoint
+        ));
+    }
+}

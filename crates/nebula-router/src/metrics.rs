@@ -92,6 +92,8 @@ pub struct Metrics {
     pub upstream_error_timeout_total: AtomicU64,
     pub upstream_error_5xx_total: AtomicU64,
     pub upstream_error_other_total: AtomicU64,
+    /// Client disconnect / abort while proxying — not counted as 5xx.
+    pub requests_aborted_total: AtomicU64,
 
     /// Per-model E2E latency histogram (seconds).
     pub e2e_latency: DashMap<String, Histogram>,
@@ -215,6 +217,12 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         st.metrics
             .upstream_error_other_total
             .load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_requests_aborted_total Client disconnect/abort while proxying (excluded from 5xx).\n\
+         # TYPE nebula_router_requests_aborted_total counter\n\
+         nebula_router_requests_aborted_total {}\n",
+        st.metrics.requests_aborted_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_xtrace_query_errors_total xtrace query errors in stats sync loop.\n\
