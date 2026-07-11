@@ -12,7 +12,7 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::args::Args;
 use crate::engine::{write_engine_env, Engine, EngineHandle, EngineStartContext};
-use crate::heartbeat::{delete_endpoint, register_endpoint};
+use crate::heartbeat::{delete_endpoint, delete_stats, register_endpoint};
 use crate::util::now_ms;
 
 /// Local running / endpoint index key: (model_uid, replica_id).
@@ -183,6 +183,7 @@ async fn finish_drain_stop(
         tracing::info!(%model_uid, replica_id, "drain complete; stopping engine");
         let _ = stop_engine_outside(rm).await;
         let _ = delete_endpoint(store, model_uid, replica_id).await;
+        let _ = delete_stats(store, model_uid, replica_id).await;
         endpoint_state.lock().await.remove(&key);
     }
     Ok(())
@@ -271,6 +272,7 @@ async fn stop_replica(
         tracing::info!(%model_uid, replica_id, "stopping engine due to placement update");
         let _ = stop_engine_outside(rm).await;
         let _ = delete_endpoint(store, model_uid, replica_id).await;
+        let _ = delete_stats(store, model_uid, replica_id).await;
         endpoint_state.lock().await.remove(&key);
     }
     Ok(())

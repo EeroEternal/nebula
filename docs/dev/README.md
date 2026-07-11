@@ -3,7 +3,7 @@
 ## 入门与计划
 
 - [开发环境设置](./setup.md)
-- [开发计划](./plan.md)
+- [工程优化计划](../arch/optimization.md)
 - [端到端测试记录](./testing.md)
 - [工程成熟度清单](./engineering_maturity_checklist.md)
 

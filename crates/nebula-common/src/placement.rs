@@ -73,6 +73,12 @@ impl PlacementPlan {
     }
 }
 
+/// Next logical placement version after a successful CAS read of `prev`.
+/// Never use wall-clock here (B4).
+pub fn next_placement_version(prev: u64) -> u64 {
+    prev.saturating_add(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +117,18 @@ mod tests {
         let plan: PlacementPlan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.version, 2);
         assert_eq!(plan.updated_at_ms, 0);
+    }
+
+    #[test]
+    fn next_placement_version_is_strictly_monotonic() {
+        assert_eq!(next_placement_version(0), 1);
+        assert_eq!(next_placement_version(1), 2);
+        // Same-ms wall clock would collide; logical bump does not.
+        let same_ms = 1_700_000_000_000u64;
+        assert_eq!(next_placement_version(same_ms), same_ms + 1);
+        assert_eq!(
+            next_placement_version(next_placement_version(same_ms)),
+            same_ms + 2
+        );
     }
 }

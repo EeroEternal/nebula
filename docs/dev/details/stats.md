@@ -2,22 +2,7 @@
 
 Engine Stats Pipeline 是把推理引擎内部运行指标搬到 Nebula 控制面，让 Router 和 Scheduler 能基于真实负载做决策。
 
-## 当前代码状态
-
-当前 Node 已经会在 heartbeat loop 中对运行中的 engine 做健康检查和 stats scrape，并将关键指标推送到 xtrace：
-
-- `pending_requests`
-- `kv_cache_usage`
-- `prefix_cache_hit_rate`
-- GPU memory、temperature、utilization
-
-Router 侧也已经具备基于 stats 的路由能力，包括 `LeastKvCache`、`PrefixCacheAware`、stale stats 过滤和 overloading admission control。
-
-但当前还没有完全收敛到“Node 写 etcd `/stats/`，Router/Scheduler watch `/stats/`”这条控制面热路径。也就是说，观测链路已经部分可用，控制面实时决策链路仍需定稿。
-
-## 推荐目标架构
-
-控制面实时状态和历史观测数据应分开：
+## 当前架构（P0-2 已落地）
 
 ```text
 vLLM /metrics
@@ -26,9 +11,17 @@ Node Daemon
   ├── etcd /stats/{model_uid}/{replica_id}   # 最新状态，带 TTL/lease，供实时决策
   └── xtrace / Prometheus                    # 历史观测、面板、告警
 
-Router / Scheduler
-  └── watch/list /stats/                     # 路由、过载保护、扩缩容
+Router
+  └── watch /stats/                          # 路由、过载保护
+
+Scheduler
+  └── list /stats/                           # 扩缩容、缩容选副本
+
+Node Drain
+  └── get /stats/...                         # pending=0 或超时后再停引擎
 ```
+
+Node 在 heartbeat 健康检查后 scrape，并 `put_with_lease` 写入 `/stats/`（与 status/endpoints 共用 lease）。Router 用与 endpoints 相同的 list→watch 模式同步本地 `Router.stats`。Scheduler reconcile 从 etcd list，不再查询 xtrace 做扩缩容。
 
 ## `/stats/` 数据契约
 
@@ -55,17 +48,10 @@ Router：
 
 Scheduler：
 
-- list/watch `/stats/`，用于扩缩容和健康自愈辅助判断。
-- 不应依赖 xtrace 查询结果作为唯一扩缩容信号。
+- list `/stats/`，用于扩缩容和健康自愈辅助判断。
+- 不依赖 xtrace 查询结果作为扩缩容信号。
 
 观测系统：
 
-- xtrace/Prometheus 保存历史指标。
+- xtrace/Prometheus 保存历史指标（Node 仍可 push）。
 - 前端面板通过观测后端查询趋势，不直接读取 etcd 作为历史库。
-
-## 下一步
-
-1. Node 在 scrape stats 后写入 etcd `/stats/{model_uid}/{replica_id}`。
-2. Router 增加 `/stats/` watch loop，优先使用 etcd 最新 stats。
-3. Scheduler reconcile 读取 `/stats/`，xtrace 只作为历史观测与辅助查询。
-4. 更新测试，覆盖 stale stats、TTL 过期、stats 缺失降级和全过载 429。

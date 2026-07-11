@@ -80,4 +80,28 @@ mod tests {
         );
         assert!(rewritten.windows(2).any(|w| w == b"hi"));
     }
+
+    #[test]
+    fn peek_model_not_first_field() {
+        let body = br#"{"stream":true,"model":"m1","input":"x"}"#;
+        assert_eq!(peek_json_model_field(body).as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn peek_missing_model_returns_none() {
+        assert!(peek_json_model_field(br#"{"input":"x"}"#).is_none());
+        assert!(rewrite_json_model_field(br#"{"input":"x"}"#, "m").is_none());
+    }
+
+    #[test]
+    fn rewrite_preserves_large_suffix() {
+        let suffix = "x".repeat(64 * 1024);
+        let body = format!(r#"{{"model":"old","input":"{suffix}"}}"#);
+        let rewritten = rewrite_json_model_field(body.as_bytes(), "new").unwrap();
+        assert_eq!(peek_json_model_field(&rewritten).as_deref(), Some("new"));
+        let as_str = std::str::from_utf8(&rewritten).unwrap();
+        assert!(as_str.contains("\"input\":\""));
+        assert!(as_str.ends_with(&format!("{suffix}\"}}")));
+        assert_eq!(rewritten.len(), body.len()); // "old" and "new" same length
+    }
 }

@@ -15,7 +15,6 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 use crate::args::Args;
 use crate::auth::{db_auth_middleware, initialize_auth_schema};
@@ -32,11 +31,14 @@ use crate::state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
-
     let args = Args::parse();
+
+    let _otel_guard = nebula_common::telemetry::init_tracing(
+        "nebula-bff",
+        args.common.xtrace_url.as_deref(),
+        args.common.xtrace_token.as_deref(),
+        &args.common.log_format,
+    );
 
     let store =
         nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint))

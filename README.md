@@ -1,6 +1,6 @@
 # nebula
 
-Nebula 是 deepinfer 架构落地的 Rust-Native 新项目目录（控制面/路由/调度/agent）。
+Nebula 是 deepinfer 架构落地的 Rust 控制面（Gateway / Router / Scheduler / Node），默认 **Engine-Passthrough**：Gateway → Router → 引擎原生 HTTP（vLLM / SGLang），权威状态在 etcd。
 
 ## 快速开始
 
@@ -20,13 +20,13 @@ git clone --depth 1 https://github.com/lipish/nebula.git
 
 ## 项目结构
 
-- `crates/nebula-common`：共享类型（ExecutionContext、EndpointInfo/Stats 等）
-- `crates/nebula-meta`：MetaStore 抽象（首期含内存实现，后续接入 etcd）
-- `crates/nebula-router`：请求路由（least-connections + session affinity 预埋）
-- `crates/nebula-gateway`：对外 HTTP（后续实现 OpenAI-compatible，含 /v1/responses 1:1 streaming）
-- `crates/nebula-node`：节点侧 reconcile（watch placements → 管理引擎进程/注册 endpoints）
-- `crates/nebula-scheduler`：放置与副本规划（PlacementPlan）
-- `crates/nebula-cli`：统一入口（后续整合启动参数）
+- `crates/nebula-common`：共享类型与热路径 JSON helpers（PlacementPlan、EndpointInfo、`x-nebula-model` 等）
+- `crates/nebula-meta`：MetaStore（etcd + 内存实现，election / lease / CAS）
+- `crates/nebula-router`：endpoint 选择与代理（plan_version、策略、熔断）
+- `crates/nebula-gateway`：对外 OpenAI 兼容 HTTP（含 `/v1/responses` SSE）
+- `crates/nebula-node`：watch placements → 启停引擎 → 注册 endpoints
+- `crates/nebula-scheduler`：声明式 `/deployments/` → PlacementPlan（CAS）
+- `crates/nebula-cli`：运维 CLI（load / scale / chat 等）
 
 ## 本地验证（MVP）
 
@@ -57,3 +57,5 @@ curl -N http://127.0.0.1:8080/v1/responses \
 - 每条为 `data: {"type": ... }` 的 JSON 事件（用 `type` 识别事件）。
 - Responses streaming **不使用** `event:` 行。
 - Responses streaming **不使用** `data: [DONE]` 哨兵。
+
+全量单测：`cargo test --workspace`。架构与优化计划见 [docs/arch/architecture.md](docs/arch/architecture.md)、[docs/arch/optimization.md](docs/arch/optimization.md)。

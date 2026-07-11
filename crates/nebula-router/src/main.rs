@@ -60,16 +60,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let router_for_stats = router.clone();
-    if let Some(url) = args.common.xtrace_url.clone() {
-        let token = args.common.xtrace_token.clone().unwrap_or_default();
-        tokio::spawn(async move {
-            if let Err(e) = stats_sync_loop(url, token, router_for_stats).await {
-                tracing::error!(error=%e, "stats sync loop exited");
-            }
-        });
-    } else {
-        tracing::warn!("xtrace_url not set, stats sync disabled");
-    }
+    let store_for_stats = store.clone();
+    tokio::spawn(async move {
+        if let Err(e) = stats_sync_loop(store_for_stats, router_for_stats).await {
+            tracing::error!(error=%e, "stats sync loop exited");
+        }
+    });
 
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(3))

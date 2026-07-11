@@ -123,12 +123,39 @@ pub async fn register_endpoint(
     Ok(())
 }
 
+/// P0-2: publish latest engine stats for control-plane consumers (Router/Scheduler/Drain).
+pub async fn register_stats(
+    store: &EtcdMetaStore,
+    stats: &nebula_common::EndpointStats,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
+) -> anyhow::Result<()> {
+    let key = format!("/stats/{}/{}", stats.model_uid, stats.replica_id);
+    let bytes = serde_json::to_vec(stats)?;
+    if let Some(lease_id) = lease_id {
+        let _ = store.put_with_lease(&key, bytes, lease_id).await?;
+    } else {
+        let _ = store.put(&key, bytes, Some(ttl_ms)).await?;
+    }
+    Ok(())
+}
+
 pub async fn delete_endpoint(
     store: &EtcdMetaStore,
     model_uid: &str,
     replica_id: u32,
 ) -> anyhow::Result<()> {
     let key = format!("/endpoints/{}/{}", model_uid, replica_id);
+    let _ = store.delete(&key).await?;
+    Ok(())
+}
+
+pub async fn delete_stats(
+    store: &EtcdMetaStore,
+    model_uid: &str,
+    replica_id: u32,
+) -> anyhow::Result<()> {
+    let key = format!("/stats/{}/{}", model_uid, replica_id);
     let _ = store.delete(&key).await?;
     Ok(())
 }
@@ -370,6 +397,15 @@ pub async fn heartbeat_loop(
                         kv_cache_usage: kv_usage,
                         prefix_cache_hit_rate: stats.prefix_cache_hit_rate,
                     });
+
+                    if let Err(e) = register_stats(&store, &stats, ttl_ms, lease_id).await {
+                        tracing::warn!(
+                            model_uid=%target.model_uid,
+                            replica_id=target.replica_id,
+                            error=%e,
+                            "failed to write /stats/ to etcd"
+                        );
+                    }
                 }
                 continue;
             }

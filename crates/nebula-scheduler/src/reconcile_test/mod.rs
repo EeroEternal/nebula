@@ -116,4 +116,40 @@ mod tests {
         let kept: PlacementPlan = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(kept.leader_epoch, 2);
     }
+
+    #[tokio::test]
+    async fn test_logical_version_bump_on_cas_write() {
+        use nebula_common::next_placement_version;
+
+        let store = Arc::new(MemoryMetaStore::new());
+        let key = "/placements/m-ver".to_string();
+        let mut plan = PlacementPlan {
+            request_id: None,
+            model_uid: "m-ver".into(),
+            model_name: "m".into(),
+            version: 0,
+            updated_at_ms: 0,
+            leader_epoch: 1,
+            assignments: vec![],
+        };
+        store
+            .put(&key, serde_json::to_vec(&plan).unwrap(), None)
+            .await
+            .unwrap();
+
+        for expected in 1u64..=3 {
+            let (data, rev) = store.get(&key).await.unwrap().unwrap();
+            let prev: PlacementPlan = serde_json::from_slice(&data).unwrap();
+            plan.version = next_placement_version(prev.version);
+            plan.updated_at_ms = expected * 1_000;
+            let (ok, _) = store
+                .compare_and_swap(&key, rev, serde_json::to_vec(&plan).unwrap())
+                .await
+                .unwrap();
+            assert!(ok);
+            let (bytes, _) = store.get(&key).await.unwrap().unwrap();
+            let got: PlacementPlan = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(got.version, expected);
+        }
+    }
 }

@@ -4,7 +4,7 @@
 > 读者：Nebula 维护者 / 控制面负责人
 > 前提：保持 Nebula 的 no-xoscar 方向（Rust 控制面 + etcd reconcile + 引擎容器化）
 > 对照仓库：`/Users/xinference/github/powerllm`、本仓库
-> 相关文档：`../arch/architecture.md`、`ha/ha_roadmap.md`、`plan.md`、`../arch/optimization.md`；PowerLLM 侧 `docs/supervisor_api_actor_architecture_analysis.md`、`docs/ha_redesign_and_testing.md`、`docs/core_supervisor_worker_descent_design.md`
+> 相关文档：`../arch/architecture.md`、`ha/ha_roadmap.md`、`../arch/optimization.md`；PowerLLM 侧 `docs/supervisor_api_actor_architecture_analysis.md`、`docs/ha_redesign_and_testing.md`、`docs/core_supervisor_worker_descent_design.md`
 
 ---
 
@@ -231,7 +231,7 @@ PowerLLM 的广度来自多年 Python 适配；Nebula 用 **Engine trait + 镜�
 
 - LLM：继续 vLLM / SGLang 容器。
 - Embedding / Rerank / 多模态：新镜像 + NativeHttp，或 VirtualEngine 代理外部服务。
-- 硬件感知：`(硬件, 引擎, 模型) → 镜像`（`plan.md` §7）——这是 Nebula 相对 PowerLLM 的正确扩展轴。
+- 硬件感知：`(硬件, 引擎, 模型) → 镜像`（见 `../arch/optimization.md`）——这是 Nebula 相对 PowerLLM 的正确扩展轴。
 
 ---
 
@@ -333,7 +333,7 @@ PowerLLM 的广度来自多年 Python 适配；Nebula 用 **Engine trait + 镜�
 2. **每个吸收项写「行为验收」**，不要写「实现一个类似 Supervisor 的模块」。
 3. **PowerLLM 当行为与测试用例库**，不当代码依赖。可移植的是场景（杀主、缩容、取消、孤儿元数据），不是 Python 类。
 4. **保持短推理路径**：Gateway → Router → Engine HTTP。任何「先问 Scheduler 再推理」的设计都视为回归。
-5. **与现有 Nebula 文档对齐**：本指导落地后，应回写 `ha/ha_roadmap.md`（从规划改为执行）、`plan.md`（插入 P0 可靠性里程碑）、`../arch/optimization.md`（关闭 CAS/边界项）。
+5. **与现有 Nebula 文档对齐**：本指导落地后，应回写 `ha/ha_roadmap.md`（从规划改为执行）、`../arch/optimization.md`（关闭 CAS/边界项）。
 
 ---
 

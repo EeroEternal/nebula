@@ -45,7 +45,7 @@ async fn write_placement_cas(
         .map(|p| p.version)
         .unwrap_or(0);
     // Logical monotonic version (never wall-clock).
-    plan.version = prev_version.saturating_add(1);
+    plan.version = nebula_common::next_placement_version(prev_version);
     plan.updated_at_ms = crate::util::now_ms();
 
     let placement_val = serde_json::to_vec(plan)?;
@@ -127,24 +127,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    let xtrace = args.common.xtrace_url.as_deref().map(|url| {
-        let freshness_ms = std::env::var("NEBULA_XTRACE_METRIC_MAX_AGE_MS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(120_000);
-        let cfg = reconcile::XtraceQueryConfig {
-            url: url.to_string(),
-            token: args.common.xtrace_token.clone().unwrap_or_default(),
-            freshness_ms,
-        };
-        info!(
-            xtrace_url=%cfg.url,
-            freshness_ms=cfg.freshness_ms,
-            "xtrace signal query enabled"
-        );
-        cfg
-    });
-
     let store_for_reconcile = store.clone();
     let default_port_for_reconcile = args.default_port;
     let metrics_for_reconcile = Arc::clone(&shared_metrics);
@@ -153,7 +135,6 @@ async fn main() -> Result<()> {
         reconcile::reconcile_loop(
             store_for_reconcile,
             default_port_for_reconcile,
-            xtrace,
             metrics_for_reconcile,
             leader_for_reconcile,
         )

@@ -26,7 +26,7 @@ pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};
 pub use model_template::{ModelTemplate, TemplateCategory, TemplateSource};
 pub use node_status::{GpuStatus, NodeStatus};
-pub use placement::{PlacementAssignment, PlacementPlan};
+pub use placement::{next_placement_version, PlacementAssignment, PlacementPlan};
 
 pub mod args;
 pub mod auth;

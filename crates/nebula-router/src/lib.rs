@@ -148,6 +148,17 @@ impl Router {
             .insert((stats.model_uid.clone(), stats.replica_id), stats);
     }
 
+    pub fn remove_stats(&self, model_uid: &str, replica_id: u32) {
+        self.stats.remove(&(model_uid.to_string(), replica_id));
+    }
+
+    pub fn replace_all_stats(&self, items: Vec<EndpointStats>) {
+        self.stats.clear();
+        for stats in items {
+            self.upsert_stats(stats);
+        }
+    }
+
     pub fn inc_xtrace_query_errors(&self) {
         self.xtrace_query_errors_total
             .fetch_add(1, Ordering::Relaxed);

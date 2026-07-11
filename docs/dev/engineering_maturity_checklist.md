@@ -3,7 +3,7 @@
 > 状态：执行清单（2026-07-10）
 > 目标：达到与 PowerLLM 同级的生产工程完备度（HA / 生命周期 / CI / 运维），不复制 Actor 实现
 > 原则文档：`absorb_powerllm_engineering_guidance.md`
-> 相关：`ha/ha_roadmap.md`、`../arch/optimization.md`、`unigateway_integration.md`、`plan.md`
+> 相关：`ha/ha_roadmap.md`、`../arch/optimization.md`、`unigateway_integration.md`
 
 用法：按 Wave 顺序做；每项完成后把 `[ ]` 改成 `[x]`，并补上 PR / 验收备注。对齐的是**行为与验收**，不是 PowerLLM 类名。
 
