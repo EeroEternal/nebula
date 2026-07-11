@@ -9,9 +9,28 @@ use nebula_common::{EndpointInfo, EndpointStatus, NodeStatus};
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::docker_api::{EngineMetricSnapshot, NodeMetricsSnapshot, SharedNodeMetrics};
+use crate::engine::{Engine, EngineHandle, EngineProcess};
 use crate::gpu::read_gpu_statuses;
 use crate::reconcile::{mark_request_failed, replica_key, ReplicaKey, RunningModel};
 use crate::util::now_ms;
+
+/// Snapshot for health/scrape outside the `running` lock (C2).
+struct ProbeTarget {
+    rkey: ReplicaKey,
+    model_uid: String,
+    replica_id: u32,
+    base_url: String,
+    engine: Arc<dyn Engine>,
+    request_id: Option<String>,
+}
+
+fn probe_handle(base_url: &str) -> EngineHandle {
+    EngineHandle {
+        base_url: base_url.to_string(),
+        engine_model: String::new(),
+        process: EngineProcess::External,
+    }
+}
 
 /// Number of consecutive health-check failures before marking endpoint as Unhealthy.
 const UNHEALTHY_THRESHOLD: u32 = 3;
@@ -218,205 +237,228 @@ pub async fn heartbeat_loop(
             tracing::debug!("skipping endpoint refresh: endpoint state lock busy");
         }
 
-        // Scrape engine metrics and perform health checks
-        {
-            let Ok(mut running_guard) = running.try_lock() else {
+        // C2: snapshot under try_lock; health/scrape outside so reconcile is not blocked.
+        let now = now_ms();
+        let targets: Vec<ProbeTarget> = match running.try_lock() {
+            Err(_) => {
                 tracing::debug!("skipping engine health/stats: running state lock busy");
-                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-                continue;
-            };
-            let now = now_ms();
-            for rm in running_guard.values_mut() {
-                let rkey = replica_key(&rm.model_uid, rm.replica_id);
-
-                if rm.failed {
-                    continue;
-                }
-
-                // Skip health check during restart cooldown
-                if let Some(&last_restart) = restart_at.get(&rkey) {
-                    let budget = restart_budgets.get(&rkey);
-                    let cooldown_ms = budget
-                        .map(|b| b.next_allowed_ms.saturating_sub(last_restart))
-                        .unwrap_or(RESTART_COOLDOWN_SECS.saturating_mul(1000));
-                    let elapsed = now.saturating_sub(last_restart);
-                    if elapsed < cooldown_ms {
-                        tracing::debug!(
-                            model_uid=%rm.model_uid,
-                            replica_id=rm.replica_id,
-                            remaining_ms=cooldown_ms.saturating_sub(elapsed),
-                            "skipping health check during restart cooldown"
-                        );
-                        continue;
+                Vec::new()
+            }
+            Ok(running_guard) => running_guard
+                .values()
+                .filter_map(|rm| {
+                    if rm.failed {
+                        return None;
                     }
-                }
-
-                let healthy = rm.engine.health_check(&rm.handle).await;
-
-                let count = fail_counts.entry(rkey.clone()).or_insert(0);
-
-                if healthy {
-                    if *count > 0 {
-                        tracing::info!(
-                            model_uid=%rm.model_uid,
-                            replica_id=rm.replica_id,
-                            prev_failures=*count,
-                            "engine recovered"
-                        );
-                        *count = 0;
-                        restart_at.remove(&rkey);
-                        let mut ep_guard = endpoint.lock().await;
-                        if let Some(info) = ep_guard.get_mut(&rkey) {
-                            if info.status == EndpointStatus::Unhealthy {
-                                info.status = EndpointStatus::Ready;
-                                let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
-                                tracing::info!(
-                                    model_uid=%rm.model_uid,
-                                    replica_id=rm.replica_id,
-                                    "endpoint marked Ready again"
-                                );
-                            }
-                        }
-                    }
-
-                    if let Some(stats) = rm
-                        .engine
-                        .scrape_stats(&http, &rm.handle, &rm.model_uid, rm.replica_id)
-                        .await
-                    {
-                        if xtrace.is_some() {
-                            let ts = Utc::now();
-                            let labels = HashMap::from([
-                                ("node_id".to_string(), node_id.clone()),
-                                ("model_uid".to_string(), rm.model_uid.clone()),
-                                ("replica_id".to_string(), rm.replica_id.to_string()),
-                            ]);
-                            metric_points.push(xtrace_client::MetricPoint {
-                                name: "pending_requests".to_string(),
-                                labels: labels.clone(),
-                                value: stats.pending_requests as f64,
-                                timestamp: ts,
-                            });
-                            if let (Some(used), Some(free)) =
-                                (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes)
-                            {
-                                let total = used + free;
-                                let usage = if total > 0 {
-                                    used as f64 / total as f64
-                                } else {
-                                    0.0
-                                };
-                                metric_points.push(xtrace_client::MetricPoint {
-                                    name: "kv_cache_usage".to_string(),
-                                    labels: labels.clone(),
-                                    value: usage,
-                                    timestamp: ts,
-                                });
-                            }
-                            if let Some(rate) = stats.prefix_cache_hit_rate {
-                                metric_points.push(xtrace_client::MetricPoint {
-                                    name: "prefix_cache_hit_rate".to_string(),
-                                    labels,
-                                    value: rate,
-                                    timestamp: ts,
-                                });
-                            }
-                        }
-
-                        let kv_usage = match (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes)
-                        {
-                            (Some(used), Some(free)) => {
-                                let total = used + free;
-                                if total > 0 {
-                                    Some(used as f64 / total as f64)
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        };
-                        engine_snapshots.push(EngineMetricSnapshot {
-                            model_uid: rm.model_uid.clone(),
-                            replica_id: rm.replica_id,
-                            pending_requests: stats.pending_requests,
-                            kv_cache_usage: kv_usage,
-                            prefix_cache_hit_rate: stats.prefix_cache_hit_rate,
-                        });
-                    }
-                } else {
-                    *count += 1;
-                    tracing::warn!(
-                        model_uid=%rm.model_uid,
-                        replica_id=rm.replica_id,
-                        consecutive_failures=*count,
-                        "engine health check failed"
-                    );
-
-                    if *count == UNHEALTHY_THRESHOLD {
-                        let mut ep_guard = endpoint.lock().await;
-                        if let Some(info) = ep_guard.get_mut(&rkey) {
-                            info.status = EndpointStatus::Unhealthy;
-                            let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
-                            tracing::warn!(
+                    let rkey = replica_key(&rm.model_uid, rm.replica_id);
+                    if let Some(&last_restart) = restart_at.get(&rkey) {
+                        let budget = restart_budgets.get(&rkey);
+                        let cooldown_ms = budget
+                            .map(|b| b.next_allowed_ms.saturating_sub(last_restart))
+                            .unwrap_or(RESTART_COOLDOWN_SECS.saturating_mul(1000));
+                        let elapsed = now.saturating_sub(last_restart);
+                        if elapsed < cooldown_ms {
+                            tracing::debug!(
                                 model_uid=%rm.model_uid,
                                 replica_id=rm.replica_id,
-                                "endpoint marked Unhealthy"
+                                remaining_ms=cooldown_ms.saturating_sub(elapsed),
+                                "skipping health check during restart cooldown"
+                            );
+                            return None;
+                        }
+                    }
+                    Some(ProbeTarget {
+                        rkey,
+                        model_uid: rm.model_uid.clone(),
+                        replica_id: rm.replica_id,
+                        base_url: rm.handle.base_url.clone(),
+                        engine: rm.engine.clone(),
+                        request_id: rm.request_id.clone(),
+                    })
+                })
+                .collect(),
+        };
+
+        for target in targets {
+            let probe = probe_handle(&target.base_url);
+            let healthy = target.engine.health_check(&probe).await;
+            let count = fail_counts.entry(target.rkey.clone()).or_insert(0);
+
+            if healthy {
+                if *count > 0 {
+                    tracing::info!(
+                        model_uid=%target.model_uid,
+                        replica_id=target.replica_id,
+                        prev_failures=*count,
+                        "engine recovered"
+                    );
+                    *count = 0;
+                    restart_at.remove(&target.rkey);
+                    let mut ep_guard = endpoint.lock().await;
+                    if let Some(info) = ep_guard.get_mut(&target.rkey) {
+                        if info.status == EndpointStatus::Unhealthy {
+                            info.status = EndpointStatus::Ready;
+                            let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
+                            tracing::info!(
+                                model_uid=%target.model_uid,
+                                replica_id=target.replica_id,
+                                "endpoint marked Ready again"
                             );
                         }
                     }
+                }
 
-                    if *count >= RESTART_THRESHOLD {
-                        let budget = restart_budgets.entry(rkey.clone()).or_default();
-                        match budget.try_consume(now) {
-                            Ok(cooldown_secs) => {
-                                tracing::warn!(
-                                    model_uid=%rm.model_uid,
-                                    replica_id=rm.replica_id,
-                                    attempt=budget.attempts,
-                                    cooldown_secs,
-                                    "attempting engine restart"
-                                );
-                                let ctx = rm.start_ctx.clone();
-                                if let Err(e) = rm.engine.try_restart(&mut rm.handle, &ctx).await {
-                                    tracing::error!(
-                                        model_uid=%rm.model_uid,
-                                        replica_id=rm.replica_id,
-                                        error=%e,
-                                        "engine restart failed"
-                                    );
-                                }
-                                *count = 1;
-                                restart_at.insert(rkey, now_ms());
-                            }
-                            Err("backoff") => {
-                                tracing::debug!(
-                                    model_uid=%rm.model_uid,
-                                    replica_id=rm.replica_id,
-                                    "restart skipped: still in backoff"
-                                );
-                            }
-                            Err(_) => {
-                                let reason = format!(
-                                    "recovery budget exhausted ({} restarts / 24h)",
-                                    RESTART_BUDGET_N
-                                );
-                                tracing::error!(
-                                    model_uid=%rm.model_uid,
-                                    replica_id=rm.replica_id,
-                                    %reason,
-                                    "marking replica Failed; stopping restart loop"
-                                );
-                                rm.failed = true;
-                                let mut ep_guard = endpoint.lock().await;
-                                if let Some(info) = ep_guard.get_mut(&rkey) {
-                                    info.status = EndpointStatus::Failed;
-                                    let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
-                                }
-                                if let Some(request_id) = rm.request_id.as_deref() {
-                                    mark_request_failed(&store, request_id, reason).await;
-                                }
+                if let Some(stats) = target
+                    .engine
+                    .scrape_stats(&http, &probe, &target.model_uid, target.replica_id)
+                    .await
+                {
+                    if xtrace.is_some() {
+                        let ts = Utc::now();
+                        let labels = HashMap::from([
+                            ("node_id".to_string(), node_id.clone()),
+                            ("model_uid".to_string(), target.model_uid.clone()),
+                            ("replica_id".to_string(), target.replica_id.to_string()),
+                        ]);
+                        metric_points.push(xtrace_client::MetricPoint {
+                            name: "pending_requests".to_string(),
+                            labels: labels.clone(),
+                            value: stats.pending_requests as f64,
+                            timestamp: ts,
+                        });
+                        if let (Some(used), Some(free)) =
+                            (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes)
+                        {
+                            let total = used + free;
+                            let usage = if total > 0 {
+                                used as f64 / total as f64
+                            } else {
+                                0.0
+                            };
+                            metric_points.push(xtrace_client::MetricPoint {
+                                name: "kv_cache_usage".to_string(),
+                                labels: labels.clone(),
+                                value: usage,
+                                timestamp: ts,
+                            });
+                        }
+                        if let Some(rate) = stats.prefix_cache_hit_rate {
+                            metric_points.push(xtrace_client::MetricPoint {
+                                name: "prefix_cache_hit_rate".to_string(),
+                                labels,
+                                value: rate,
+                                timestamp: ts,
+                            });
+                        }
+                    }
+
+                    let kv_usage = match (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes) {
+                        (Some(used), Some(free)) => {
+                            let total = used + free;
+                            if total > 0 {
+                                Some(used as f64 / total as f64)
+                            } else {
+                                None
                             }
                         }
+                        _ => None,
+                    };
+                    engine_snapshots.push(EngineMetricSnapshot {
+                        model_uid: target.model_uid.clone(),
+                        replica_id: target.replica_id,
+                        pending_requests: stats.pending_requests,
+                        kv_cache_usage: kv_usage,
+                        prefix_cache_hit_rate: stats.prefix_cache_hit_rate,
+                    });
+                }
+                continue;
+            }
+
+            *count += 1;
+            tracing::warn!(
+                model_uid=%target.model_uid,
+                replica_id=target.replica_id,
+                consecutive_failures=*count,
+                "engine health check failed"
+            );
+
+            if *count == UNHEALTHY_THRESHOLD {
+                let mut ep_guard = endpoint.lock().await;
+                if let Some(info) = ep_guard.get_mut(&target.rkey) {
+                    info.status = EndpointStatus::Unhealthy;
+                    let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
+                    tracing::warn!(
+                        model_uid=%target.model_uid,
+                        replica_id=target.replica_id,
+                        "endpoint marked Unhealthy"
+                    );
+                }
+            }
+
+            if *count < RESTART_THRESHOLD {
+                continue;
+            }
+
+            let budget = restart_budgets.entry(target.rkey.clone()).or_default();
+            match budget.try_consume(now) {
+                Ok(cooldown_secs) => {
+                    tracing::warn!(
+                        model_uid=%target.model_uid,
+                        replica_id=target.replica_id,
+                        attempt=budget.attempts,
+                        cooldown_secs,
+                        "attempting engine restart"
+                    );
+                    // Rare path: brief lock to mutate the real handle.
+                    let mut guard = running.lock().await;
+                    if let Some(rm) = guard.get_mut(&target.rkey) {
+                        if !rm.failed {
+                            let ctx = rm.start_ctx.clone();
+                            if let Err(e) = rm.engine.try_restart(&mut rm.handle, &ctx).await {
+                                tracing::error!(
+                                    model_uid=%target.model_uid,
+                                    replica_id=target.replica_id,
+                                    error=%e,
+                                    "engine restart failed"
+                                );
+                            }
+                        }
+                    }
+                    drop(guard);
+                    *count = 1;
+                    restart_at.insert(target.rkey.clone(), now_ms());
+                }
+                Err("backoff") => {
+                    tracing::debug!(
+                        model_uid=%target.model_uid,
+                        replica_id=target.replica_id,
+                        "restart skipped: still in backoff"
+                    );
+                }
+                Err(_) => {
+                    let reason = format!(
+                        "recovery budget exhausted ({} restarts / 24h)",
+                        RESTART_BUDGET_N
+                    );
+                    tracing::error!(
+                        model_uid=%target.model_uid,
+                        replica_id=target.replica_id,
+                        %reason,
+                        "marking replica Failed; stopping restart loop"
+                    );
+                    {
+                        let mut guard = running.lock().await;
+                        if let Some(rm) = guard.get_mut(&target.rkey) {
+                            rm.failed = true;
+                        }
+                    }
+                    let mut ep_guard = endpoint.lock().await;
+                    if let Some(info) = ep_guard.get_mut(&target.rkey) {
+                        info.status = EndpointStatus::Failed;
+                        let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
+                    }
+                    if let Some(request_id) = target.request_id.as_deref() {
+                        mark_request_failed(&store, request_id, reason).await;
                     }
                 }
             }

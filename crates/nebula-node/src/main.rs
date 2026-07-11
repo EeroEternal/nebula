@@ -74,9 +74,9 @@ async fn periodic_full_reconcile_loop(
             if let Err(e) = reconcile_model(
                 &store,
                 &args,
-                &mut *running.lock().await,
+                &running,
                 &endpoint_state,
-                &mut *last_epochs.lock().await,
+                &last_epochs,
                 &mid,
                 Some(plan),
             )
@@ -98,9 +98,9 @@ async fn periodic_full_reconcile_loop(
             if let Err(e) = reconcile_model(
                 &store,
                 &args,
-                &mut *running.lock().await,
+                &running,
                 &endpoint_state,
-                &mut *last_epochs.lock().await,
+                &last_epochs,
                 &mid,
                 None,
             )
@@ -223,9 +223,9 @@ async fn main() -> anyhow::Result<()> {
                         let _ = reconcile_model(
                             &store,
                             &args,
-                            &mut *running.lock().await,
+                            &running,
                             &endpoint_state,
-                            &mut *last_epochs.lock().await,
+                            &last_epochs,
                             &mid,
                             Some(plan),
                         )
@@ -264,9 +264,9 @@ async fn main() -> anyhow::Result<()> {
                     let _ = reconcile_model(
                         &store,
                         &args,
-                        &mut *running.lock().await,
+                        &running,
                         &endpoint_state,
-                        &mut *last_epochs.lock().await,
+                        &last_epochs,
                         &mid,
                         Some(p),
                     )
@@ -282,9 +282,9 @@ async fn main() -> anyhow::Result<()> {
                         let _ = reconcile_model(
                             &store,
                             &args,
-                            &mut *running.lock().await,
+                            &running,
                             &endpoint_state,
-                            &mut *last_epochs.lock().await,
+                            &last_epochs,
                             &model_uid,
                             None,
                         )

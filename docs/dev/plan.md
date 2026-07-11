@@ -101,7 +101,7 @@ Gateway 轻量 peek `model` → 注入 `x-nebula-model`；Router 优先 header �
 
 | 项 | 状态 | 内容 |
 |----|------|------|
-| C2 | 部分 | heartbeat 已 `try_lock` 跳过忙锁；reconcile 持锁下沉仍待拆（锁外 download/start） |
+| C2 | ✅ | heartbeat：`try_lock` 快照后锁外 health/scrape；reconcile：锁内快照/提交，download/start/stop/drain 在锁外 |
 | C3 | ✅ | Node 启动 `grant_lease` + keepalive；status/endpoints 共用 `put_with_lease` |
 | C4 | 进行中 | 单测覆盖 B4/C1；文档已同步；workspace 测试跟进 |
 

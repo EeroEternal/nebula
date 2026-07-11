@@ -136,30 +136,53 @@ async fn mark_endpoint_draining(
     ttl_ms: u64,
 ) -> anyhow::Result<()> {
     let key = replica_key(model_uid, replica_id);
-    let mut guard = endpoint_state.lock().await;
-    if let Some(ep) = guard.get_mut(&key) {
-        if ep.status != EndpointStatus::Draining {
-            ep.status = EndpointStatus::Draining;
-            ep.last_heartbeat_ms = now_ms();
-            register_endpoint(store, ep, ttl_ms, None).await?;
-            tracing::info!(%model_uid, replica_id, "endpoint marked Draining");
+    let info = {
+        let mut guard = endpoint_state.lock().await;
+        if let Some(ep) = guard.get_mut(&key) {
+            if ep.status != EndpointStatus::Draining {
+                ep.status = EndpointStatus::Draining;
+                ep.last_heartbeat_ms = now_ms();
+                Some(ep.clone())
+            } else {
+                None
+            }
+        } else {
+            None
         }
+    };
+    if let Some(ep) = info {
+        register_endpoint(store, &ep, ttl_ms, None).await?;
+        tracing::info!(%model_uid, replica_id, "endpoint marked Draining");
     }
     Ok(())
 }
 
+/// Stop engine outside the running lock (C2).
+async fn stop_engine_outside(mut rm: RunningModel) -> anyhow::Result<()> {
+    tracing::info!(
+        model_uid=%rm.model_uid,
+        replica_id=rm.replica_id,
+        "stopping engine"
+    );
+    rm.engine.stop(&mut rm.handle).await
+}
+
 async fn finish_drain_stop(
     store: &EtcdMetaStore,
-    running: &mut HashMap<ReplicaKey, RunningModel>,
+    running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
     endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
     replica_id: u32,
 ) -> anyhow::Result<()> {
     let key = replica_key(model_uid, replica_id);
-    if let Some(mut rm) = running.remove(&key) {
+    let removed = {
+        let mut guard = running.lock().await;
+        guard.remove(&key)
+    };
+    if let Some(rm) = removed {
         tracing::info!(%model_uid, replica_id, "drain complete; stopping engine");
-        rm.engine.stop(&mut rm.handle).await?;
-        let _ = delete_endpoint(store, &rm.model_uid, rm.replica_id).await;
+        let _ = stop_engine_outside(rm).await;
+        let _ = delete_endpoint(store, model_uid, replica_id).await;
         endpoint_state.lock().await.remove(&key);
     }
     Ok(())
@@ -169,7 +192,7 @@ async fn finish_drain_stop(
 async fn drain_then_stop(
     store: &EtcdMetaStore,
     args: &Args,
-    running: &mut HashMap<ReplicaKey, RunningModel>,
+    running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
     endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
     replica_id: u32,
@@ -177,7 +200,8 @@ async fn drain_then_stop(
     let key = replica_key(model_uid, replica_id);
     let now = now_ms();
     let (just_started, started) = {
-        let Some(rm) = running.get_mut(&key) else {
+        let mut guard = running.lock().await;
+        let Some(rm) = guard.get_mut(&key) else {
             return Ok(());
         };
         if rm.drain_started_ms.is_none() {
@@ -189,11 +213,13 @@ async fn drain_then_stop(
     };
 
     if just_started {
+        // etcd write outside running lock
         mark_endpoint_draining(store, endpoint_state, model_uid, replica_id, args.heartbeat_ttl_ms)
             .await?;
         return Ok(());
     }
 
+    // etcd stats read outside running lock
     let pending = pending_requests(store, model_uid, replica_id)
         .await
         .unwrap_or(0);
@@ -215,11 +241,14 @@ async fn drain_then_stop(
 async fn drain_all_local(
     store: &EtcdMetaStore,
     args: &Args,
-    running: &mut HashMap<ReplicaKey, RunningModel>,
+    running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
     endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
 ) -> anyhow::Result<()> {
-    let rids = running_replica_ids(running, model_uid);
+    let rids = {
+        let guard = running.lock().await;
+        running_replica_ids(&guard, model_uid)
+    };
     for rid in rids {
         drain_then_stop(store, args, running, endpoint_state, model_uid, rid).await?;
     }
@@ -228,29 +257,32 @@ async fn drain_all_local(
 
 async fn stop_replica(
     store: &EtcdMetaStore,
-    running: &mut HashMap<ReplicaKey, RunningModel>,
+    running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
     endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
     replica_id: u32,
 ) -> anyhow::Result<()> {
     let key = replica_key(model_uid, replica_id);
-    if let Some(mut rm) = running.remove(&key) {
+    let removed = {
+        let mut guard = running.lock().await;
+        guard.remove(&key)
+    };
+    if let Some(rm) = removed {
         tracing::info!(%model_uid, replica_id, "stopping engine due to placement update");
-        rm.engine.stop(&mut rm.handle).await?;
-        let _ = delete_endpoint(store, &rm.model_uid, rm.replica_id).await;
+        let _ = stop_engine_outside(rm).await;
+        let _ = delete_endpoint(store, model_uid, replica_id).await;
         endpoint_state.lock().await.remove(&key);
     }
     Ok(())
 }
 
-async fn start_replica(
+/// Heavy start path with no `running` lock held (C2).
+async fn launch_replica_engine(
     store: &EtcdMetaStore,
     args: &Args,
-    running: &mut HashMap<ReplicaKey, RunningModel>,
-    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     plan: &PlacementPlan,
     assignment: &PlacementAssignment,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<(RunningModel, EndpointInfo)>> {
     let model_uid = plan.model_uid.as_str();
     let replica_id = assignment.replica_id;
     let desired_signature = assignment_signature(assignment);
@@ -293,7 +325,7 @@ async fn start_replica(
             if let Some(request_id) = plan.request_id.as_deref() {
                 mark_request_failed(store, request_id, reason).await;
             }
-            return Ok(());
+            return Ok(None);
         }
     }
 
@@ -320,7 +352,7 @@ async fn start_replica(
                 if let Some(request_id) = plan.request_id.as_deref() {
                     mark_request_failed(store, request_id, reason).await;
                 }
-                return Ok(());
+                return Ok(None);
             }
         }
     }
@@ -337,7 +369,7 @@ async fn start_replica(
                 if let Some(request_id) = plan.request_id.as_deref() {
                     mark_request_failed(store, request_id, e.to_string()).await;
                 }
-                return Ok(());
+                return Ok(None);
             }
         }
     };
@@ -358,40 +390,83 @@ async fn start_replica(
         base_url: Some(handle.base_url.clone()),
     };
 
+    let rm = RunningModel {
+        model_uid: plan.model_uid.clone(),
+        replica_id,
+        assignment_signature: desired_signature,
+        plan_version: plan.version,
+        handle,
+        engine,
+        start_ctx: ctx,
+        request_id: plan.request_id.clone(),
+        drain_started_ms: None,
+        failed: false,
+    };
+    Ok(Some((rm, info)))
+}
+
+async fn start_replica(
+    store: &EtcdMetaStore,
+    args: &Args,
+    running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
+    plan: &PlacementPlan,
+    assignment: &PlacementAssignment,
+) -> anyhow::Result<()> {
+    let key = replica_key(&plan.model_uid, assignment.replica_id);
+    // Skip if already present (another reconcile may have won).
+    {
+        let guard = running.lock().await;
+        if guard.contains_key(&key) {
+            return Ok(());
+        }
+    }
+
+    let launched = launch_replica_engine(store, args, plan, assignment).await?;
+    let Some((rm, info)) = launched else {
+        return Ok(());
+    };
+
+    // Commit under lock; if raced, tear down the duplicate outside.
+    let duplicate = {
+        let mut guard = running.lock().await;
+        if guard.contains_key(&key) {
+            Some(rm)
+        } else {
+            guard.insert(key.clone(), rm);
+            None
+        }
+    };
+    if let Some(dup) = duplicate {
+        tracing::warn!(
+            model_uid=%plan.model_uid,
+            replica_id=assignment.replica_id,
+            "duplicate start raced; stopping extra engine"
+        );
+        let _ = stop_engine_outside(dup).await;
+        return Ok(());
+    }
+
     register_endpoint(store, &info, args.heartbeat_ttl_ms, None).await?;
-    tracing::info!(%model_uid, replica_id, base_url=%handle.base_url, "registered endpoint");
-
-    let key = replica_key(model_uid, replica_id);
-    endpoint_state.lock().await.insert(key.clone(), info);
-    running.insert(
-        key,
-        RunningModel {
-            model_uid: plan.model_uid.clone(),
-            replica_id,
-            assignment_signature: desired_signature,
-            plan_version: plan.version,
-            handle,
-            engine,
-            start_ctx: ctx,
-            request_id: plan.request_id.clone(),
-            drain_started_ms: None,
-            failed: false,
-        },
+    endpoint_state.lock().await.insert(key, info);
+    tracing::info!(
+        model_uid=%plan.model_uid,
+        replica_id=assignment.replica_id,
+        "registered endpoint"
     );
-
     Ok(())
 }
 
 /// Reconcile local replicas for one model against the desired placement plan.
 ///
-/// Uses set-diff on `(model_uid, replica_id)`: excess replicas drain, missing start,
-/// signature changes roll the affected replica only.
+/// C2: holds `running` only for snapshot / commit; download / start / stop / etcd
+/// side-effects run outside the lock.
 pub async fn reconcile_model(
     store: &EtcdMetaStore,
     args: &Args,
-    running: &mut HashMap<ReplicaKey, RunningModel>,
+    running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
     endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
-    last_epochs: &mut HashMap<String, u64>,
+    last_epochs: &Arc<Mutex<HashMap<String, u64>>>,
     model_uid: &str,
     plan: Option<PlacementPlan>,
 ) -> anyhow::Result<()> {
@@ -402,21 +477,27 @@ pub async fn reconcile_model(
         }
     };
 
-    if should_reject_stale_epoch(&plan, last_epochs) {
-        tracing::warn!(
-            %model_uid,
-            plan_epoch = plan.leader_epoch,
-            last_epoch = last_epochs.get(model_uid).copied().unwrap_or(0),
-            "rejecting stale placement (leader_epoch fencing)"
-        );
-        return Ok(());
+    {
+        let epochs = last_epochs.lock().await;
+        if should_reject_stale_epoch(&plan, &epochs) {
+            tracing::warn!(
+                %model_uid,
+                plan_epoch = plan.leader_epoch,
+                last_epoch = epochs.get(model_uid).copied().unwrap_or(0),
+                "rejecting stale placement (leader_epoch fencing)"
+            );
+            return Ok(());
+        }
     }
 
     let desired = local_assignments(&plan, &args.node_id);
     let desired_ids: HashSet<u32> = desired.iter().map(|a| a.replica_id).collect();
 
-    // Drain replicas no longer assigned to this node.
-    let local_rids = running_replica_ids(running, model_uid);
+    // Snapshot local replica ids under short lock.
+    let local_rids = {
+        let guard = running.lock().await;
+        running_replica_ids(&guard, model_uid)
+    };
     for rid in local_rids {
         if !desired_ids.contains(&rid) {
             drain_then_stop(store, args, running, endpoint_state, model_uid, rid).await?;
@@ -424,45 +505,66 @@ pub async fn reconcile_model(
     }
 
     if desired.is_empty() {
+        if plan.leader_epoch > 0 {
+            last_epochs
+                .lock()
+                .await
+                .insert(model_uid.to_string(), plan.leader_epoch);
+        }
         return Ok(());
     }
 
-    for assignment in desired {
-        let key = replica_key(model_uid, assignment.replica_id);
-        let desired_signature = assignment_signature(assignment);
+    enum Action {
+        KeepRefreshVersion,
+        Restart,
+        Start,
+    }
 
-        match running.get_mut(&key) {
-            Some(rm) if rm.assignment_signature == desired_signature => {
-                // Still desired with same config — cancel any in-progress drain.
-                rm.drain_started_ms = None;
-                // Placement version bumps on scale-in/out; refresh so router plan_version
-                // filter keeps accepting this still-assigned replica.
-                if rm.plan_version != plan.version {
-                    let refreshed = {
-                        let mut guard = endpoint_state.lock().await;
-                        guard.get_mut(&key).map(|info| {
-                            info.plan_version = plan.version;
-                            info.last_heartbeat_ms = now_ms();
-                            info.clone()
-                        })
-                    };
-                    if let Some(info) = refreshed {
-                        register_endpoint(store, &info, args.heartbeat_ttl_ms, None).await?;
-                        if let Some(rm) = running.get_mut(&key) {
-                            rm.plan_version = plan.version;
-                        }
-                        tracing::info!(
-                            %model_uid,
-                            replica_id = assignment.replica_id,
-                            plan_version = plan.version,
-                            "refreshed endpoint plan_version after placement bump"
-                        );
-                    } else if let Some(rm) = running.get_mut(&key) {
-                        rm.plan_version = plan.version;
+    let mut actions: Vec<(PlacementAssignment, Action)> = Vec::new();
+    {
+        let mut guard = running.lock().await;
+        for assignment in &desired {
+            let key = replica_key(model_uid, assignment.replica_id);
+            let desired_signature = assignment_signature(assignment);
+            match guard.get_mut(&key) {
+                Some(rm) if rm.assignment_signature == desired_signature => {
+                    rm.drain_started_ms = None;
+                    if rm.plan_version != plan.version {
+                        actions.push(((*assignment).clone(), Action::KeepRefreshVersion));
                     }
                 }
+                Some(_) => actions.push(((*assignment).clone(), Action::Restart)),
+                None => actions.push(((*assignment).clone(), Action::Start)),
             }
-            Some(_) => {
+        }
+    }
+
+    for (assignment, action) in actions {
+        match action {
+            Action::KeepRefreshVersion => {
+                let key = replica_key(model_uid, assignment.replica_id);
+                let refreshed = {
+                    let mut ep = endpoint_state.lock().await;
+                    ep.get_mut(&key).map(|info| {
+                        info.plan_version = plan.version;
+                        info.last_heartbeat_ms = now_ms();
+                        info.clone()
+                    })
+                };
+                if let Some(info) = refreshed {
+                    register_endpoint(store, &info, args.heartbeat_ttl_ms, None).await?;
+                }
+                if let Some(rm) = running.lock().await.get_mut(&key) {
+                    rm.plan_version = plan.version;
+                }
+                tracing::info!(
+                    %model_uid,
+                    replica_id = assignment.replica_id,
+                    plan_version = plan.version,
+                    "refreshed endpoint plan_version after placement bump"
+                );
+            }
+            Action::Restart => {
                 stop_replica(
                     store,
                     running,
@@ -471,16 +573,19 @@ pub async fn reconcile_model(
                     assignment.replica_id,
                 )
                 .await?;
-                start_replica(store, args, running, endpoint_state, &plan, assignment).await?;
+                start_replica(store, args, running, endpoint_state, &plan, &assignment).await?;
             }
-            None => {
-                start_replica(store, args, running, endpoint_state, &plan, assignment).await?;
+            Action::Start => {
+                start_replica(store, args, running, endpoint_state, &plan, &assignment).await?;
             }
         }
     }
 
     if plan.leader_epoch > 0 {
-        last_epochs.insert(model_uid.to_string(), plan.leader_epoch);
+        last_epochs
+            .lock()
+            .await
+            .insert(model_uid.to_string(), plan.leader_epoch);
     }
 
     Ok(())
