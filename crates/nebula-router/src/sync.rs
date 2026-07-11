@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,27 +11,27 @@ pub async fn endpoints_sync_loop(
     router: Arc<nebula_router::Router>,
 ) -> anyhow::Result<()> {
     loop {
-        let mut snapshot: Vec<EndpointInfo> = Vec::new();
-        match store.list_prefix("/endpoints/").await {
-            Ok(items) => {
-                for (_k, v, _rev) in items {
-                    if let Ok(info) = serde_json::from_slice::<EndpointInfo>(&v) {
-                        snapshot.push(info);
-                    }
-                }
-                router.replace_all_endpoints(snapshot);
-            }
+        let (items, snap_rev) = match store.list_prefix_snapshot("/endpoints/").await {
+            Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error=%e, "failed to list endpoints, will retry");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
-        }
+        };
 
-        let mut stream = match store.watch_prefix("/endpoints/", None).await {
+        let mut snapshot: Vec<EndpointInfo> = Vec::new();
+        for (_k, v, _rev) in items {
+            if let Ok(info) = serde_json::from_slice::<EndpointInfo>(&v) {
+                snapshot.push(info);
+            }
+        }
+        router.replace_all_endpoints(snapshot);
+
+        let mut stream = match store.watch_prefix("/endpoints/", Some(snap_rev)).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error=%e, "failed to watch endpoints, will retry");
+                tracing::warn!(error=%e, "failed to watch endpoints, will resync");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
@@ -53,66 +52,67 @@ pub async fn endpoints_sync_loop(
             }
         }
 
-        tracing::warn!("endpoints watch stream ended, reconnecting");
+        tracing::warn!("endpoints watch stream ended, full resync");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
 pub async fn placement_sync_loop(
     store: EtcdMetaStore,
-    model_uid: String,
-    plan_version: Arc<AtomicU64>,
     router: Arc<nebula_router::Router>,
 ) -> anyhow::Result<()> {
     loop {
-        // Initial load: list ALL placements and populate model mappings
-        let mut found_primary = false;
-        match store.list_prefix("/placements/").await {
-            Ok(items) => {
-                for (_k, v, _rev) in items {
-                    if let Ok(plan) = serde_json::from_slice::<PlacementPlan>(&v) {
-                        router.set_model_mapping(&plan.model_uid, &plan.model_name);
-                        if plan.model_uid == model_uid {
-                            plan_version.store(plan.version, Ordering::Relaxed);
-                            found_primary = true;
-                        }
-                    }
-                }
-                if !found_primary {
-                    plan_version.store(0, Ordering::Relaxed);
-                }
-            }
+        let (items, snap_rev) = match store.list_prefix_snapshot("/placements/").await {
+            Ok(v) => v,
             Err(e) => {
                 tracing::warn!(error=%e, "failed to list placements, will retry");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
-        }
+        };
 
-        let mut stream = match store.watch_prefix("/placements/", None).await {
+        let mut versions = Vec::new();
+        for (_k, v, _rev) in items {
+            if let Ok(plan) = serde_json::from_slice::<PlacementPlan>(&v) {
+                router.set_model_mapping(&plan.model_uid, &plan.model_name);
+                versions.push((plan.model_uid, plan.version));
+            }
+        }
+        router.replace_all_plan_versions(versions);
+
+        let mut stream = match store.watch_prefix("/placements/", Some(snap_rev)).await {
             Ok(s) => s,
             Err(e) => {
-                tracing::warn!(error=%e, "failed to watch placements, will retry");
+                tracing::warn!(error=%e, "failed to watch placements, will resync");
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
         };
+
         while let Some(ev) = stream.next().await {
-            let Some(v) = ev.value else {
-                continue;
-            };
-            let Ok(plan) = serde_json::from_slice::<PlacementPlan>(&v) else {
-                continue;
-            };
-            // Always update model mappings for every placement
-            router.set_model_mapping(&plan.model_uid, &plan.model_name);
-            // Update plan_version only for the primary model
-            if plan.model_uid == model_uid {
-                plan_version.store(plan.version, Ordering::Relaxed);
+            match ev.value {
+                Some(v) => {
+                    let Ok(plan) = serde_json::from_slice::<PlacementPlan>(&v) else {
+                        continue;
+                    };
+                    router.set_model_mapping(&plan.model_uid, &plan.model_name);
+                    router.set_plan_version(&plan.model_uid, plan.version);
+                }
+                None => {
+                    // /placements/{model_uid}
+                    let model_uid = ev
+                        .key
+                        .strip_prefix("/placements/")
+                        .unwrap_or(&ev.key)
+                        .to_string();
+                    if !model_uid.is_empty() {
+                        router.clear_plan_version(&model_uid);
+                    }
+                }
             }
         }
 
-        tracing::warn!("placements watch stream ended, reconnecting");
+        tracing::warn!("placements watch stream ended, full resync");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

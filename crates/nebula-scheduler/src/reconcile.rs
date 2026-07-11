@@ -13,6 +13,7 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 use nebula_meta::LeaderGate;
 
 use nebula_scheduler::metrics::SharedMetrics;
+use nebula_scheduler::scale::select_replicas_to_remove;
 
 use crate::planner::{allocate_port, list_used_resources, select_node_and_gpus};
 use crate::util::now_ms;
@@ -156,19 +157,18 @@ async fn reconcile_once(
             if let Some(dep) = deployments.get(&plan.model_uid) {
                 let base = dep.replicas.max(1);
                 let min = dep.min_replicas.unwrap_or(1).max(1);
-                let max = dep.max_replicas.unwrap_or(base);
+                // Ensure max >= min so clamp never panics on empty/misconfigured bounds.
+                let max = dep.max_replicas.unwrap_or(base).max(min);
                 (base, min, max)
             } else if let Some(req) = requests.get(&plan.model_uid) {
                 let base = req.request.replicas.max(1);
                 let min = req.request.min_replicas.unwrap_or(1).max(1);
-                let max = req.request.max_replicas.unwrap_or(base);
+                let max = req.request.max_replicas.unwrap_or(base).max(min);
                 (base, min, max)
             } else {
-                (
-                    plan.assignments.len() as u32,
-                    1,
-                    plan.assignments.len() as u32,
-                )
+                // Orphan placement (request/deployment gone): hold current count, allow 0.
+                let n = plan.assignments.len() as u32;
+                (n, 0, n)
             };
 
         // Compute desired replicas: start from base, adjust by load signals
@@ -184,8 +184,6 @@ async fn reconcile_once(
 
         if desired_replicas > current_replicas {
             metrics.scale_up_total.fetch_add(1, Ordering::Relaxed);
-        } else if desired_replicas < current_replicas {
-            metrics.scale_down_total.fetch_add(1, Ordering::Relaxed);
         }
 
         // Identify healthy vs stale assignments
@@ -244,14 +242,13 @@ async fn reconcile_once(
             // Stats are now in xtrace, no etcd key to clean up.
         }
 
-        let need_update =
-            !stale_replica_ids.is_empty() || (healthy_assignments.len() as u32) < desired_replicas;
+        let need_update = !stale_replica_ids.is_empty()
+            || (healthy_assignments.len() as u32) != desired_replicas;
 
         if !need_update {
             continue;
         }
 
-        // Try to add new assignments to meet desired replica count
         let mut new_assignments = healthy_assignments.clone();
         let current_count = new_assignments.len() as u32;
 
@@ -265,7 +262,6 @@ async fn reconcile_once(
                 "attempting to add replacement replicas"
             );
 
-            // Get scheduling parameters from deployment (new path) or request (legacy)
             if let Some(req) = requests.get(&plan.model_uid) {
                 add_replacement_replicas_from_request(
                     store,
@@ -286,6 +282,35 @@ async fn reconcile_once(
                 )
                 .await;
             }
+        } else if current_count > desired_replicas {
+            let remove_count = (current_count - desired_replicas) as usize;
+            let remove_ids = select_replicas_to_remove(
+                &new_assignments,
+                remove_count,
+                stats_by_model.get(&plan.model_uid),
+            );
+            info!(
+                model_uid=%plan.model_uid,
+                current=current_count,
+                desired=desired_replicas,
+                remove_ids=?remove_ids,
+                "scaling down: removing assignments"
+            );
+            new_assignments.retain(|a| !remove_ids.contains(&a.replica_id));
+            if new_assignments.len() < plan.assignments.len() {
+                metrics.scale_down_total.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Skip CAS if assignment set is unchanged (e.g. scale-up could not place).
+        let same_as_plan = new_assignments.len() == plan.assignments.len()
+            && new_assignments.iter().all(|a| {
+                plan.assignments
+                    .iter()
+                    .any(|b| b.replica_id == a.replica_id && b.node_id == a.node_id)
+            });
+        if same_as_plan {
+            continue;
         }
 
         // Write updated plan (bump version)
@@ -798,6 +823,9 @@ fn compute_desired_replicas(
     now: u64,
 ) -> u32 {
     let current = plan.assignments.len() as u32;
+    // Normalize bounds: `u32::clamp` panics when min > max.
+    let min_replicas = min_replicas.min(max_replicas);
+    let max_replicas = max_replicas.max(min_replicas);
 
     // If no autoscaling range (min == max or no stats), use base
     if min_replicas >= max_replicas {

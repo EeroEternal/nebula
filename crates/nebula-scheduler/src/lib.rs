@@ -1,6 +1,7 @@
 use anyhow::Result;
 
 pub mod metrics;
+pub mod scale;
 
 #[derive(Debug, Default)]
 pub struct Scheduler {}

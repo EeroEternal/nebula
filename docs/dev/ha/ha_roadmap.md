@@ -75,7 +75,7 @@
 1. 杀接入层副本
 2. 杀 scheduler leader（含旧主复活脑裂）
 3. 下线单台 GPU 节点
-4. 记录成功率、RTO；报告写入 `docs/ha/report-*.md`
+4. 记录成功率、RTO；报告写入 `docs/dev/ha/report-*.md`
 
 **验收**：满足下方 Definition of Done；真机演练不替代 Phase A 的 CI 单测。
 

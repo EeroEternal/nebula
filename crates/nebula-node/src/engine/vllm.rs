@@ -6,8 +6,9 @@ use tokio::process::Command;
 use nebula_common::EndpointStats;
 
 use super::{
-    container_name, find_available_port, parse_yaml_defaults, stop_docker_container_by_name,
-    wait_engine_ready, Engine, EngineHandle, EngineProcess, EngineStartContext,
+    configure_process_group, container_name, find_available_port, kill_process_group,
+    parse_yaml_defaults, stop_docker_container_by_name, wait_engine_ready, Engine, EngineHandle,
+    EngineProcess, EngineStartContext,
 };
 use crate::util::now_ms;
 
@@ -240,6 +241,7 @@ impl Engine for VllmEngine {
                 cmd.arg(a);
             }
 
+            configure_process_group(&mut cmd);
             process_kind = "local";
         }
 
@@ -356,7 +358,7 @@ impl Engine for VllmEngine {
     async fn stop(&self, handle: &mut EngineHandle) -> anyhow::Result<()> {
         match &mut handle.process {
             EngineProcess::Child(child) => {
-                let _ = child.kill().await;
+                kill_process_group(child, Duration::from_secs(10)).await?;
             }
             EngineProcess::DockerContainer { name, wait_child } => {
                 tracing::info!(%name, "stopping docker container");
@@ -397,13 +399,36 @@ impl Engine for VllmEngine {
         scrape_vllm_stats(http, &handle.base_url, model_uid, replica_id).await
     }
 
-    async fn try_restart(&self, handle: &EngineHandle) {
-        if let EngineProcess::DockerContainer { name, .. } = &handle.process {
-            tracing::warn!(%name, "attempting docker restart");
-            let _ = Command::new("docker")
-                .args(["restart", "-t", "10", name])
-                .output()
-                .await;
+    async fn try_restart(
+        &self,
+        handle: &mut EngineHandle,
+        ctx: &EngineStartContext,
+    ) -> anyhow::Result<()> {
+        match &handle.process {
+            EngineProcess::DockerContainer { name, .. } => {
+                tracing::warn!(%name, "attempting docker restart");
+                let status = Command::new("docker")
+                    .args(["restart", "-t", "10", name])
+                    .status()
+                    .await?;
+                if !status.success() {
+                    anyhow::bail!("docker restart failed for {name}");
+                }
+                Ok(())
+            }
+            EngineProcess::Child(_) => {
+                tracing::warn!(
+                    model_uid=%ctx.model_uid,
+                    replica_id=ctx.replica_id,
+                    "restarting local vllm via stop+start (process group)"
+                );
+                self.stop(handle).await?;
+                *handle = self.start(ctx.clone()).await?;
+                Ok(())
+            }
+            EngineProcess::External => {
+                anyhow::bail!("cannot restart external engine")
+            }
         }
     }
 }

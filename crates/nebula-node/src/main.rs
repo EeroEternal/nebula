@@ -9,7 +9,7 @@ mod reconcile;
 mod util;
 
 use clap::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -20,7 +20,10 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::args::Args;
 use crate::heartbeat::heartbeat_loop;
-use crate::reconcile::{reconcile_model, RunningModel};
+use crate::reconcile::{has_local_replica, local_assignments, reconcile_model, ReplicaKey, RunningModel};
+
+/// Interval for periodic full reconcile (drain progression + watch gap fill).
+const PERIODIC_RECONCILE_INTERVAL: Duration = Duration::from_secs(3);
 
 fn init_xtrace_client(args: &Args) -> Option<xtrace_client::Client> {
     let url = args.common.xtrace_url.as_deref()?;
@@ -33,6 +36,78 @@ fn init_xtrace_client(args: &Args) -> Option<xtrace_client::Client> {
         Err(e) => {
             tracing::warn!(error=%e, "failed to create xtrace client, metrics reporting disabled");
             None
+        }
+    }
+}
+
+async fn periodic_full_reconcile_loop(
+    store: EtcdMetaStore,
+    args: Args,
+    running: Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
+    endpoint_state: Arc<Mutex<HashMap<ReplicaKey, nebula_common::EndpointInfo>>>,
+    last_epochs: Arc<Mutex<HashMap<String, u64>>>,
+) {
+    let prefix = "/placements/";
+    loop {
+        tokio::time::sleep(PERIODIC_RECONCILE_INTERVAL).await;
+
+        let plans = match store.list_prefix(prefix).await {
+            Ok(kvs) => kvs
+                .into_iter()
+                .filter_map(|(_, val, _)| serde_json::from_slice::<PlacementPlan>(&val).ok())
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                tracing::warn!(error=%e, "periodic reconcile: failed to list placements");
+                continue;
+            }
+        };
+
+        let mut seen_models: HashSet<String> = HashSet::new();
+        for plan in plans {
+            seen_models.insert(plan.model_uid.clone());
+            let mid = plan.model_uid.clone();
+            let local_desired = !local_assignments(&plan, &args.node_id).is_empty();
+            let local_running = has_local_replica(&*running.lock().await, &mid);
+            if !local_desired && !local_running {
+                continue;
+            }
+            if let Err(e) = reconcile_model(
+                &store,
+                &args,
+                &mut *running.lock().await,
+                &endpoint_state,
+                &mut *last_epochs.lock().await,
+                &mid,
+                Some(plan),
+            )
+            .await
+            {
+                tracing::warn!(model=%mid, error=%e, "periodic reconcile failed");
+            }
+        }
+
+        // Orphans: local running models with no placement key left.
+        let orphan_uids: Vec<String> = {
+            let guard = running.lock().await;
+            let mut uids: HashSet<String> = guard.keys().map(|(uid, _)| uid.clone()).collect();
+            uids.retain(|uid| !seen_models.contains(uid));
+            uids.into_iter().collect()
+        };
+        for mid in orphan_uids {
+            tracing::info!(model=%mid, "periodic reconcile: draining orphan after placement delete");
+            if let Err(e) = reconcile_model(
+                &store,
+                &args,
+                &mut *running.lock().await,
+                &endpoint_state,
+                &mut *last_epochs.lock().await,
+                &mid,
+                None,
+            )
+            .await
+            {
+                tracing::warn!(model=%mid, error=%e, "periodic orphan drain failed");
+            }
         }
     }
 }
@@ -55,11 +130,12 @@ async fn main() -> anyhow::Result<()> {
 
     let store = EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
 
-    let endpoint_state: Arc<Mutex<HashMap<String, nebula_common::EndpointInfo>>> =
+    let endpoint_state: Arc<Mutex<HashMap<ReplicaKey, nebula_common::EndpointInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
-    // shared running state (used by both main reconcile loop and heartbeat)
-    let running: Arc<Mutex<HashMap<String, RunningModel>>> = Arc::new(Mutex::new(HashMap::new()));
+    // shared running state (used by reconcile, heartbeat, and periodic drain)
+    let running: Arc<Mutex<HashMap<ReplicaKey, RunningModel>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let last_epochs: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let xtrace = init_xtrace_client(&args);
@@ -78,6 +154,15 @@ async fn main() -> anyhow::Result<()> {
         running.clone(),
         xtrace,
         shared_metrics.clone(),
+    ));
+
+    // A2: advance Drain and fill watch gaps even when no placement events arrive.
+    tokio::spawn(periodic_full_reconcile_loop(
+        store.clone(),
+        args.clone(),
+        running.clone(),
+        endpoint_state.clone(),
+        last_epochs.clone(),
     ));
 
     // Start image manager: watches /images/ registry, pre-pulls and GC
@@ -116,7 +201,7 @@ async fn main() -> anyhow::Result<()> {
 
             match serde_json::from_slice::<PlacementPlan>(&val) {
                 Ok(plan) => {
-                    let assigned = plan.assignments.iter().any(|a| a.node_id == args.node_id);
+                    let assigned = !local_assignments(&plan, &args.node_id).is_empty();
                     if assigned {
                         tracing::info!(model=%plan.model_uid, "found existing assignment");
                         let mid = plan.model_uid.clone();
@@ -176,7 +261,7 @@ async fn main() -> anyhow::Result<()> {
                     let key = ev.key;
                     let model_uid = key.strip_prefix(prefix).unwrap_or(&key);
 
-                    if running.lock().await.contains_key(model_uid) {
+                    if has_local_replica(&*running.lock().await, model_uid) {
                         tracing::info!(model=%model_uid, "placement deleted event affecting local node");
                         let model_uid = model_uid.to_string();
                         let _ = reconcile_model(

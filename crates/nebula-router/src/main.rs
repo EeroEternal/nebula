@@ -4,7 +4,6 @@ mod metrics;
 mod state;
 mod sync;
 
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,13 +42,9 @@ async fn main() -> anyhow::Result<()> {
         });
     let router = nebula_router::Router::with_strategy(strategy);
 
-    let plan_version = Arc::new(AtomicU64::new(0));
-
     let router_for_sync = router.clone();
     let store_for_endpoints = store.clone();
     let store_for_placement = store.clone();
-    let model_uid_for_placement = args.model_uid.clone();
-    let plan_version_for_placement = plan_version.clone();
     let router_for_placement = router.clone();
 
     tokio::spawn(async move {
@@ -59,14 +54,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::spawn(async move {
-        if let Err(e) = placement_sync_loop(
-            store_for_placement,
-            model_uid_for_placement,
-            plan_version_for_placement,
-            router_for_placement,
-        )
-        .await
-        {
+        if let Err(e) = placement_sync_loop(store_for_placement, router_for_placement).await {
             tracing::error!(error=%e, "placement sync loop exited");
         }
     });
@@ -113,7 +101,6 @@ async fn main() -> anyhow::Result<()> {
         model_uid: args.model_uid,
         router,
         http,
-        plan_version,
         metrics,
         max_request_body_bytes,
         retry_max,

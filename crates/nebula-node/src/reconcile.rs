@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 
 use nebula_common::{
     EndpointInfo, EndpointKind, EndpointStatus, ModelRequest, ModelRequestStatus, ModelSpec,
-    PlacementPlan,
+    PlacementAssignment, PlacementPlan,
 };
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
@@ -15,20 +15,34 @@ use crate::engine::{write_engine_env, Engine, EngineHandle, EngineStartContext};
 use crate::heartbeat::{delete_endpoint, register_endpoint};
 use crate::util::now_ms;
 
+/// Local running / endpoint index key: (model_uid, replica_id).
+pub type ReplicaKey = (String, u32);
+
 pub struct RunningModel {
     pub model_uid: String,
     pub replica_id: u32,
     pub assignment_signature: String,
+    /// Placement plan version last published on the endpoint (router filters on this).
+    pub plan_version: u64,
     pub handle: EngineHandle,
     pub engine: Arc<dyn Engine>,
+    /// Context needed to rebuild the engine on local restart.
+    pub start_ctx: EngineStartContext,
+    pub request_id: Option<String>,
     /// When set, this replica is draining after scale-in / unassign.
     pub drain_started_ms: Option<u64>,
+    /// Recovery budget exhausted — skip further restarts.
+    pub failed: bool,
 }
 
 /// Max time to wait for in-flight traffic before force-stopping a draining replica.
 const DRAIN_TIMEOUT_MS: u64 = 120_000;
 
-fn assignment_signature(assignment: &nebula_common::PlacementAssignment) -> String {
+pub fn replica_key(model_uid: &str, replica_id: u32) -> ReplicaKey {
+    (model_uid.to_string(), replica_id)
+}
+
+fn assignment_signature(assignment: &PlacementAssignment) -> String {
     serde_json::to_string(assignment).unwrap_or_else(|_| {
         format!(
             "replica:{}:node:{}:port:{}:gpu:{:?}:extra:{:?}:engine:{:?}:image:{:?}",
@@ -53,6 +67,34 @@ fn should_reject_stale_epoch(plan: &PlacementPlan, last_epochs: &HashMap<String,
     }
 }
 
+/// Assignments on this node from a placement plan.
+pub fn local_assignments<'a>(
+    plan: &'a PlacementPlan,
+    node_id: &str,
+) -> Vec<&'a PlacementAssignment> {
+    plan.assignments
+        .iter()
+        .filter(|a| a.node_id == node_id)
+        .collect()
+}
+
+/// Replica ids currently running locally for `model_uid`.
+pub fn running_replica_ids(
+    running: &HashMap<ReplicaKey, RunningModel>,
+    model_uid: &str,
+) -> Vec<u32> {
+    running
+        .keys()
+        .filter(|(uid, _)| uid == model_uid)
+        .map(|(_, rid)| *rid)
+        .collect()
+}
+
+/// Whether any local replica exists for `model_uid`.
+pub fn has_local_replica(running: &HashMap<ReplicaKey, RunningModel>, model_uid: &str) -> bool {
+    running.keys().any(|(uid, _)| uid == model_uid)
+}
+
 async fn pending_requests(store: &EtcdMetaStore, model_uid: &str, replica_id: u32) -> Option<u64> {
     let key = format!("/stats/{model_uid}/{replica_id}");
     let Ok(Some((bytes, _))) = store.get(&key).await else {
@@ -62,7 +104,7 @@ async fn pending_requests(store: &EtcdMetaStore, model_uid: &str, replica_id: u3
     Some(stats.pending_requests)
 }
 
-async fn mark_request_failed(store: &EtcdMetaStore, request_id: &str, reason: String) {
+pub(crate) async fn mark_request_failed(store: &EtcdMetaStore, request_id: &str, reason: String) {
     let key = format!("/model_requests/{request_id}");
     let loaded = store.get(&key).await;
     let Ok(Some((bytes, _rev))) = loaded else {
@@ -88,17 +130,19 @@ async fn mark_request_failed(store: &EtcdMetaStore, request_id: &str, reason: St
 
 async fn mark_endpoint_draining(
     store: &EtcdMetaStore,
-    endpoint_state: &Arc<Mutex<HashMap<String, EndpointInfo>>>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
+    replica_id: u32,
     ttl_ms: u64,
 ) -> anyhow::Result<()> {
+    let key = replica_key(model_uid, replica_id);
     let mut guard = endpoint_state.lock().await;
-    if let Some(ep) = guard.get_mut(model_uid) {
+    if let Some(ep) = guard.get_mut(&key) {
         if ep.status != EndpointStatus::Draining {
             ep.status = EndpointStatus::Draining;
             ep.last_heartbeat_ms = now_ms();
             register_endpoint(store, ep, ttl_ms).await?;
-            tracing::info!(%model_uid, replica_id = ep.replica_id, "endpoint marked Draining");
+            tracing::info!(%model_uid, replica_id, "endpoint marked Draining");
         }
     }
     Ok(())
@@ -106,15 +150,17 @@ async fn mark_endpoint_draining(
 
 async fn finish_drain_stop(
     store: &EtcdMetaStore,
-    running: &mut HashMap<String, RunningModel>,
-    endpoint_state: &Arc<Mutex<HashMap<String, EndpointInfo>>>,
+    running: &mut HashMap<ReplicaKey, RunningModel>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
+    replica_id: u32,
 ) -> anyhow::Result<()> {
-    if let Some(mut rm) = running.remove(model_uid) {
-        tracing::info!(%model_uid, "drain complete; stopping engine");
+    let key = replica_key(model_uid, replica_id);
+    if let Some(mut rm) = running.remove(&key) {
+        tracing::info!(%model_uid, replica_id, "drain complete; stopping engine");
         rm.engine.stop(&mut rm.handle).await?;
         let _ = delete_endpoint(store, &rm.model_uid, rm.replica_id).await;
-        endpoint_state.lock().await.remove(model_uid);
+        endpoint_state.lock().await.remove(&key);
     }
     Ok(())
 }
@@ -123,25 +169,28 @@ async fn finish_drain_stop(
 async fn drain_then_stop(
     store: &EtcdMetaStore,
     args: &Args,
-    running: &mut HashMap<String, RunningModel>,
-    endpoint_state: &Arc<Mutex<HashMap<String, EndpointInfo>>>,
+    running: &mut HashMap<ReplicaKey, RunningModel>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
+    replica_id: u32,
 ) -> anyhow::Result<()> {
+    let key = replica_key(model_uid, replica_id);
     let now = now_ms();
-    let (just_started, started, replica_id) = {
-        let Some(rm) = running.get_mut(model_uid) else {
+    let (just_started, started) = {
+        let Some(rm) = running.get_mut(&key) else {
             return Ok(());
         };
         if rm.drain_started_ms.is_none() {
             rm.drain_started_ms = Some(now);
-            (true, now, rm.replica_id)
+            (true, now)
         } else {
-            (false, rm.drain_started_ms.unwrap_or(now), rm.replica_id)
+            (false, rm.drain_started_ms.unwrap_or(now))
         }
     };
 
     if just_started {
-        mark_endpoint_draining(store, endpoint_state, model_uid, args.heartbeat_ttl_ms).await?;
+        mark_endpoint_draining(store, endpoint_state, model_uid, replica_id, args.heartbeat_ttl_ms)
+            .await?;
         return Ok(());
     }
 
@@ -152,73 +201,59 @@ async fn drain_then_stop(
 
     if pending == 0 || timed_out {
         if timed_out && pending > 0 {
-            tracing::warn!(%model_uid, pending, "drain timeout reached; force stopping");
+            tracing::warn!(%model_uid, replica_id, pending, "drain timeout reached; force stopping");
         }
-        finish_drain_stop(store, running, endpoint_state, model_uid).await?;
+        finish_drain_stop(store, running, endpoint_state, model_uid, replica_id).await?;
     } else {
-        tracing::info!(%model_uid, pending, "draining; waiting for in-flight to finish");
-        mark_endpoint_draining(store, endpoint_state, model_uid, args.heartbeat_ttl_ms).await?;
+        tracing::info!(%model_uid, replica_id, pending, "draining; waiting for in-flight to finish");
+        mark_endpoint_draining(store, endpoint_state, model_uid, replica_id, args.heartbeat_ttl_ms)
+            .await?;
     }
     Ok(())
 }
 
-pub async fn reconcile_model(
+async fn drain_all_local(
     store: &EtcdMetaStore,
     args: &Args,
-    running: &mut HashMap<String, RunningModel>,
-    endpoint_state: &Arc<Mutex<HashMap<String, EndpointInfo>>>,
-    last_epochs: &mut HashMap<String, u64>,
+    running: &mut HashMap<ReplicaKey, RunningModel>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     model_uid: &str,
-    plan: Option<PlacementPlan>,
 ) -> anyhow::Result<()> {
-    let plan = match plan {
-        Some(p) => p,
-        None => {
-            return drain_then_stop(store, args, running, endpoint_state, model_uid).await;
-        }
-    };
-
-    if should_reject_stale_epoch(&plan, last_epochs) {
-        tracing::warn!(
-            %model_uid,
-            plan_epoch = plan.leader_epoch,
-            last_epoch = last_epochs.get(model_uid).copied().unwrap_or(0),
-            "rejecting stale placement (leader_epoch fencing)"
-        );
-        return Ok(());
+    let rids = running_replica_ids(running, model_uid);
+    for rid in rids {
+        drain_then_stop(store, args, running, endpoint_state, model_uid, rid).await?;
     }
+    Ok(())
+}
 
-    let desired = plan.assignments.iter().find(|a| a.node_id == args.node_id);
-
-    let Some(assignment) = desired else {
-        return drain_then_stop(store, args, running, endpoint_state, model_uid).await;
-    };
-
-    if let Some(rm) = running.get_mut(model_uid) {
-        rm.drain_started_ms = None;
-    }
-
-    let desired_signature = assignment_signature(assignment);
-    let needs_restart = match running.get(model_uid) {
-        Some(rm) => {
-            rm.replica_id != assignment.replica_id || rm.assignment_signature != desired_signature
-        }
-        None => true,
-    };
-
-    if !needs_restart {
-        if plan.leader_epoch > 0 {
-            last_epochs.insert(model_uid.to_string(), plan.leader_epoch);
-        }
-        return Ok(());
-    }
-
-    if let Some(mut rm) = running.remove(model_uid) {
-        tracing::info!(%model_uid, "restarting engine due to placement update");
+async fn stop_replica(
+    store: &EtcdMetaStore,
+    running: &mut HashMap<ReplicaKey, RunningModel>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
+    model_uid: &str,
+    replica_id: u32,
+) -> anyhow::Result<()> {
+    let key = replica_key(model_uid, replica_id);
+    if let Some(mut rm) = running.remove(&key) {
+        tracing::info!(%model_uid, replica_id, "stopping engine due to placement update");
         rm.engine.stop(&mut rm.handle).await?;
         let _ = delete_endpoint(store, &rm.model_uid, rm.replica_id).await;
-        endpoint_state.lock().await.remove(model_uid);
+        endpoint_state.lock().await.remove(&key);
     }
+    Ok(())
+}
+
+async fn start_replica(
+    store: &EtcdMetaStore,
+    args: &Args,
+    running: &mut HashMap<ReplicaKey, RunningModel>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
+    plan: &PlacementPlan,
+    assignment: &PlacementAssignment,
+) -> anyhow::Result<()> {
+    let model_uid = plan.model_uid.as_str();
+    let replica_id = assignment.replica_id;
+    let desired_signature = assignment_signature(assignment);
 
     let engine_type = assignment.engine_type.as_deref();
     let docker_image_override = assignment.docker_image.as_deref();
@@ -231,7 +266,7 @@ pub async fn reconcile_model(
     let ctx = EngineStartContext {
         model_uid: model_uid.to_string(),
         model_name: plan.model_name.clone(),
-        replica_id: assignment.replica_id,
+        replica_id,
         port: assignment.port,
         gpu_indices: assignment.effective_gpu_indices(),
         engine_config_path: assignment.engine_config_path.clone(),
@@ -254,7 +289,7 @@ pub async fn reconcile_model(
                  Please register and pre-pull the image via the Images page before deploying.",
                 image
             );
-            tracing::error!(%model_uid, %image, "docker image not available locally");
+            tracing::error!(%model_uid, replica_id, %image, "docker image not available locally");
             if let Some(request_id) = plan.request_id.as_deref() {
                 mark_request_failed(store, request_id, reason).await;
             }
@@ -265,7 +300,7 @@ pub async fn reconcile_model(
     let spec_key = format!("/models/{}/spec", model_uid);
     if let Ok(Some((spec_bytes, _))) = store.get(&spec_key).await {
         if let Ok(spec) = serde_json::from_slice::<ModelSpec>(&spec_bytes) {
-            tracing::info!(%model_uid, source=?spec.model_source, "ensuring model files are available");
+            tracing::info!(%model_uid, replica_id, source=?spec.model_source, "ensuring model files are available");
             if let Err(e) = crate::model_cache_manager::download_model_if_needed(
                 store,
                 &args.node_id,
@@ -274,14 +309,14 @@ pub async fn reconcile_model(
                 &spec.model_source,
                 spec.model_path.as_deref(),
                 &args.vllm_model_dir,
-                assignment.replica_id,
+                replica_id,
                 args.vllm_hf_endpoint.as_deref(),
                 args.vllm_use_modelscope,
             )
             .await
             {
                 let reason = format!("model download failed: {}", e);
-                tracing::error!(%model_uid, error=%e, "model download failed");
+                tracing::error!(%model_uid, replica_id, error=%e, "model download failed");
                 if let Some(request_id) = plan.request_id.as_deref() {
                     mark_request_failed(store, request_id, reason).await;
                 }
@@ -291,14 +326,14 @@ pub async fn reconcile_model(
     }
 
     let handle = if let Some(h) = engine.try_reuse(&ctx).await {
-        tracing::info!(%model_uid, base_url=%h.base_url, engine=%engine.engine_type(), "reused existing engine instance");
+        tracing::info!(%model_uid, replica_id, base_url=%h.base_url, engine=%engine.engine_type(), "reused existing engine instance");
         h
     } else {
-        tracing::info!(%model_uid, engine=%engine.engine_type(), "starting new engine instance");
-        match engine.start(ctx).await {
+        tracing::info!(%model_uid, replica_id, engine=%engine.engine_type(), "starting new engine instance");
+        match engine.start(ctx.clone()).await {
             Ok(h) => h,
             Err(e) => {
-                tracing::error!(%model_uid, error=%e, engine=%engine.engine_type(), "failed to start engine");
+                tracing::error!(%model_uid, replica_id, error=%e, engine=%engine.engine_type(), "failed to start engine");
                 if let Some(request_id) = plan.request_id.as_deref() {
                     mark_request_failed(store, request_id, e.to_string()).await;
                 }
@@ -307,16 +342,12 @@ pub async fn reconcile_model(
         }
     };
 
-    write_engine_env(
-        &args.engine_env_path,
-        &handle.base_url,
-        &handle.engine_model,
-    )
-    .await?;
+    let env_path = format!("{}-{}", args.engine_env_path, replica_id);
+    write_engine_env(&env_path, &handle.base_url, &handle.engine_model).await?;
 
     let info = EndpointInfo {
         model_uid: plan.model_uid.clone(),
-        replica_id: assignment.replica_id,
+        replica_id,
         plan_version: plan.version,
         node_id: args.node_id.clone(),
         endpoint_kind: EndpointKind::NativeHttp,
@@ -328,23 +359,126 @@ pub async fn reconcile_model(
     };
 
     register_endpoint(store, &info, args.heartbeat_ttl_ms).await?;
-    tracing::info!(model_uid=%info.model_uid, replica_id=info.replica_id, base_url=%handle.base_url, "registered endpoint");
+    tracing::info!(%model_uid, replica_id, base_url=%handle.base_url, "registered endpoint");
 
-    endpoint_state
-        .lock()
-        .await
-        .insert(model_uid.to_string(), info);
+    let key = replica_key(model_uid, replica_id);
+    endpoint_state.lock().await.insert(key.clone(), info);
     running.insert(
-        model_uid.to_string(),
+        key,
         RunningModel {
             model_uid: plan.model_uid.clone(),
-            replica_id: assignment.replica_id,
+            replica_id,
             assignment_signature: desired_signature,
+            plan_version: plan.version,
             handle,
             engine,
+            start_ctx: ctx,
+            request_id: plan.request_id.clone(),
             drain_started_ms: None,
+            failed: false,
         },
     );
+
+    Ok(())
+}
+
+/// Reconcile local replicas for one model against the desired placement plan.
+///
+/// Uses set-diff on `(model_uid, replica_id)`: excess replicas drain, missing start,
+/// signature changes roll the affected replica only.
+pub async fn reconcile_model(
+    store: &EtcdMetaStore,
+    args: &Args,
+    running: &mut HashMap<ReplicaKey, RunningModel>,
+    endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
+    last_epochs: &mut HashMap<String, u64>,
+    model_uid: &str,
+    plan: Option<PlacementPlan>,
+) -> anyhow::Result<()> {
+    let plan = match plan {
+        Some(p) => p,
+        None => {
+            return drain_all_local(store, args, running, endpoint_state, model_uid).await;
+        }
+    };
+
+    if should_reject_stale_epoch(&plan, last_epochs) {
+        tracing::warn!(
+            %model_uid,
+            plan_epoch = plan.leader_epoch,
+            last_epoch = last_epochs.get(model_uid).copied().unwrap_or(0),
+            "rejecting stale placement (leader_epoch fencing)"
+        );
+        return Ok(());
+    }
+
+    let desired = local_assignments(&plan, &args.node_id);
+    let desired_ids: HashSet<u32> = desired.iter().map(|a| a.replica_id).collect();
+
+    // Drain replicas no longer assigned to this node.
+    let local_rids = running_replica_ids(running, model_uid);
+    for rid in local_rids {
+        if !desired_ids.contains(&rid) {
+            drain_then_stop(store, args, running, endpoint_state, model_uid, rid).await?;
+        }
+    }
+
+    if desired.is_empty() {
+        return Ok(());
+    }
+
+    for assignment in desired {
+        let key = replica_key(model_uid, assignment.replica_id);
+        let desired_signature = assignment_signature(assignment);
+
+        match running.get_mut(&key) {
+            Some(rm) if rm.assignment_signature == desired_signature => {
+                // Still desired with same config — cancel any in-progress drain.
+                rm.drain_started_ms = None;
+                // Placement version bumps on scale-in/out; refresh so router plan_version
+                // filter keeps accepting this still-assigned replica.
+                if rm.plan_version != plan.version {
+                    let refreshed = {
+                        let mut guard = endpoint_state.lock().await;
+                        guard.get_mut(&key).map(|info| {
+                            info.plan_version = plan.version;
+                            info.last_heartbeat_ms = now_ms();
+                            info.clone()
+                        })
+                    };
+                    if let Some(info) = refreshed {
+                        register_endpoint(store, &info, args.heartbeat_ttl_ms).await?;
+                        if let Some(rm) = running.get_mut(&key) {
+                            rm.plan_version = plan.version;
+                        }
+                        tracing::info!(
+                            %model_uid,
+                            replica_id = assignment.replica_id,
+                            plan_version = plan.version,
+                            "refreshed endpoint plan_version after placement bump"
+                        );
+                    } else if let Some(rm) = running.get_mut(&key) {
+                        rm.plan_version = plan.version;
+                    }
+                }
+            }
+            Some(_) => {
+                stop_replica(
+                    store,
+                    running,
+                    endpoint_state,
+                    model_uid,
+                    assignment.replica_id,
+                )
+                .await?;
+                start_replica(store, args, running, endpoint_state, &plan, assignment).await?;
+            }
+            None => {
+                start_replica(store, args, running, endpoint_state, &plan, assignment).await?;
+            }
+        }
+    }
+
     if plan.leader_epoch > 0 {
         last_epochs.insert(model_uid.to_string(), plan.leader_epoch);
     }
@@ -355,6 +489,20 @@ pub async fn reconcile_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assignment(replica_id: u32, node_id: &str, port: u16) -> PlacementAssignment {
+        PlacementAssignment {
+            replica_id,
+            node_id: node_id.into(),
+            engine_config_path: "/tmp/cfg.yaml".into(),
+            port,
+            gpu_index: None,
+            gpu_indices: None,
+            extra_args: None,
+            engine_type: None,
+            docker_image: None,
+        }
+    }
 
     #[test]
     fn rejects_lower_leader_epoch() {
@@ -379,5 +527,60 @@ mod tests {
             ..plan
         };
         assert!(!should_reject_stale_epoch(&plan3, &last));
+    }
+
+    #[test]
+    fn local_assignments_returns_all_on_node() {
+        let plan = PlacementPlan {
+            request_id: None,
+            model_uid: "m1".into(),
+            model_name: "m".into(),
+            version: 1,
+            leader_epoch: 1,
+            assignments: vec![
+                assignment(0, "node_a", 8000),
+                assignment(1, "node_a", 8001),
+                assignment(2, "node_b", 8002),
+            ],
+        };
+        let local = local_assignments(&plan, "node_a");
+        assert_eq!(local.len(), 2);
+        assert_eq!(local[0].replica_id, 0);
+        assert_eq!(local[1].replica_id, 1);
+    }
+
+    #[test]
+    fn set_diff_identifies_excess_and_missing() {
+        let plan = PlacementPlan {
+            request_id: None,
+            model_uid: "m1".into(),
+            model_name: "m".into(),
+            version: 1,
+            leader_epoch: 1,
+            assignments: vec![
+                assignment(0, "node_a", 8000),
+                assignment(1, "node_a", 8001),
+            ],
+        };
+        let desired: HashSet<u32> = local_assignments(&plan, "node_a")
+            .iter()
+            .map(|a| a.replica_id)
+            .collect();
+
+        // Simulate running replicas 0 and 2 locally.
+        let running_ids: HashSet<u32> = [0u32, 2].into_iter().collect();
+        let excess: Vec<u32> = {
+            let mut v: Vec<u32> = running_ids.difference(&desired).copied().collect();
+            v.sort_unstable();
+            v
+        };
+        let missing: Vec<u32> = {
+            let mut v: Vec<u32> = desired.difference(&running_ids).copied().collect();
+            v.sort_unstable();
+            v
+        };
+
+        assert_eq!(excess, vec![2]);
+        assert_eq!(missing, vec![1]);
     }
 }

@@ -6,6 +6,23 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-11
+
+### Added
+- Node multi-replica reconcile keyed by `(model_uid, replica_id)`, with periodic full reconcile to advance Drain/orphan cleanup.
+- Scheduler scale-down when healthy replicas exceed desired (`select_replicas_to_remove`).
+- Endpoint recovery budget (24h / 5 attempts + backoff → `Failed`) and process-group cleanup on local restart.
+- Meta `list_prefix_snapshot` and Router per-model `plan_version` filtering (snapshot-revision watch).
+- Cancel/SSE contract script: `scripts/test_cancel_sse.sh`.
+- Docs layout: `docs/arch/`, `docs/dev/`, `docs/manual/` with index at `docs/README.md`.
+
+### Fixed
+- Scheduler reconcile panic when replica bounds had `min > max` (orphan empty placement).
+- Node refreshes endpoint `plan_version` after placement version bumps so Router keeps accepting remaining replicas.
+
+### Changed
+- Architecture and sprint plan docs rewritten around correctness (multi-replica / scale-in / Drain) before recovery and performance.
+
 ## [0.1.1] - 2026-04-28
 
 ### Changed

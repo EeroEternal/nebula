@@ -32,6 +32,7 @@ pub fn print_cluster_status(status: ClusterStatus) {
                 EndpointStatus::Starting => "STARTING",
                 EndpointStatus::Unhealthy => "UNHEALTHY",
                 EndpointStatus::Draining => "DRAINING",
+                EndpointStatus::Failed => "FAILED",
             };
             println!(
                 "  {:<20} {:<10} {:<10} {:<30}",

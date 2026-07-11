@@ -1,6 +1,6 @@
 use clap::Parser;
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 pub struct Args {
     #[arg(long, default_value = "node_1")]
     pub node_id: String,

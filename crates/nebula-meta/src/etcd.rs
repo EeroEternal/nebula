@@ -81,6 +81,25 @@ impl MetaStore for EtcdMetaStore {
         Ok(out)
     }
 
+    async fn list_prefix_snapshot(
+        &self,
+        prefix: &str,
+    ) -> Result<(Vec<(String, Vec<u8>, u64)>, u64)> {
+        let mut cli = self.client.lock().await;
+        let opts = GetOptions::new().with_prefix();
+        let resp = cli.get(prefix, Some(opts)).await?;
+
+        let snap_rev = resp.header().map(|h| h.revision() as u64).unwrap_or(0);
+        let mut out = Vec::new();
+        for kv in resp.kvs() {
+            let k = String::from_utf8_lossy(kv.key()).to_string();
+            let v = kv.value().to_vec();
+            let rev = kv.mod_revision() as u64;
+            out.push((k, v, rev));
+        }
+        Ok((out, snap_rev))
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,
@@ -123,13 +142,17 @@ impl MetaStore for EtcdMetaStore {
         }
 
         let (_watcher, mut stream) = cli.watch(prefix, Some(opts)).await?;
+        let watch_prefix = prefix.to_string();
 
         let (tx, rx) = tokio::sync::mpsc::channel::<WatchEvent>(1024);
         tokio::spawn(async move {
             while let Some(item) = stream.message().await.transpose() {
                 let resp = match item {
                     Ok(r) => r,
-                    Err(_) => return,
+                    Err(e) => {
+                        tracing::warn!(prefix=%watch_prefix, error=%e, "etcd watch stream error");
+                        return;
+                    }
                 };
 
                 for ev in resp.events() {
@@ -159,6 +182,16 @@ impl MetaStore for EtcdMetaStore {
                             }
                         }
                     }
+                }
+
+                if resp.canceled() {
+                    let reason = resp.cancel_reason().to_string();
+                    tracing::warn!(
+                        prefix=%watch_prefix,
+                        %reason,
+                        "etcd watch canceled (possibly compacted); caller should resync"
+                    );
+                    return;
                 }
             }
         });

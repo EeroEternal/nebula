@@ -14,6 +14,8 @@ pub enum EndpointStatus {
     Ready,
     Unhealthy,
     Draining,
+    /// Recovery budget exhausted; waiting for human / scheduler intervention.
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

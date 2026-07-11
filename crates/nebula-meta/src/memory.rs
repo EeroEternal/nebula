@@ -101,6 +101,23 @@ impl MetaStore for MemoryMetaStore {
         Ok(out)
     }
 
+    async fn list_prefix_snapshot(
+        &self,
+        prefix: &str,
+    ) -> Result<(Vec<(String, Vec<u8>, u64)>, u64)> {
+        let inner = self.inner.read().await;
+        let snap_rev = inner.revision;
+        let mut out = Vec::new();
+        for (k, (v, rev)) in inner
+            .kv
+            .range(prefix.to_string()..)
+            .take_while(|(k, _)| k.starts_with(prefix))
+        {
+            out.push((k.clone(), v.clone(), *rev));
+        }
+        Ok((out, snap_rev))
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,

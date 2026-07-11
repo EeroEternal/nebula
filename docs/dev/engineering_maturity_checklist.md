@@ -3,7 +3,7 @@
 > 状态：执行清单（2026-07-10）
 > 目标：达到与 PowerLLM 同级的生产工程完备度（HA / 生命周期 / CI / 运维），不复制 Actor 实现
 > 原则文档：`absorb_powerllm_engineering_guidance.md`
-> 相关：`ha/ha_roadmap.md`、`arch_optimization.md`、`unigateway_integration.md`、`development_plan.md`
+> 相关：`ha/ha_roadmap.md`、`../arch/optimization.md`、`unigateway_integration.md`、`plan.md`
 
 用法：按 Wave 顺序做；每项完成后把 `[ ]` 改成 `[x]`，并补上 PR / 验收备注。对齐的是**行为与验收**，不是 PowerLLM 类名。
 
@@ -46,7 +46,7 @@
 | ID | 项 | 组件 | 要做的事 | 验收 | 状态 |
 |----|----|------|----------|------|------|
 | P0.4 | Request abort | `gateway`, `router` | disconnect/abort 取消下游；断开引擎连接 | 取消后停生成；abort 指标单独标签 | [x] |
-| P0.5 | Placement CAS 清零 | `nebula-scheduler` | `arch_optimization.md` 中直接 `put` placement 路径清零 | grep/审计无裸 put；冲突可恢复 | [x] |
+| P0.5 | Placement CAS 清零 | `nebula-scheduler` | `../arch/optimization.md` 中直接 `put` placement 路径清零 | grep/审计无裸 put；冲突可恢复 | [x] |
 | P0.6+ | 最小契约集扩面 | `router`, `gateway`, CI | `plan_version` 过滤、CAS 冲突、SSE 序列、auth 拒绝 | 契约测试进同一 CI gate | [x] |
 | P0.7 | API 边界收敛 | `gateway`, `bff`, `router` | 每个 API 唯一 owner；禁止 Gateway 吞 Router | 文档表 + 代码路径一致 | [x] |
 | P0.UG | Gateway 编译/UG 边界 | `nebula-gateway` | 恢复可编译；UG 仅协议层（见 `unigateway_integration.md`） | workspace check 通过；无绕过 Router 默认路径 | [x] |
@@ -105,7 +105,7 @@
 | `absorb_powerllm_engineering_guidance.md` | 为什么、学什么、不学什么 |
 | **本文件** | 按什么顺序做、做到什么算完 |
 | `ha/ha_roadmap.md` | HA 拓扑与多机交付细节（执行态，服务 Wave 0–2） |
-| `arch_optimization.md` | CAS / 边界 / Gateway 编译等债项，由本清单消化 |
+| `../arch/optimization.md` | CAS / 边界 / Gateway 编译等债项，由本清单消化 |
 | `unigateway_integration.md` | UG 引入边界；不阻塞 Wave 0 |
 
 ---
@@ -115,4 +115,4 @@
 1. 同一时间只推进一个 Wave 的「进行中」主线；旁路债项可修但不抢优先级。
 2. 合并 PR 时更新本文件对应 `[x]`，并在 PR 描述引用 ID（如 `W0.3`）。
 3. Wave 0 未完成前，不把 P2 企业/多模态当主线。
-4. 真机多节点演练记录放到 `docs/ha/report-*.md`；CI 单测不过不能用「真机过了」代替。
+4. 真机多节点演练记录放到 `docs/dev/ha/report-*.md`；CI 单测不过不能用「真机过了」代替。

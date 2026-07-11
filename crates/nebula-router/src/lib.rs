@@ -52,6 +52,8 @@ pub struct Router {
     model_names: DashMap<String, String>,
     /// model_uid → model_name (reverse mapping)
     model_uids_to_names: DashMap<String, String>,
+    /// model_uid → latest PlacementPlan.version
+    plan_versions: DashMap<String, u64>,
     xtrace_query_errors_total: AtomicU64,
     xtrace_rate_limited_total: AtomicU64,
     xtrace_stale_total: AtomicU64,
@@ -104,6 +106,7 @@ impl Router {
             strategy,
             model_names: DashMap::new(),
             model_uids_to_names: DashMap::new(),
+            plan_versions: DashMap::new(),
             xtrace_query_errors_total: AtomicU64::new(0),
             xtrace_rate_limited_total: AtomicU64::new(0),
             xtrace_stale_total: AtomicU64::new(0),
@@ -267,6 +270,29 @@ impl Router {
         self.model_uids_to_names
             .get(model_uid)
             .map(|v| v.value().clone())
+    }
+
+    /// Record the latest placement plan version for a model.
+    pub fn set_plan_version(&self, model_uid: &str, version: u64) {
+        self.plan_versions.insert(model_uid.to_string(), version);
+    }
+
+    /// Clear plan version when placement is deleted.
+    pub fn clear_plan_version(&self, model_uid: &str) {
+        self.plan_versions.remove(model_uid);
+    }
+
+    /// Latest known plan version for a model (None if unknown / deleted).
+    pub fn plan_version_for(&self, model_uid: &str) -> Option<u64> {
+        self.plan_versions.get(model_uid).map(|v| *v)
+    }
+
+    /// Replace all known plan versions from a full placement snapshot.
+    pub fn replace_all_plan_versions(&self, versions: impl IntoIterator<Item = (String, u64)>) {
+        self.plan_versions.clear();
+        for (uid, ver) in versions {
+            self.plan_versions.insert(uid, ver);
+        }
     }
 
     /// Collect all stats as a slice snapshot (for admission control, etc.).
@@ -534,6 +560,31 @@ mod plan_version_tests {
 
         let err = router.route_with_plan_version(&ctx, "m1", 99).unwrap_err();
         assert!(matches!(err, RouteError::NoEndpoint));
+    }
+
+    #[test]
+    fn per_model_plan_version_independent() {
+        let router = Router::new();
+        router.set_plan_version("m1", 3);
+        router.set_plan_version("m2", 7);
+        assert_eq!(router.plan_version_for("m1"), Some(3));
+        assert_eq!(router.plan_version_for("m2"), Some(7));
+        router.clear_plan_version("m1");
+        assert_eq!(router.plan_version_for("m1"), None);
+        assert_eq!(router.plan_version_for("m2"), Some(7));
+
+        router.upsert_endpoint(ready_ep("m2", 0, 7));
+        router.upsert_endpoint(ready_ep("m2", 1, 6)); // stale
+        let ctx = ExecutionContext {
+            request_id: "r".into(),
+            session_id: None,
+            tenant_id: None,
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+        };
+        let ep = router.route_with_plan_version(&ctx, "m2", 7).unwrap();
+        assert_eq!(ep.replica_id, 0);
     }
 
     #[test]

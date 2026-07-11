@@ -10,9 +10,11 @@ Nebula 是 deepinfer 架构落地的 Rust-Native 新项目目录（控制面/路
 git clone --depth 1 https://github.com/lipish/nebula.git
 ```
 
-**安装依赖：** 参阅 [开发环境设置指南](docs/setup.md) 安装所需的外部依赖（etcd、protoc 等）。
+**文档索引：** [docs/README.md](docs/README.md)（`manual/` 部署手册 · `dev/` 开发文档 · `arch/` 架构）。
 
-**部署与鉴权建议：** 参阅 [部署指南](docs/deployment.md)。其中 BFF 访问 xtrace 推荐：
+**安装依赖：** 参阅 [开发环境设置指南](docs/dev/setup.md) 安装所需的外部依赖（etcd、protoc 等）。
+
+**部署与鉴权建议：** 参阅 [部署指南](docs/manual/deployment.md)。其中 BFF 访问 xtrace 推荐：
 - 开发环境：`OBSERVE_AUTH_MODE=internal`
 - 生产环境：`OBSERVE_AUTH_MODE=service` + `OBSERVE_TOKEN=<internal-service-token>`
 

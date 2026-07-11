@@ -1,6 +1,6 @@
 # Nebula 项目架构与代码设计深度分析报告
 
-> 状态说明：本文保留为历史深度分析记录。部分结论已经被后续实现修复或缓解，例如 Gateway/Router metrics、Router 重试/熔断、Node 健康检查、Scheduler reconcile、BFF service 层等。当前优化优先级请以 `docs/optimization_plan.md`、`docs/arch_optimization.md` 和 `docs/gateway/gateway_optimization_plan.md` 为准。
+> 状态说明：历史深度分析归档。当前请以 [`architecture.md`](./architecture.md)、[`optimization.md`](./optimization.md) 为准；Gateway 方案见 [`../dev/gateway/`](../dev/gateway/)。
 
 本报告对 Nebula 项目（基于 Rust 的控制面与多引擎 LLM 服务网格）的整体架构、模块依赖、API 设计、错误处理、数据一致性、可观测性、安全性以及部署基础设施进行深度剖析，并提出系统性的优化建议。
 

@@ -10,16 +10,83 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::docker_api::{EngineMetricSnapshot, NodeMetricsSnapshot, SharedNodeMetrics};
 use crate::gpu::read_gpu_statuses;
-use crate::reconcile::RunningModel;
+use crate::reconcile::{mark_request_failed, replica_key, ReplicaKey, RunningModel};
 use crate::util::now_ms;
 
 /// Number of consecutive health-check failures before marking endpoint as Unhealthy.
 const UNHEALTHY_THRESHOLD: u32 = 3;
 /// Number of consecutive failures before attempting a container restart.
 const RESTART_THRESHOLD: u32 = 5;
-/// Cooldown period after a restart attempt (seconds). During this time health checks
-/// are skipped to give the engine time to initialize.
-const RESTART_COOLDOWN_SECS: u64 = 120;
+/// Base cooldown after a restart attempt (seconds); multiplied by exponential backoff.
+const RESTART_COOLDOWN_SECS: u64 = 30;
+/// Max restart attempts inside the budget window.
+const RESTART_BUDGET_N: u32 = 5;
+/// Budget window (24h).
+const RESTART_BUDGET_WINDOW_MS: u64 = 86_400_000;
+/// Cap for exponential backoff cooldown.
+const RESTART_COOLDOWN_MAX_SECS: u64 = 300;
+
+#[derive(Debug, Default)]
+struct RestartBudget {
+    window_start_ms: u64,
+    attempts: u32,
+    next_allowed_ms: u64,
+}
+
+impl RestartBudget {
+    fn backoff_secs(attempt: u32) -> u64 {
+        let exp = 1u64 << attempt.min(8);
+        (RESTART_COOLDOWN_SECS.saturating_mul(exp)).min(RESTART_COOLDOWN_MAX_SECS)
+    }
+
+    /// Returns Ok(cooldown_secs) if a restart is allowed, Err(reason) if budget exhausted.
+    fn try_consume(&mut self, now: u64) -> Result<u64, &'static str> {
+        if self.window_start_ms == 0 || now.saturating_sub(self.window_start_ms) > RESTART_BUDGET_WINDOW_MS
+        {
+            self.window_start_ms = now;
+            self.attempts = 0;
+            self.next_allowed_ms = 0;
+        }
+        if now < self.next_allowed_ms {
+            return Err("backoff");
+        }
+        if self.attempts >= RESTART_BUDGET_N {
+            return Err("budget_exhausted");
+        }
+        self.attempts += 1;
+        let cooldown = Self::backoff_secs(self.attempts.saturating_sub(1));
+        self.next_allowed_ms = now.saturating_add(cooldown.saturating_mul(1000));
+        Ok(cooldown)
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn budget_exhausts_after_n() {
+        let mut b = RestartBudget::default();
+        let mut now = 1_000u64;
+        for i in 0..RESTART_BUDGET_N {
+            assert!(b.try_consume(now).is_ok(), "attempt {i}");
+            now = b.next_allowed_ms;
+        }
+        assert_eq!(b.try_consume(now), Err("budget_exhausted"));
+    }
+
+    #[test]
+    fn budget_resets_after_window() {
+        let mut b = RestartBudget::default();
+        let mut now = 1_000u64;
+        for _ in 0..RESTART_BUDGET_N {
+            let _ = b.try_consume(now);
+            now = b.next_allowed_ms;
+        }
+        now = b.window_start_ms + RESTART_BUDGET_WINDOW_MS + 1;
+        assert!(b.try_consume(now).is_ok());
+    }
+}
 
 pub async fn register_endpoint(
     store: &EtcdMetaStore,
@@ -48,8 +115,8 @@ pub async fn heartbeat_loop(
     ttl_ms: u64,
     interval_ms: u64,
     api_port: u16,
-    endpoint: Arc<Mutex<HashMap<String, EndpointInfo>>>,
-    running: Arc<Mutex<HashMap<String, RunningModel>>>,
+    endpoint: Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
+    running: Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
     xtrace: Option<xtrace_client::Client>,
     shared_metrics: SharedNodeMetrics,
 ) {
@@ -58,10 +125,12 @@ pub async fn heartbeat_loop(
         .build()
         .unwrap_or_default();
 
-    // Track consecutive health-check failures per model_uid
-    let mut fail_counts: HashMap<String, u32> = HashMap::new();
-    // Track last restart timestamp (ms) per model_uid for cooldown
-    let mut restart_at: HashMap<String, u64> = HashMap::new();
+    // Track consecutive health-check failures per (model_uid, replica_id)
+    let mut fail_counts: HashMap<ReplicaKey, u32> = HashMap::new();
+    // Track last restart timestamp (ms) per replica for cooldown
+    let mut restart_at: HashMap<ReplicaKey, u64> = HashMap::new();
+    // Per-replica restart budget (24h window)
+    let mut restart_budgets: HashMap<ReplicaKey, RestartBudget> = HashMap::new();
 
     let key = format!("/nodes/{}/status", node_id);
     loop {
@@ -140,23 +209,33 @@ pub async fn heartbeat_loop(
             tracing::debug!("skipping endpoint refresh: endpoint state lock busy");
         }
 
-        // Scrape engine metrics and write to etcd /stats/
-        // Also perform health checks on each running engine
+        // Scrape engine metrics and perform health checks
         {
-            let Ok(running_guard) = running.try_lock() else {
+            let Ok(mut running_guard) = running.try_lock() else {
                 tracing::debug!("skipping engine health/stats: running state lock busy");
                 tokio::time::sleep(Duration::from_millis(interval_ms)).await;
                 continue;
             };
             let now = now_ms();
-            for rm in running_guard.values() {
+            for rm in running_guard.values_mut() {
+                let rkey = replica_key(&rm.model_uid, rm.replica_id);
+
+                if rm.failed {
+                    continue;
+                }
+
                 // Skip health check during restart cooldown
-                if let Some(&last_restart) = restart_at.get(&rm.model_uid) {
-                    let elapsed_secs = (now.saturating_sub(last_restart)) / 1000;
-                    if elapsed_secs < RESTART_COOLDOWN_SECS {
+                if let Some(&last_restart) = restart_at.get(&rkey) {
+                    let budget = restart_budgets.get(&rkey);
+                    let cooldown_ms = budget
+                        .map(|b| b.next_allowed_ms.saturating_sub(last_restart))
+                        .unwrap_or(RESTART_COOLDOWN_SECS.saturating_mul(1000));
+                    let elapsed = now.saturating_sub(last_restart);
+                    if elapsed < cooldown_ms {
                         tracing::debug!(
                             model_uid=%rm.model_uid,
-                            remaining_secs=RESTART_COOLDOWN_SECS - elapsed_secs,
+                            replica_id=rm.replica_id,
+                            remaining_ms=cooldown_ms.saturating_sub(elapsed),
                             "skipping health check during restart cooldown"
                         );
                         continue;
@@ -165,32 +244,37 @@ pub async fn heartbeat_loop(
 
                 let healthy = rm.engine.health_check(&rm.handle).await;
 
-                let count = fail_counts.entry(rm.model_uid.clone()).or_insert(0);
+                let count = fail_counts.entry(rkey.clone()).or_insert(0);
 
                 if healthy {
-                    // Recovered: reset counter and ensure endpoint is Ready
                     if *count > 0 {
-                        tracing::info!(model_uid=%rm.model_uid, prev_failures=*count, "engine recovered");
+                        tracing::info!(
+                            model_uid=%rm.model_uid,
+                            replica_id=rm.replica_id,
+                            prev_failures=*count,
+                            "engine recovered"
+                        );
                         *count = 0;
-                        restart_at.remove(&rm.model_uid);
-                        // Mark endpoint back to Ready
+                        restart_at.remove(&rkey);
                         let mut ep_guard = endpoint.lock().await;
-                        if let Some(info) = ep_guard.get_mut(&rm.model_uid) {
+                        if let Some(info) = ep_guard.get_mut(&rkey) {
                             if info.status == EndpointStatus::Unhealthy {
                                 info.status = EndpointStatus::Ready;
                                 let _ = register_endpoint(&store, info, ttl_ms).await;
-                                tracing::info!(model_uid=%rm.model_uid, "endpoint marked Ready again");
+                                tracing::info!(
+                                    model_uid=%rm.model_uid,
+                                    replica_id=rm.replica_id,
+                                    "endpoint marked Ready again"
+                                );
                             }
                         }
                     }
 
-                    // Scrape metrics only when healthy
                     if let Some(stats) = rm
                         .engine
                         .scrape_stats(&http, &rm.handle, &rm.model_uid, rm.replica_id)
                         .await
                     {
-                        // Collect engine stats for xtrace
                         if xtrace.is_some() {
                             let ts = Utc::now();
                             let labels = HashMap::from([
@@ -230,7 +314,6 @@ pub async fn heartbeat_loop(
                             }
                         }
 
-                        // Collect for Prometheus /metrics snapshot
                         let kv_usage = match (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes)
                         {
                             (Some(used), Some(free)) => {
@@ -255,27 +338,76 @@ pub async fn heartbeat_loop(
                     *count += 1;
                     tracing::warn!(
                         model_uid=%rm.model_uid,
+                        replica_id=rm.replica_id,
                         consecutive_failures=*count,
                         "engine health check failed"
                     );
 
-                    // Mark Unhealthy after threshold
                     if *count == UNHEALTHY_THRESHOLD {
                         let mut ep_guard = endpoint.lock().await;
-                        if let Some(info) = ep_guard.get_mut(&rm.model_uid) {
+                        if let Some(info) = ep_guard.get_mut(&rkey) {
                             info.status = EndpointStatus::Unhealthy;
                             let _ = register_endpoint(&store, info, ttl_ms).await;
-                            tracing::warn!(model_uid=%rm.model_uid, "endpoint marked Unhealthy");
+                            tracing::warn!(
+                                model_uid=%rm.model_uid,
+                                replica_id=rm.replica_id,
+                                "endpoint marked Unhealthy"
+                            );
                         }
                     }
 
-                    // Attempt engine restart after higher threshold
                     if *count >= RESTART_THRESHOLD {
-                        tracing::warn!(model_uid=%rm.model_uid, "attempting engine restart");
-                        rm.engine.try_restart(&rm.handle).await;
-                        // Keep count at 1 (not 0) so that recovery is detected after cooldown
-                        *count = 1;
-                        restart_at.insert(rm.model_uid.clone(), now_ms());
+                        let budget = restart_budgets.entry(rkey.clone()).or_default();
+                        match budget.try_consume(now) {
+                            Ok(cooldown_secs) => {
+                                tracing::warn!(
+                                    model_uid=%rm.model_uid,
+                                    replica_id=rm.replica_id,
+                                    attempt=budget.attempts,
+                                    cooldown_secs,
+                                    "attempting engine restart"
+                                );
+                                let ctx = rm.start_ctx.clone();
+                                if let Err(e) = rm.engine.try_restart(&mut rm.handle, &ctx).await {
+                                    tracing::error!(
+                                        model_uid=%rm.model_uid,
+                                        replica_id=rm.replica_id,
+                                        error=%e,
+                                        "engine restart failed"
+                                    );
+                                }
+                                *count = 1;
+                                restart_at.insert(rkey, now_ms());
+                            }
+                            Err("backoff") => {
+                                tracing::debug!(
+                                    model_uid=%rm.model_uid,
+                                    replica_id=rm.replica_id,
+                                    "restart skipped: still in backoff"
+                                );
+                            }
+                            Err(_) => {
+                                let reason = format!(
+                                    "recovery budget exhausted ({} restarts / 24h)",
+                                    RESTART_BUDGET_N
+                                );
+                                tracing::error!(
+                                    model_uid=%rm.model_uid,
+                                    replica_id=rm.replica_id,
+                                    %reason,
+                                    "marking replica Failed; stopping restart loop"
+                                );
+                                rm.failed = true;
+                                let mut ep_guard = endpoint.lock().await;
+                                if let Some(info) = ep_guard.get_mut(&rkey) {
+                                    info.status = EndpointStatus::Failed;
+                                    let _ = register_endpoint(&store, info, ttl_ms).await;
+                                }
+                                if let Some(request_id) = rm.request_id.as_deref() {
+                                    mark_request_failed(&store, request_id, reason).await;
+                                }
+                            }
+                        }
                     }
                 }
             }

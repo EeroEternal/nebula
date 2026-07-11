@@ -14,6 +14,7 @@ use tokio::process::{Child, Command};
 use crate::args::Args;
 
 /// Context needed to start an engine instance (engine-agnostic).
+#[derive(Debug, Clone)]
 pub struct EngineStartContext {
     pub model_uid: String,
     pub model_name: String,
@@ -72,10 +73,57 @@ pub trait Engine: Send + Sync {
         replica_id: u32,
     ) -> Option<EndpointStats>;
 
-    /// Attempt to restart the engine (e.g. docker restart). Default: no-op.
-    async fn try_restart(&self, handle: &EngineHandle) {
-        let _ = handle;
+    /// Attempt to restart the engine and refresh `handle`.
+    /// Local processes must stop the process group and start again (no empty no-op).
+    /// Docker may `docker restart` in place.
+    async fn try_restart(
+        &self,
+        handle: &mut EngineHandle,
+        ctx: &EngineStartContext,
+    ) -> anyhow::Result<()> {
+        let _ = (handle, ctx);
+        anyhow::bail!("try_restart not implemented for this engine")
     }
+}
+
+/// Put the child in its own process group so stop can signal the whole tree (Unix).
+#[cfg(unix)]
+pub(crate) fn configure_process_group(cmd: &mut Command) {
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+pub(crate) fn configure_process_group(_cmd: &mut Command) {}
+
+async fn signal_process_group(pid: u32, signal: &str) {
+    let arg = format!("-{pid}");
+    let _ = Command::new("kill")
+        .args([signal, &arg])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+}
+
+/// SIGTERM the process group, wait, then SIGKILL. Falls back to Child::kill.
+pub(crate) async fn kill_process_group(child: &mut Child, grace: Duration) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            tracing::info!(pid, "sending SIGTERM to process group");
+            signal_process_group(pid, "-TERM").await;
+            tokio::select! {
+                _ = child.wait() => return Ok(()),
+                _ = tokio::time::sleep(grace) => {}
+            }
+            tracing::warn!(pid, "process group still alive after grace; SIGKILL");
+            signal_process_group(pid, "-KILL").await;
+            let _ = child.wait().await;
+            return Ok(());
+        }
+    }
+    let _ = child.kill().await;
+    Ok(())
 }
 
 /// Build the standard container name for a model replica.

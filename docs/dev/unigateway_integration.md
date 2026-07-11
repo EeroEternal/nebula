@@ -3,7 +3,7 @@
 > 状态：架构指导（2026-07-10）
 > 读者：Nebula Gateway / 接入面维护者
 > 对照仓库：`/Users/xinference/github/unigateway`、本仓库
-> 相关文档：`architecture.md`、`arch_optimization.md`、`absorb_powerllm_engineering_guidance.md`、`gateway/README.md`
+> 相关文档：`../arch/architecture.md`、`../arch/optimization.md`、`absorb_powerllm_engineering_guidance.md`、`gateway/README.md`
 
 ---
 
@@ -68,7 +68,7 @@ UG 只应出现在 **Gateway 进程内**（或 Gateway 调用的库边界内）�
 |------|------|
 | 用 UG 替换 `nebula-router` | 缺少 etcd、`plan_version`、Draining、fencing 语义 |
 | TOML / provider pool 当集群权威 | 与声明式 Placement 双权威，必出对账债 |
-| Gateway 内嵌 UG 后再做一套实例选择 | 违反 Gateway / Router 边界（见 `arch_optimization.md`、吸收指导 §3.7） |
+| Gateway 内嵌 UG 后再做一套实例选择 | 违反 Gateway / Router 边界（见 `../arch/optimization.md`、吸收指导 §3.7） |
 | Scheduler / Node 依赖 UG | 控制面与协议库耦合，无收益 |
 | 为「功能全」把多厂商 failover 塞进热路径 | Nebula 扩展轴是镜像矩阵 + Engine trait，不是 provider 全家桶 |
 
@@ -104,7 +104,7 @@ UG 只应出现在 **Gateway 进程内**（或 Gateway 调用的库边界内）�
 - 优先：`unigateway-sdk` 且尽量只用 `protocol` 相关导出。
 - 次选：直接依赖 `unigateway-protocol`。
 - 谨慎：引入 `unigateway-core` / 完整 `UniGatewayEngine`——仅当 Gateway 需要其驱动与流式执行，且明确 **不** 用其做 etcd 级选路。
-- 版本：与 crates.io / 对照仓库对齐同一 release line；避免混用 1.x / 2.x API（当前工作树曾出现 `unigateway` 1.7 与代码不匹配导致 Gateway 编译失败，见 `arch_optimization.md`）。
+- 版本：与 crates.io / 对照仓库对齐同一 release line；避免混用 1.x / 2.x API（当前工作树曾出现 `unigateway` 1.7 与代码不匹配导致 Gateway 编译失败，见 `../arch/optimization.md`）。
 
 ### 3.3 与现有代码的关系
 
@@ -147,7 +147,7 @@ UG 只应出现在 **Gateway 进程内**（或 Gateway 调用的库边界内）�
 - client disconnect / abort 经 Gateway 取消下游到 Router，再断开引擎连接。
 - abort / 主动 drain 的 metrics 口径与 SLO 文档一致（不算错误预算，除非另有定义）。
 
-不在本文件范围：Scheduler HA、Placement CAS、etcd 三节点——见 `absorb_powerllm_engineering_guidance.md` 与 `ha/ha_roadmap.md`。
+不在本文件范围：Scheduler HA、Placement CAS、etcd 三节点——见 `absorb_powerllm_engineering_guidance.md` 与 `ha/ha_roadmap.md`（均在 `docs/dev`）。
 
 ---
 
@@ -190,8 +190,8 @@ UG 只应出现在 **Gateway 进程内**（或 Gateway 调用的库边界内）�
 ## 8. 文档维护
 
 - 本文件描述 **是否引入、引入到哪一层、验收什么**。
-- Gateway 具体任务拆解仍放在 `docs/gateway/`。
-- 若集成策略变更（例如产品决定让 UG 承担更多执行），必须同步更新本文与 `arch_optimization.md` 中的边界段落，避免再次出现双路由层。
+- Gateway 具体任务拆解仍放在 `docs/dev/gateway/`。
+- 若集成策略变更（例如产品决定让 UG 承担更多执行），必须同步更新本文与 `../arch/optimization.md` 中的边界段落，避免再次出现双路由层。
 
 ---
 

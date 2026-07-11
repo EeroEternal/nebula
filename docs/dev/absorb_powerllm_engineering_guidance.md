@@ -4,7 +4,7 @@
 > 读者：Nebula 维护者 / 控制面负责人
 > 前提：保持 Nebula 的 no-xoscar 方向（Rust 控制面 + etcd reconcile + 引擎容器化）
 > 对照仓库：`/Users/xinference/github/powerllm`、本仓库
-> 相关文档：`architecture.md`、`ha/ha_roadmap.md`、`development_plan.md`、`arch_optimization.md`；PowerLLM 侧 `docs/supervisor_api_actor_architecture_analysis.md`、`docs/ha_redesign_and_testing.md`、`docs/core_supervisor_worker_descent_design.md`
+> 相关文档：`../arch/architecture.md`、`ha/ha_roadmap.md`、`plan.md`、`../arch/optimization.md`；PowerLLM 侧 `docs/supervisor_api_actor_architecture_analysis.md`、`docs/ha_redesign_and_testing.md`、`docs/core_supervisor_worker_descent_design.md`
 
 ---
 
@@ -97,7 +97,7 @@ PowerLLM 的 license/device 逻辑让 core import api.database，形成双向依
 
 ### 3.7 Gateway 吞掉 Router
 
-不要让 Gateway 同时做协议转换、鉴权、实例选择、管理 API。Gateway = 协议/鉴权/审计；Router = 选 endpoint + 代理；BFF = 控制台聚合。`arch_optimization.md` 里的边界问题要先收敛再加功能。
+不要让 Gateway 同时做协议转换、鉴权、实例选择、管理 API。Gateway = 协议/鉴权/审计；Router = 选 endpoint + 代理；BFF = 控制台聚合。`../arch/optimization.md` 里的边界问题要先收敛再加功能。
 
 ---
 
@@ -231,7 +231,7 @@ PowerLLM 的广度来自多年 Python 适配；Nebula 用 **Engine trait + 镜�
 
 - LLM：继续 vLLM / SGLang 容器。
 - Embedding / Rerank / 多模态：新镜像 + NativeHttp，或 VirtualEngine 代理外部服务。
-- 硬件感知：`(硬件, 引擎, 模型) → 镜像`（`development_plan.md` §7）——这是 Nebula 相对 PowerLLM 的正确扩展轴。
+- 硬件感知：`(硬件, 引擎, 模型) → 镜像`（`plan.md` §7）——这是 Nebula 相对 PowerLLM 的正确扩展轴。
 
 ---
 
@@ -247,7 +247,7 @@ PowerLLM 的广度来自多年 Python 适配；Nebula 用 **Engine trait + 镜�
 | P0.2 | Placement fencing（epoch/version CAS） | 旧 leader 写入被拒；脑裂演练通过 |
 | P0.3 | Drain 闭环 | Draining 不接新流量；in-flight 可完成；再删 endpoint |
 | P0.4 | Request abort / disconnect 传播 | 取消后引擎停生成；metrics 口径正确 |
-| P0.5 | 所有 placement 写入走 CAS | `arch_optimization.md` 中「直接 put」路径清零 |
+| P0.5 | 所有 placement 写入走 CAS | `../arch/optimization.md` 中「直接 put」路径清零 |
 | P0.6 | CI gate | PR 必跑 workspace test + 上述契约 |
 | P0.7 | Gateway / BFF / Router 边界收敛 | 每个 API 唯一 owner；文档更新 |
 
@@ -333,7 +333,7 @@ PowerLLM 的广度来自多年 Python 适配；Nebula 用 **Engine trait + 镜�
 2. **每个吸收项写「行为验收」**，不要写「实现一个类似 Supervisor 的模块」。
 3. **PowerLLM 当行为与测试用例库**，不当代码依赖。可移植的是场景（杀主、缩容、取消、孤儿元数据），不是 Python 类。
 4. **保持短推理路径**：Gateway → Router → Engine HTTP。任何「先问 Scheduler 再推理」的设计都视为回归。
-5. **与现有 Nebula 文档对齐**：本指导落地后，应回写 `ha/ha_roadmap.md`（从规划改为执行）、`development_plan.md`（插入 P0 可靠性里程碑）、`arch_optimization.md`（关闭 CAS/边界项）。
+5. **与现有 Nebula 文档对齐**：本指导落地后，应回写 `ha/ha_roadmap.md`（从规划改为执行）、`plan.md`（插入 P0 可靠性里程碑）、`../arch/optimization.md`（关闭 CAS/边界项）。
 
 ---
 

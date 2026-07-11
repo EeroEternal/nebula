@@ -147,33 +147,29 @@ pub async fn proxy_chat_completions(
         }
     };
 
-    let plan_version = st.plan_version.load(std::sync::atomic::Ordering::Relaxed);
+    let plan_version = st.router.plan_version_for(&model_uid).filter(|&v| v > 0);
 
     let mut attempt: u32 = 0;
     let max_attempts = st.retry_max.saturating_add(1).max(1);
     let mut excluded_endpoint: Option<(String, u32)> = None;
 
     let (_selected_ep, resp) = loop {
-        let ep = if model_uid == st.model_uid && plan_version > 0 {
-            if let Some((exclude_model_uid, exclude_replica_id)) = excluded_endpoint.as_ref() {
+        let ep = match (plan_version, excluded_endpoint.as_ref()) {
+            (Some(pv), Some((exclude_model_uid, exclude_replica_id))) => {
                 st.router.route_with_plan_version_excluding(
                     &_ctx,
                     &model_uid,
-                    plan_version,
+                    pv,
                     (exclude_model_uid.as_str(), *exclude_replica_id),
                 )
-            } else {
-                st.router
-                    .route_with_plan_version(&_ctx, &model_uid, plan_version)
             }
-        } else if let Some((exclude_model_uid, exclude_replica_id)) = excluded_endpoint.as_ref() {
-            st.router.route_excluding(
+            (Some(pv), None) => st.router.route_with_plan_version(&_ctx, &model_uid, pv),
+            (None, Some((exclude_model_uid, exclude_replica_id))) => st.router.route_excluding(
                 &_ctx,
                 &model_uid,
                 (exclude_model_uid.as_str(), *exclude_replica_id),
-            )
-        } else {
-            st.router.route(&_ctx, &model_uid)
+            ),
+            (None, None) => st.router.route(&_ctx, &model_uid),
         };
 
         let ep = match ep {

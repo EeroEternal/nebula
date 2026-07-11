@@ -21,6 +21,17 @@ pub trait MetaStore: Send + Sync {
     async fn delete(&self, key: &str) -> Result<u64>;
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>, u64)>>;
 
+    /// List prefix and return the store's snapshot revision for starting a watch.
+    /// Default: max of per-key mod_revisions (may miss header-only advances).
+    async fn list_prefix_snapshot(
+        &self,
+        prefix: &str,
+    ) -> Result<(Vec<(String, Vec<u8>, u64)>, u64)> {
+        let items = self.list_prefix(prefix).await?;
+        let snap_rev = items.iter().map(|(_, _, rev)| *rev).max().unwrap_or(0);
+        Ok((items, snap_rev))
+    }
+
     async fn compare_and_swap(
         &self,
         key: &str,
