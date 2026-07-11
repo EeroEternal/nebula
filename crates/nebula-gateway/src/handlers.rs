@@ -9,7 +9,7 @@ use axum::{
     Extension, Json,
 };
 use bytes::Bytes;
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt};
 use tokio::sync::mpsc;
@@ -23,9 +23,11 @@ use nebula_common::{
 use nebula_meta::MetaStore;
 
 use crate::auth::{require_role, AuthContext, Role};
-use crate::responses::{
-    build_non_stream_json, build_response, CreateResponseRequest, ResponseStreamBuilder,
+use crate::protocol_adapt::{
+    anthropic_json_to_openai_chat, openai_chat_json_to_anthropic, openai_sse_content_delta,
+    responses_json_to_openai_chat,
 };
+use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
 
 #[derive(Debug, serde::Deserialize)]
@@ -36,23 +38,148 @@ pub(crate) struct LogsQuery {
 pub async fn create_responses(
     State(st): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<CreateResponseRequest>,
+    body: Bytes,
 ) -> Response {
     let _ctx = build_execution_context(&headers);
 
-    let input_text = req.extract_input_text();
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("invalid json: {e}"), "type": "invalid_request_error"}})),
+            )
+                .into_response();
+        }
+    };
 
-    if req.stream.unwrap_or(false) {
+    let (resp_req, chat_body) = match responses_json_to_openai_chat(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": e.to_string(), "type": "invalid_request_error"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let builder_seed = crate::responses::CreateResponseRequest {
+        model: Some(resp_req.model.clone()),
+        input: resp_req.input.clone(),
+        instructions: resp_req.instructions.clone().map(Value::String),
+        stream: Some(resp_req.stream),
+    };
+
+    proxy_chat_as_responses(st, headers, chat_body, builder_seed, resp_req.stream).await
+}
+
+/// Anthropic Messages API → OpenAI chat via UniGateway protocol → Router → Anthropic-shaped reply.
+pub async fn create_anthropic_messages(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let payload: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"type": "error", "error": {"type": "invalid_request_error", "message": format!("invalid json: {e}")}})),
+            )
+                .into_response();
+        }
+    };
+
+    let requested_model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let chat_body = match anthropic_json_to_openai_chat(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"type": "error", "error": {"type": "invalid_request_error", "message": e.to_string()}})),
+            )
+                .into_response();
+        }
+    };
+
+    let stream = chat_body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    proxy_chat_as_anthropic(st, headers, chat_body, requested_model, stream).await
+}
+
+async fn post_router_chat(
+    st: &AppState,
+    headers: &HeaderMap,
+    chat_body: Value,
+) -> Result<reqwest::Response, Response> {
+    let url = format!(
+        "{}/v1/chat/completions",
+        st.router_base_url.trim_end_matches('/')
+    );
+    let mut req_headers = to_reqwest_headers(headers);
+    nebula_common::telemetry::inject_trace_context(&mut req_headers);
+    req_headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+
+    match st
+        .http
+        .post(url)
+        .headers(req_headers)
+        .json(&chat_body)
+        .send()
+        .await
+    {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            let kind = classify_reqwest_error(&e);
+            st.metrics.record_upstream_error(kind);
+            tracing::error!(error=%e, "upstream chat request failed");
+            Err((StatusCode::BAD_GATEWAY, "upstream request failed").into_response())
+        }
+    }
+}
+
+async fn proxy_chat_as_responses(
+    st: AppState,
+    headers: HeaderMap,
+    chat_body: Value,
+    builder_seed: crate::responses::CreateResponseRequest,
+    stream: bool,
+) -> Response {
+    let resp = match post_router_chat(&st, &headers, chat_body).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+
+    if !resp.status().is_success() {
+        let status =
+            StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let bytes = resp.bytes().await.unwrap_or_default();
+        return Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+
+    if stream {
+        let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
-        let engine = st.engine.clone();
         let metrics = st.metrics.clone();
-
-        let builder = ResponseStreamBuilder::new(&req);
+        let mut builder = ResponseStreamBuilder::new(&builder_seed);
 
         tokio::spawn(async move {
-            let mut stream = engine.stream_text(input_text);
-            let mut builder = builder;
-
             if tx
                 .send(Ok(
                     Event::default().data(builder.created_event().to_string())
@@ -66,6 +193,7 @@ pub async fn create_responses(
                 return;
             }
 
+            let mut buf = String::new();
             loop {
                 tokio::select! {
                     biased;
@@ -76,19 +204,37 @@ pub async fn create_responses(
                         tracing::info!("responses SSE aborted: client disconnected");
                         break;
                     }
-                    delta = stream.next() => {
-                        match delta {
-                            Some(delta) if !delta.is_empty() => {
-                                let ev = builder.push_delta(delta);
-                                if tx.send(Ok(Event::default().data(ev.to_string()))).await.is_err() {
-                                    metrics
-                                        .requests_aborted_total
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    break;
+                    item = upstream.next() => {
+                        match item {
+                            Some(Ok(chunk)) => {
+                                buf.push_str(&String::from_utf8_lossy(&chunk));
+                                while let Some(pos) = buf.find('\n') {
+                                    let mut line = buf[..pos].to_string();
+                                    buf.drain(..=pos);
+                                    line = line.trim().to_string();
+                                    if line.is_empty() || !line.starts_with("data:") {
+                                        continue;
+                                    }
+                                    let data = line.trim_start_matches("data:").trim();
+                                    if data == "[DONE]" {
+                                        let completed = builder.completed_event();
+                                        let _ = tx
+                                            .send(Ok(Event::default().data(completed.to_string())))
+                                            .await;
+                                        return;
+                                    }
+                                    if let Some(delta) = openai_sse_content_delta(data) {
+                                        let ev = builder.push_delta(delta);
+                                        if tx.send(Ok(Event::default().data(ev.to_string()))).await.is_err() {
+                                            metrics
+                                                .requests_aborted_total
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            return;
+                                        }
+                                    }
                                 }
                             }
-                            Some(_) => continue,
-                            None => {
+                            Some(Err(_)) | None => {
                                 let completed = builder.completed_event();
                                 let _ = tx
                                     .send(Ok(Event::default().data(completed.to_string())))
@@ -101,21 +247,160 @@ pub async fn create_responses(
             }
         });
 
-        Sse::new(ReceiverStream::new(rx))
+        return Sse::new(ReceiverStream::new(rx))
             .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
-            .into_response()
-    } else {
-        let mut out = String::new();
-        let mut stream = st.engine.stream_text(input_text);
-        while let Some(delta) = stream.next().await {
-            if !delta.is_empty() {
-                out.push_str(&delta);
-            }
-        }
-        let built = build_response(&req, out);
-        let body = build_non_stream_json(&built);
-        (StatusCode::OK, Json(body)).into_response()
+            .into_response();
     }
+
+    let bytes = resp.bytes().await.unwrap_or_default();
+    let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
+    let text = openai
+        .pointer("/choices/0/message/content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let built = build_response(&builder_seed, text);
+    (StatusCode::OK, Json(build_non_stream_json(&built))).into_response()
+}
+
+async fn proxy_chat_as_anthropic(
+    st: AppState,
+    headers: HeaderMap,
+    chat_body: Value,
+    requested_model: String,
+    stream: bool,
+) -> Response {
+    let resp = match post_router_chat(&st, &headers, chat_body).await {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+
+    if !resp.status().is_success() {
+        let status =
+            StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let bytes = resp.bytes().await.unwrap_or_default();
+        return Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| Response::new(Body::empty()));
+    }
+
+    if stream {
+        let mut upstream = resp.bytes_stream();
+        let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
+        let metrics = st.metrics.clone();
+        let model = requested_model.clone();
+
+        tokio::spawn(async move {
+            let msg_id = format!("msg_{}", Uuid::new_v4());
+            let start = json!({
+                "type": "message_start",
+                "message": {
+                    "id": msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": {"input_tokens": 0, "output_tokens": 0}
+                }
+            });
+            if tx
+                .send(Ok(Event::default()
+                    .event("message_start")
+                    .data(start.to_string())))
+                .await
+                .is_err()
+            {
+                metrics
+                    .requests_aborted_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            let block_start = json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""}
+            });
+            if tx
+                .send(Ok(Event::default()
+                    .event("content_block_start")
+                    .data(block_start.to_string())))
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            let mut buf = String::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tx.closed() => {
+                        metrics
+                            .requests_aborted_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!("anthropic SSE aborted: client disconnected");
+                        break;
+                    }
+                    item = upstream.next() => {
+                        match item {
+                            Some(Ok(chunk)) => {
+                                buf.push_str(&String::from_utf8_lossy(&chunk));
+                                while let Some(pos) = buf.find('\n') {
+                                    let mut line = buf[..pos].to_string();
+                                    buf.drain(..=pos);
+                                    line = line.trim().to_string();
+                                    if line.is_empty() || !line.starts_with("data:") {
+                                        continue;
+                                    }
+                                    let data = line.trim_start_matches("data:").trim();
+                                    if data == "[DONE]" {
+                                        let stop = json!({"type": "content_block_stop", "index": 0});
+                                        let _ = tx.send(Ok(Event::default().event("content_block_stop").data(stop.to_string()))).await;
+                                        let delta = json!({
+                                            "type": "message_delta",
+                                            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+                                            "usage": {"output_tokens": 0}
+                                        });
+                                        let _ = tx.send(Ok(Event::default().event("message_delta").data(delta.to_string()))).await;
+                                        let end = json!({"type": "message_stop"});
+                                        let _ = tx.send(Ok(Event::default().event("message_stop").data(end.to_string()))).await;
+                                        return;
+                                    }
+                                    if let Some(text) = openai_sse_content_delta(data) {
+                                        let ev = json!({
+                                            "type": "content_block_delta",
+                                            "index": 0,
+                                            "delta": {"type": "text_delta", "text": text}
+                                        });
+                                        if tx.send(Ok(Event::default().event("content_block_delta").data(ev.to_string()))).await.is_err() {
+                                            metrics
+                                                .requests_aborted_total
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Some(Err(_)) | None => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        return Sse::new(ReceiverStream::new(rx))
+            .keep_alive(axum::response::sse::KeepAlive::new().interval(Duration::from_secs(15)))
+            .into_response();
+    }
+
+    let bytes = resp.bytes().await.unwrap_or_default();
+    let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
+    let anth = openai_chat_json_to_anthropic(&openai, &requested_model);
+    (StatusCode::OK, Json(anth)).into_response()
 }
 
 pub fn build_execution_context(headers: &HeaderMap) -> ExecutionContext {

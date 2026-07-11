@@ -4,6 +4,7 @@ mod auth;
 mod engine;
 mod handlers;
 mod metrics;
+mod protocol_adapt;
 mod responses;
 mod state;
 mod util;
@@ -25,8 +26,8 @@ use crate::handlers::{
     admin_audit_logs, admin_cluster_status, admin_delete_image, admin_delete_request,
     admin_drain_endpoint, admin_get_image, admin_list_image_status, admin_list_images,
     admin_list_requests, admin_load_model, admin_logs, admin_logs_stream, admin_put_image,
-    admin_scale_request, admin_whoami, create_responses, healthz, list_models, not_implemented,
-    proxy_post, proxy_v2,
+    admin_scale_request, admin_whoami, create_anthropic_messages, create_responses, healthz,
+    list_models, not_implemented, proxy_post, proxy_v2,
 };
 use crate::metrics::{metrics_handler, track_requests};
 use crate::state::AppState;
@@ -149,6 +150,7 @@ async fn main() {
 
     let secure_routes = Router::new()
         .route("/v1/responses", get(not_implemented).post(create_responses))
+        .route("/v1/messages", post(create_anthropic_messages))
         .route("/v1/chat/completions", post(proxy_post))
         .route("/v1/embeddings", post(proxy_post))
         .route("/v1/rerank", post(proxy_post))

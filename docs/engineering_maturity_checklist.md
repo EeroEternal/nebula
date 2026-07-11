@@ -63,7 +63,7 @@
 | P1.2 | Autoscale 生产化 | cooldown；scale-down **必须**走 Wave0 drain | 无硬切缩容；有 runbook | [ ] |
 | P1.3 | Metadata reconcile | `POST /admin/reconcile` + 周期全量校正 | 孤儿 endpoint 可清理 | [ ] |
 | P1.4 | 多副本拓扑 | etcd 3 节点；gateway/bff/router 多副本 + LB | 对齐 `ha/ha_roadmap.md` 执行段 | [ ] |
-| P1.5 | SLO 落地 | 成功率 / TTFT P95 / 流式中断；abort/drain 不算错 | dashboard + 告警规则 | [ ] |
+| P1.5 | SLO 落地 | 成功率 / TTFT P95 / 流式中断；abort/drain 不算错；xtrace 与 PromQL 口径分述（见 `observability.md`） | dashboard + 告警规则 | [ ] |
 | P1.6 | 一键部署 | compose profile 或 Helm 初版 | 新环境约 30 分钟 E2E | [ ] |
 
 **Wave 2 完成标志**：小集群可日常用；扩缩容与发布有 runbook。
@@ -78,9 +78,9 @@
 | P2.2 | 多模态 | 容器 / VirtualEngine；禁止嵌入 Rust | [ ] |
 | P2.3 | License | 仅 BFF/Gateway | [ ] |
 | P2.4 | Batch API | 可选；独立 job 空间 | [ ] |
-| P2.5 | 前端运维流 | 监控 / 审计 / 告警 / 多集群 | [ ] |
+| P2.5 | 前端运维流 | 监控 / 审计 / 告警 / 多集群；产品内走 BFF+xtrace；客户 VM/Loki 仅标准出口（见 `observability.md`） | [ ] |
 | P2.6 | 硬件感知调度 | `(硬件, 引擎, 模型) → 镜像` | [ ] |
-| P2.UG | 协议增强 | Anthropic / Responses 等经 UG protocol 嵌 Gateway | [ ] |
+| P2.UG | 协议增强 | Anthropic / Responses 等经 UG protocol 嵌 Gateway | [x] |
 
 ---
 
@@ -101,6 +101,7 @@
 
 | 文档 | 角色 |
 |------|------|
+| `observability.md` | 可观测统一设计（xtrace / Prometheus / Loki、面板、P1.5·P2.5） |
 | `absorb_powerllm_engineering_guidance.md` | 为什么、学什么、不学什么 |
 | **本文件** | 按什么顺序做、做到什么算完 |
 | `ha/ha_roadmap.md` | HA 拓扑与多机交付细节（执行态，服务 Wave 0–2） |

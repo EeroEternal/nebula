@@ -10,7 +10,8 @@
 | 能力 | Owner | 路径约定 | 备注 |
 |------|-------|----------|------|
 | OpenAI 兼容推理 | Gateway 入口 + Router 选路 | Gateway `/v1/chat/completions` 等 → Router 同名 → Engine | Gateway 不做实例选择 |
-| `/v1/responses` | Gateway | Gateway 协议层 | 上游仍经 Router（或引擎 HTTP） |
+| `/v1/responses` | Gateway（UG protocol 解析） | Gateway → Router `/v1/chat/completions` | 响应再映射为 Responses 形 |
+| Anthropic Messages | Gateway（UG protocol） | Gateway `/v1/messages` → Router chat | 不绕过 Router |
 | Router 健康/指标 | Router | `/healthz`, `/metrics` | 无 admin |
 | 控制台会话 / SSO | BFF | `/api/auth/*` | Postgres；Scheduler 不碰 |
 | 声明式模型管理 | BFF | `/api/v2/models/*` | 写 etcd Deployment/Spec |

@@ -1468,6 +1468,8 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+ "unigateway-core 2.6.0",
+ "unigateway-protocol 2.6.0",
  "uuid",
 ]
 
@@ -3427,6 +3429,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "unigateway-core"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffa31998d3b3d30f09fe69e553b27e268b41dbcf57aa74af1c99f7ef9e42d77"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "unigateway-host"
 version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3440,8 +3459,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "unigateway-core",
- "unigateway-protocol",
+ "unigateway-core 1.7.0",
+ "unigateway-protocol 1.7.0",
 ]
 
 [[package]]
@@ -3457,7 +3476,23 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "unigateway-core",
+ "unigateway-core 1.7.0",
+]
+
+[[package]]
+name = "unigateway-protocol"
+version = "2.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f6525dab811d95b53f8b86e5ef779614cc2125176d0a6804ed05f43d5a5c99c"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-util",
+ "http",
+ "serde",
+ "serde_json",
+ "tokio",
+ "unigateway-core 2.6.0",
 ]
 
 [[package]]
@@ -3466,9 +3501,9 @@ version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17fef9e1f10e01bf44aa768786adb4c415f93d8319bb88f38aa2262cffd1b75b"
 dependencies = [
- "unigateway-core",
+ "unigateway-core 1.7.0",
  "unigateway-host",
- "unigateway-protocol",
+ "unigateway-protocol 1.7.0",
 ]
 
 [[package]]

@@ -127,11 +127,18 @@ UG 只应出现在 **Gateway 进程内**（或 Gateway 调用的库边界内）�
 
 ### Phase B：协议能力（产品可感知）
 
+状态（2026-07-10）：**已落地初版**
+
+- Gateway 依赖 `unigateway-protocol` / `unigateway-core` 2.6（protocol 解析，不引入 Engine 选路）。
+- `/v1/responses`：UG 解析 → 转 OpenAI chat → **Router** `/v1/chat/completions` → Responses SSE/JSON。
+- `/v1/messages`：Anthropic Messages → UG 转 OpenAI chat → Router → Anthropic 形响应（含流式）。
+- 契约单测：`protocol_adapt`（Anthropic/Responses 转换）+ Responses SSE 序号。
+
 验收：
 
 - `/v1/chat/completions` 流式事件序列稳定，有契约测试。
-- `/v1/responses` 达到可用（非 `not_implemented` 占位）。
-- 可选：Anthropic 兼容入口（若产品需要），转换发生在 Gateway，上游仍走 Router→引擎 OpenAI 形或引擎原生形（按引擎能力协商）。
+- `/v1/responses` 达到可用（经 Router，非本地假引擎占位）。
+- Anthropic 兼容入口 `/v1/messages`：转换发生在 Gateway，上游仍走 Router。
 
 ### Phase C：生命周期对齐（与可靠性 P0 协同）
 
