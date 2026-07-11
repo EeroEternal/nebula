@@ -46,10 +46,70 @@ pub struct PlacementPlan {
     pub request_id: Option<String>,
     pub model_uid: String,
     pub model_name: String,
+    /// Logical monotonic version. Bumped as `old.version + 1` on each CAS write.
+    /// Do not use wall-clock timestamps here.
     pub version: u64,
+    /// Wall-clock timestamp of the last successful write (observability / grace / cooldown).
+    #[serde(default)]
+    pub updated_at_ms: u64,
     /// Fencing token from scheduler leader election. Nodes reject plans with a
     /// lower epoch than the last applied plan for the same model.
     #[serde(default)]
     pub leader_epoch: u64,
     pub assignments: Vec<PlacementAssignment>,
+}
+
+impl PlacementPlan {
+    /// Effective write time for grace/cooldown. Falls back to legacy `version`
+    /// when it looks like a millisecond timestamp (pre-0.2.0 plans).
+    pub fn effective_updated_at_ms(&self) -> u64 {
+        if self.updated_at_ms > 0 {
+            self.updated_at_ms
+        } else if self.version > 1_000_000_000_000 {
+            self.version
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_updated_at_prefers_explicit_field() {
+        let plan = PlacementPlan {
+            request_id: None,
+            model_uid: "m".into(),
+            model_name: "m".into(),
+            version: 3,
+            updated_at_ms: 42,
+            leader_epoch: 0,
+            assignments: vec![],
+        };
+        assert_eq!(plan.effective_updated_at_ms(), 42);
+    }
+
+    #[test]
+    fn effective_updated_at_falls_back_to_legacy_timestamp_version() {
+        let plan = PlacementPlan {
+            request_id: None,
+            model_uid: "m".into(),
+            model_name: "m".into(),
+            version: 1_700_000_000_000,
+            updated_at_ms: 0,
+            leader_epoch: 0,
+            assignments: vec![],
+        };
+        assert_eq!(plan.effective_updated_at_ms(), 1_700_000_000_000);
+    }
+
+    #[test]
+    fn missing_updated_at_deserializes_default() {
+        let json = r#"{"model_uid":"m","model_name":"n","version":2,"assignments":[]}"#;
+        let plan: PlacementPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.version, 2);
+        assert_eq!(plan.updated_at_ms, 0);
+    }
 }

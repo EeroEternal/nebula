@@ -123,20 +123,7 @@ async fn reconcile_once(
         }
     }
 
-    // 3. Load all model requests (to know desired replica count — legacy path)
-    let request_kvs = store.list_prefix("/model_requests/").await?;
-    let mut requests: HashMap<String, ModelRequest> = HashMap::new();
-    for (_, val, _) in &request_kvs {
-        if let Ok(req) = serde_json::from_slice::<ModelRequest>(val) {
-            if req.status == ModelRequestStatus::Scheduled
-                || req.status == ModelRequestStatus::Running
-            {
-                requests.insert(req.request.model_uid.clone(), req);
-            }
-        }
-    }
-
-    // 3b. Also load deployments (new declarative path)
+    // 3. Load deployments (declarative desired state — single path)
     let deployment_kvs = store.list_prefix("/deployments/").await?;
     let mut deployments: HashMap<String, ModelDeployment> = HashMap::new();
     for (_, val, _) in &deployment_kvs {
@@ -152,7 +139,6 @@ async fn reconcile_once(
 
     // 5. For each placement, reconcile
     for plan in &plans {
-        // Check deployment first (new path), fallback to old model_request
         let (base_replicas, min_replicas, max_replicas) =
             if let Some(dep) = deployments.get(&plan.model_uid) {
                 let base = dep.replicas.max(1);
@@ -160,13 +146,8 @@ async fn reconcile_once(
                 // Ensure max >= min so clamp never panics on empty/misconfigured bounds.
                 let max = dep.max_replicas.unwrap_or(base).max(min);
                 (base, min, max)
-            } else if let Some(req) = requests.get(&plan.model_uid) {
-                let base = req.request.replicas.max(1);
-                let min = req.request.min_replicas.unwrap_or(1).max(1);
-                let max = req.request.max_replicas.unwrap_or(base).max(min);
-                (base, min, max)
             } else {
-                // Orphan placement (request/deployment gone): hold current count, allow 0.
+                // Orphan placement (deployment gone / stopped): hold current count, allow 0.
                 let n = plan.assignments.len() as u32;
                 (n, 0, n)
             };
@@ -214,7 +195,7 @@ async fn reconcile_once(
                 None => {
                     // No endpoint registered yet — could be still starting.
                     // Only remove if the plan is old enough (keep a generous startup grace).
-                    let plan_age = now.saturating_sub(plan.version);
+                    let plan_age = now.saturating_sub(plan.effective_updated_at_ms());
                     if plan_age > STARTUP_GRACE_MS {
                         warn!(
                             model_uid=%plan.model_uid,
@@ -262,17 +243,7 @@ async fn reconcile_once(
                 "attempting to add replacement replicas"
             );
 
-            if let Some(req) = requests.get(&plan.model_uid) {
-                add_replacement_replicas_from_request(
-                    store,
-                    plan,
-                    req,
-                    deficit,
-                    default_port,
-                    &mut new_assignments,
-                )
-                .await;
-            } else if deployments.contains_key(&plan.model_uid) {
+            if deployments.contains_key(&plan.model_uid) {
                 add_replacement_replicas_from_plan(
                     store,
                     plan,
@@ -313,12 +284,13 @@ async fn reconcile_once(
             continue;
         }
 
-        // Write updated plan (bump version)
+        // Write updated plan (bump logical version; stamp wall time separately)
         let updated_plan = PlacementPlan {
             request_id: plan.request_id.clone(),
             model_uid: plan.model_uid.clone(),
             model_name: plan.model_name.clone(),
-            version: now_ms(),
+            version: plan.version.saturating_add(1),
+            updated_at_ms: now_ms(),
             leader_epoch: leader.epoch(),
             assignments: new_assignments,
         };
@@ -377,91 +349,6 @@ async fn reconcile_once(
     }
 
     Ok(())
-}
-
-/// Add replacement replicas using the original ModelRequest for scheduling parameters (legacy path).
-async fn add_replacement_replicas_from_request(
-    store: &EtcdMetaStore,
-    plan: &PlacementPlan,
-    req: &ModelRequest,
-    deficit: u32,
-    default_port: u16,
-    new_assignments: &mut Vec<nebula_common::PlacementAssignment>,
-) {
-    let (mut used_ports, mut used_gpus) = list_used_resources(store).await.unwrap_or_default();
-
-    for a in new_assignments.iter() {
-        used_ports.insert(a.port);
-        if let Some(indices) = a.effective_gpu_indices() {
-            let entry = used_gpus.entry(a.node_id.clone()).or_default();
-            for idx in indices {
-                entry.insert(idx);
-            }
-        }
-    }
-
-    let max_existing_id = new_assignments
-        .iter()
-        .map(|a| a.replica_id)
-        .max()
-        .unwrap_or(0);
-
-    let extra_args = crate::planner::build_extra_args(req);
-
-    for i in 0..deficit {
-        let new_replica_id = max_existing_id + 1 + i;
-
-        match select_node_and_gpus(store, req, &used_gpus).await {
-            Ok((node_id, gpu_indices)) => {
-                let port = allocate_port(default_port, &used_ports);
-                used_ports.insert(port);
-
-                if !gpu_indices.is_empty() {
-                    let entry = used_gpus.entry(node_id.clone()).or_default();
-                    for &idx in &gpu_indices {
-                        entry.insert(idx);
-                    }
-                }
-
-                let gpu_index = if gpu_indices.len() == 1 {
-                    Some(gpu_indices[0])
-                } else {
-                    gpu_indices.first().copied()
-                };
-                let gpu_indices_field = if gpu_indices.is_empty() {
-                    None
-                } else {
-                    Some(gpu_indices)
-                };
-
-                new_assignments.push(nebula_common::PlacementAssignment {
-                    replica_id: new_replica_id,
-                    node_id,
-                    engine_config_path: format!("/tmp/nebula/{}.yaml", plan.model_uid),
-                    port,
-                    gpu_index,
-                    gpu_indices: gpu_indices_field,
-                    extra_args: extra_args.clone(),
-                    engine_type: None,
-                    docker_image: None,
-                });
-
-                info!(
-                    model_uid=%plan.model_uid,
-                    replica_id=new_replica_id,
-                    "added replacement assignment (from request)"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    model_uid=%plan.model_uid,
-                    error=%e,
-                    "failed to find node for replacement replica"
-                );
-                break;
-            }
-        }
-    }
 }
 
 /// Add replacement replicas for deployment-managed plans.
@@ -877,7 +764,7 @@ fn compute_desired_replicas(
 
     // Scale-down: if avg pending == 0 and KV usage is low, and cooldown has passed
     if avg_pending <= SCALE_DOWN_IDLE_THRESHOLD && avg_kv_usage < SCALE_UP_KV_THRESHOLD * 0.5 {
-        let plan_age = now.saturating_sub(plan.version);
+        let plan_age = now.saturating_sub(plan.effective_updated_at_ms());
         if plan_age > SCALE_DOWN_COOLDOWN_MS && current > min_replicas {
             let target = (current - 1).max(min_replicas);
             info!(

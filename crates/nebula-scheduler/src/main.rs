@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 use tracing::{error, info, warn};
 
 use nebula_common::{
-    DesiredState, ModelDeployment, ModelRequest, ModelRequestStatus, ModelSpec, PlacementPlan,
+    DesiredState, ModelDeployment, ModelSpec, PlacementPlan,
 };
 use nebula_meta::{
     run_election_loop, ElectionConfig, EtcdMetaStore, LeaderGate, MetaStore,
@@ -24,7 +24,7 @@ use nebula_scheduler::metrics::{
 };
 
 use crate::args::Args;
-use crate::planner::{build_plan_from_deployment, build_plan_multi, list_used_resources};
+use crate::planner::{build_plan_from_deployment, list_used_resources};
 
 async fn write_placement_cas(
     store: &EtcdMetaStore,
@@ -37,11 +37,16 @@ async fn write_placement_cas(
     }
     plan.leader_epoch = leader.epoch();
 
-    let expected_revision = store
-        .get(placement_key)
-        .await?
-        .map(|(_, revision)| revision)
+    let existing = store.get(placement_key).await?;
+    let expected_revision = existing.as_ref().map(|(_, revision)| *revision).unwrap_or(0);
+    let prev_version = existing
+        .as_ref()
+        .and_then(|(data, _)| serde_json::from_slice::<PlacementPlan>(data).ok())
+        .map(|p| p.version)
         .unwrap_or(0);
+    // Logical monotonic version (never wall-clock).
+    plan.version = prev_version.saturating_add(1);
+    plan.updated_at_ms = crate::util::now_ms();
 
     let placement_val = serde_json::to_vec(plan)?;
     let (ok, revision) = store
@@ -155,113 +160,11 @@ async fn main() -> Result<()> {
         .await;
     });
 
-    let store_for_deploy = store.clone();
-    let default_port_for_deploy = args.default_port;
-    let leader_for_deploy = leader.clone();
-    tokio::spawn(async move {
-        deployment_watch_loop(store_for_deploy, default_port_for_deploy, leader_for_deploy).await;
-    });
-
-    let prefix = "/model_requests/";
-
-    loop {
-        info!("watching prefix: {}", prefix);
-        let mut stream = match store.watch_prefix(prefix, None).await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("failed to watch prefix: {}, retrying in 5s", e);
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        while let Some(event) = stream.next().await {
-            if !leader.is_leader() {
-                continue;
-            }
-
-            let Some(value) = event.value else { continue };
-
-            let mut req: ModelRequest = match serde_json::from_slice(&value) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!("failed to deserialize model request: {}", e);
-                    continue;
-                }
-            };
-
-            if req.status == ModelRequestStatus::Pending {
-                info!(
-                    "processing pending request: {} (model={})",
-                    req.id, req.request.model_name
-                );
-
-                let (used_ports, used_gpus) = match list_used_resources(&store).await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        warn!("failed to list placements: {}", e);
-                        (
-                            std::collections::HashSet::new(),
-                            std::collections::HashMap::new(),
-                        )
-                    }
-                };
-
-                let mut plan =
-                    match build_plan_multi(&store, &req, args.default_port, used_ports, used_gpus)
-                        .await
-                    {
-                        Ok(p) => p,
-                        Err(e) => {
-                            error!("failed to build placement plan: {}", e);
-                            continue;
-                        }
-                    };
-
-                let placement_key = format!("/placements/{}", plan.model_uid);
-                if let Err(e) =
-                    write_placement_cas(&store, &placement_key, &mut plan, &leader).await
-                {
-                    error!("failed to write placement: {}", e);
-                    continue;
-                }
-                info!(
-                    "wrote placement to {} (CAS, epoch={})",
-                    placement_key,
-                    plan.leader_epoch
-                );
-
-                req.status = ModelRequestStatus::Scheduled;
-                if let Ok(updated_val) = serde_json::to_vec(&req) {
-                    let req_key = format!("{}{}", prefix, req.id);
-                    let _ = store.put(&req_key, updated_val, None).await;
-                    info!("updated request {} status to Scheduled", req.id);
-                }
-            } else if req.status == ModelRequestStatus::Unloading {
-                info!(
-                    "processing unloading request: {} (model={})",
-                    req.id, req.request.model_name
-                );
-
-                let placement_key = format!("/placements/{}", req.request.model_uid);
-                if let Err(e) = delete_placement_if_leader(&store, &placement_key, &leader).await {
-                    warn!("failed to delete placement {}: {}", placement_key, e);
-                } else {
-                    info!("deleted placement {}", placement_key);
-                }
-
-                let req_key = format!("{}{}", prefix, req.id);
-                if let Err(e) = store.delete(&req_key).await {
-                    error!("failed to delete request key {}: {}", req_key, e);
-                } else {
-                    info!("successfully cleaned up request {}", req.id);
-                }
-            }
-        }
-
-        warn!("watch stream ended, reconnecting...");
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    // Declarative single path: only watch /deployments/ (B5).
+    // Legacy /model_requests/ watch removed; migrate with `nebula admin migrate`.
+    info!("scheduler control plane: deployments-only watch");
+    deployment_watch_loop(store, args.default_port, leader).await;
+    Ok(())
 }
 
 /// Watch `/deployments/` prefix for the new declarative model management flow.

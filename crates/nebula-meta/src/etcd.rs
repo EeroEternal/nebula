@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use etcd_client::{
@@ -28,6 +29,44 @@ impl EtcdMetaStore {
             secs = 1;
         }
         secs
+    }
+
+    /// Grant a long-lived lease (C3). Prefer one lease for status + endpoints.
+    pub async fn grant_lease(&self, ttl_secs: i64) -> Result<i64> {
+        let mut cli = self.client.lock().await;
+        let lease = cli.lease_grant(ttl_secs.max(1), None).await?;
+        Ok(lease.id())
+    }
+
+    /// Put a key bound to an existing lease (no new grant).
+    pub async fn put_with_lease(&self, key: &str, value: Vec<u8>, lease_id: i64) -> Result<u64> {
+        let mut cli = self.client.lock().await;
+        let opts = PutOptions::new().with_lease(lease_id);
+        let resp = cli.put(key, value, Some(opts)).await?;
+        let rev = resp.header().map(|h| h.revision()).unwrap_or_default();
+        Ok(rev as u64)
+    }
+
+    /// Background keepalive for a lease. Interval ≈ ttl/3 (min 2s).
+    pub fn spawn_lease_keepalive(&self, lease_id: i64, ttl_secs: i64) {
+        let store = self.clone();
+        let interval = Duration::from_secs(((ttl_secs.max(3)) / 3) as u64).max(Duration::from_secs(2));
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = store.keep_alive_once(lease_id).await {
+                    tracing::warn!(error=%e, lease_id, "etcd lease keepalive failed");
+                }
+                tokio::time::sleep(interval).await;
+            }
+        });
+    }
+
+    async fn keep_alive_once(&self, lease_id: i64) -> Result<()> {
+        let mut cli = self.client.lock().await;
+        let (mut keeper, mut stream) = cli.lease_keep_alive(lease_id).await?;
+        keeper.keep_alive().await?;
+        let _ = stream.message().await?;
+        Ok(())
     }
 }
 

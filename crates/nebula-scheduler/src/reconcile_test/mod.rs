@@ -16,6 +16,7 @@ mod tests {
             model_uid: model_uid.clone(),
             model_name: "test-model".into(),
             version: 1000,
+            updated_at_ms: 1_000,
             leader_epoch: 1,
             assignments: vec![],
         };
@@ -33,6 +34,7 @@ mod tests {
             model_uid: model_uid.clone(),
             model_name: "test-model".into(),
             version: 2000,
+            updated_at_ms: 2_000,
             leader_epoch: 1,
             assignments: vec![PlacementAssignment {
                 replica_id: 1,
@@ -59,6 +61,7 @@ mod tests {
             model_uid: model_uid.clone(),
             model_name: "test-model".into(),
             version: 1001,
+            updated_at_ms: 1_001,
             leader_epoch: 1,
             assignments: vec![],
         };
@@ -83,6 +86,7 @@ mod tests {
             model_uid: "m1".into(),
             model_name: "m".into(),
             version: 2000,
+            updated_at_ms: 2_000,
             leader_epoch: 2,
             assignments: vec![],
         };
@@ -97,6 +101,7 @@ mod tests {
             model_uid: "m1".into(),
             model_name: "m".into(),
             version: 1999,
+            updated_at_ms: 1_999,
             leader_epoch: 1,
             assignments: vec![],
         };

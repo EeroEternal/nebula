@@ -141,7 +141,7 @@ async fn mark_endpoint_draining(
         if ep.status != EndpointStatus::Draining {
             ep.status = EndpointStatus::Draining;
             ep.last_heartbeat_ms = now_ms();
-            register_endpoint(store, ep, ttl_ms).await?;
+            register_endpoint(store, ep, ttl_ms, None).await?;
             tracing::info!(%model_uid, replica_id, "endpoint marked Draining");
         }
     }
@@ -358,7 +358,7 @@ async fn start_replica(
         base_url: Some(handle.base_url.clone()),
     };
 
-    register_endpoint(store, &info, args.heartbeat_ttl_ms).await?;
+    register_endpoint(store, &info, args.heartbeat_ttl_ms, None).await?;
     tracing::info!(%model_uid, replica_id, base_url=%handle.base_url, "registered endpoint");
 
     let key = replica_key(model_uid, replica_id);
@@ -447,7 +447,7 @@ pub async fn reconcile_model(
                         })
                     };
                     if let Some(info) = refreshed {
-                        register_endpoint(store, &info, args.heartbeat_ttl_ms).await?;
+                        register_endpoint(store, &info, args.heartbeat_ttl_ms, None).await?;
                         if let Some(rm) = running.get_mut(&key) {
                             rm.plan_version = plan.version;
                         }
@@ -513,6 +513,7 @@ mod tests {
             model_uid: "m1".into(),
             model_name: "m".into(),
             version: 1,
+            updated_at_ms: 0,
             leader_epoch: 4,
             assignments: vec![],
         };
@@ -536,6 +537,7 @@ mod tests {
             model_uid: "m1".into(),
             model_name: "m".into(),
             version: 1,
+            updated_at_ms: 0,
             leader_epoch: 1,
             assignments: vec![
                 assignment(0, "node_a", 8000),
@@ -556,6 +558,7 @@ mod tests {
             model_uid: "m1".into(),
             model_name: "m".into(),
             version: 1,
+            updated_at_ms: 0,
             leader_epoch: 1,
             assignments: vec![
                 assignment(0, "node_a", 8000),

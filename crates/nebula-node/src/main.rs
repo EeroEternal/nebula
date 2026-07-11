@@ -130,6 +130,20 @@ async fn main() -> anyhow::Result<()> {
 
     let store = EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
 
+    // C3: one shared lease for node status + endpoints, refreshed by keepalive.
+    let lease_ttl_secs = ((args.heartbeat_ttl_ms as f64 / 1000.0).ceil() as i64).max(10);
+    let lease_id = match store.grant_lease(lease_ttl_secs).await {
+        Ok(id) => {
+            tracing::info!(lease_id=id, ttl_secs=lease_ttl_secs, "granted etcd lease for status/endpoints");
+            store.spawn_lease_keepalive(id, lease_ttl_secs);
+            Some(id)
+        }
+        Err(e) => {
+            tracing::warn!(error=%e, "failed to grant etcd lease; falling back to per-put TTL");
+            None
+        }
+    };
+
     let endpoint_state: Arc<Mutex<HashMap<ReplicaKey, nebula_common::EndpointInfo>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
@@ -154,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         running.clone(),
         xtrace,
         shared_metrics.clone(),
+        lease_id,
     ));
 
     // A2: advance Drain and fill watch gaps even when no placement events arrive.

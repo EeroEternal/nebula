@@ -7,6 +7,7 @@ async fn test_virtual_placement_plan_shape() {
         model_uid: "virtual-test-model".to_string(),
         model_name: "test-model".to_string(),
         version: 1,
+        updated_at_ms: 0,
         leader_epoch: 1,
         assignments: vec![PlacementAssignment {
             node_id: "local-node".to_string(),

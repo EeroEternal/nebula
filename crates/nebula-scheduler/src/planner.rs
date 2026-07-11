@@ -134,6 +134,7 @@ pub async fn select_node_and_gpus(
     anyhow::bail!("no healthy nodes available")
 }
 
+#[allow(dead_code)] // kept for offline tooling / emergency rebuilds of legacy plans
 pub fn build_extra_args(req: &ModelRequest) -> Option<Vec<String>> {
     build_extra_args_from_config(req.request.config.as_ref()?)
 }
@@ -214,6 +215,7 @@ fn make_assignment(
     }
 }
 
+#[allow(dead_code)] // legacy model_requests path removed in B5; kept for tests/tools
 pub async fn build_plan_multi(
     store: &EtcdMetaStore,
     req: &ModelRequest,
@@ -255,7 +257,9 @@ pub async fn build_plan_multi(
         request_id: Some(req.id.clone()),
         model_uid: req.request.model_uid.clone(),
         model_name: req.request.model_name.clone(),
-        version: now_ms(),
+        // Placeholder; `write_placement_cas` / reconcile set logical version + updated_at_ms.
+        version: 0,
+        updated_at_ms: now_ms(),
         leader_epoch: 0,
         assignments,
     })
@@ -337,7 +341,9 @@ pub async fn build_plan_from_deployment(
         request_id: None,
         model_uid: spec.model_uid.clone(),
         model_name: spec.model_name.clone(),
-        version: now_ms(),
+        // Placeholder; writer stamps logical version + updated_at_ms.
+        version: 0,
+        updated_at_ms: now_ms(),
         leader_epoch: 0,
         assignments,
     })

@@ -17,10 +17,10 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use uuid::Uuid;
 
 use nebula_common::{
-    ClusterStatus, EndpointInfo, ExecutionContext, ModelLoadRequest, ModelRequest,
-    ModelRequestStatus, NodeStatus, PlacementPlan,
+    ClusterStatus, DesiredState, EndpointInfo, ExecutionContext, ModelDeployment, ModelLoadRequest,
+    ModelRequest, ModelSource, ModelSpec, NodeStatus, PlacementPlan,
 };
-use nebula_meta::MetaStore;
+use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::auth::{require_role, AuthContext, Role};
 use crate::protocol_adapt::{
@@ -494,6 +494,15 @@ pub async fn proxy_post(
     };
 
     let mut req_headers = to_reqwest_headers(&headers);
+    // C1: inject model header so Router can route without a second full JSON parse.
+    if let Some(model) = nebula_common::peek_json_model_field(&body_bytes) {
+        if let Ok(v) = HeaderValue::from_str(&model) {
+            req_headers.insert(
+                HeaderName::from_static(nebula_common::HEADER_NEBULA_MODEL),
+                v,
+            );
+        }
+    }
     nebula_common::telemetry::inject_trace_context(&mut req_headers);
 
     let resp = match st
@@ -898,6 +907,56 @@ pub async fn list_models(State(st): State<AppState>) -> impl IntoResponse {
         .into_response()
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn infer_model_source(model_name: &str, model_path: Option<&str>) -> ModelSource {
+    let pathish = model_path.unwrap_or(model_name);
+    if pathish.starts_with('/') || pathish.starts_with('.') {
+        ModelSource::Local
+    } else {
+        ModelSource::HuggingFace
+    }
+}
+
+/// Resolve a caller-provided id to a model_uid.
+/// Prefer `/deployments/{id}`; fall back to legacy `/model_requests/{id}` (read-only).
+async fn resolve_model_uid(store: &EtcdMetaStore, id: &str) -> Result<Option<String>, String> {
+    let dep_key = format!("/deployments/{id}");
+    match store.get(&dep_key).await {
+        Ok(Some(_)) => return Ok(Some(id.to_string())),
+        Ok(None) => {}
+        Err(e) => return Err(format!("etcd error: {e}")),
+    }
+    let req_key = format!("/model_requests/{id}");
+    match store.get(&req_key).await {
+        Ok(Some((data, _))) => {
+            let req: ModelRequest = serde_json::from_slice(&data)
+                .map_err(|e| format!("deserialization error: {e}"))?;
+            Ok(Some(req.request.model_uid))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("etcd error: {e}")),
+    }
+}
+
+async fn put_json(
+    store: &EtcdMetaStore,
+    key: &str,
+    value: &impl serde::Serialize,
+) -> Result<(), String> {
+    let val = serde_json::to_vec(value).map_err(|e| format!("serialization error: {e}"))?;
+    store
+        .put(key, val, None)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("etcd error: {e}"))
+}
+
 pub async fn admin_delete_request(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -906,53 +965,48 @@ pub async fn admin_delete_request(
     if let Some(resp) = require_role(&st.metrics, &ctx, Role::Operator) {
         return resp;
     }
-    let key = format!("/model_requests/{}", id);
+    let model_uid = match resolve_model_uid(&st.store, &id).await {
+        Ok(Some(uid)) => uid,
+        Ok(None) => return (StatusCode::NOT_FOUND, "model/deployment not found").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
-    let (data, _) = match st.store.get(&key).await {
-        Ok(Some(kv)) => kv,
-        Ok(None) => return (StatusCode::NOT_FOUND, "request not found").into_response(),
+    let dep_key = format!("/deployments/{model_uid}");
+    let (mut dep, _) = match st.store.get(&dep_key).await {
+        Ok(Some((data, rev))) => match serde_json::from_slice::<ModelDeployment>(&data) {
+            Ok(d) => (d, rev),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("deserialization error: {e}"),
+                )
+                    .into_response();
+            }
+        },
+        Ok(None) => return (StatusCode::NOT_FOUND, "deployment not found").into_response(),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("etcd error: {}", e),
+                format!("etcd error: {e}"),
             )
                 .into_response();
         }
     };
 
-    let mut req: ModelRequest = match serde_json::from_slice(&data) {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("deserialization error: {}", e),
-            )
-                .into_response();
-        }
-    };
-
-    req.status = ModelRequestStatus::Unloading;
-    let val = match serde_json::to_vec(&req) {
-        Ok(val) => val,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {}", e),
-            )
-                .into_response();
-        }
-    };
-    if let Err(e) = st.store.put(&key, val, None).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("etcd error: {}", e),
-        )
-            .into_response();
+    dep.desired_state = DesiredState::Stopped;
+    dep.version = dep.version.saturating_add(1);
+    dep.updated_at_ms = now_ms();
+    if let Err(e) = put_json(&st.store, &dep_key, &dep).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
     (
         StatusCode::OK,
-        Json(json!({"status": "unloading_triggered"})),
+        Json(json!({
+            "status": "stop_triggered",
+            "model_uid": model_uid,
+            "path": "deployments",
+        })),
     )
         .into_response()
 }
@@ -965,40 +1019,111 @@ pub async fn admin_load_model(
     if let Some(resp) = require_role(&st.metrics, &ctx, Role::Operator) {
         return resp;
     }
-    let request_id = Uuid::new_v4().to_string();
-    let model_req = ModelRequest {
-        id: request_id.clone(),
-        request: req,
-        status: ModelRequestStatus::Pending,
-        created_at_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
-    };
 
-    let key = format!("/model_requests/{}", model_req.id);
-    let val = match serde_json::to_vec(&model_req) {
-        Ok(val) => val,
+    let now = now_ms();
+    let model_uid = req.model_uid.clone();
+    let gpu_affinity = req
+        .gpu_indices
+        .clone()
+        .or_else(|| req.gpu_index.map(|i| vec![i]));
+
+    let spec_key = format!("/models/{model_uid}/spec");
+    let spec = match st.store.get(&spec_key).await {
+        Ok(Some((data, _))) => match serde_json::from_slice::<ModelSpec>(&data) {
+            Ok(mut existing) => {
+                existing.model_name = req.model_name.clone();
+                existing.engine_type = req.engine_type.clone();
+                existing.docker_image = req.docker_image.clone();
+                existing.config = req.config.clone();
+                existing.updated_at_ms = now;
+                existing
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("deserialization error: {e}"),
+                )
+                    .into_response();
+            }
+        },
+        Ok(None) => ModelSpec {
+            model_uid: model_uid.clone(),
+            model_name: req.model_name.clone(),
+            model_source: infer_model_source(&req.model_name, None),
+            model_path: None,
+            engine_type: req.engine_type.clone(),
+            docker_image: req.docker_image.clone(),
+            config: req.config.clone(),
+            labels: Default::default(),
+            created_at_ms: now,
+            updated_at_ms: now,
+            created_by: Some(ctx.principal.clone()),
+        },
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {}", e),
+                format!("etcd error: {e}"),
             )
                 .into_response();
         }
     };
-
-    if let Err(e) = st.store.put(&key, val, None).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("etcd error: {}", e),
-        )
-            .into_response();
+    if let Err(e) = put_json(&st.store, &spec_key, &spec).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
+    let dep_key = format!("/deployments/{model_uid}");
+    let deployment = match st.store.get(&dep_key).await {
+        Ok(Some((data, _))) => match serde_json::from_slice::<ModelDeployment>(&data) {
+            Ok(mut dep) => {
+                dep.desired_state = DesiredState::Running;
+                dep.replicas = req.replicas.max(1);
+                dep.min_replicas = req.min_replicas;
+                dep.max_replicas = req.max_replicas;
+                dep.node_affinity = req.node_id.clone();
+                dep.gpu_affinity = gpu_affinity;
+                dep.config_overrides = req.config.clone();
+                dep.version = dep.version.saturating_add(1);
+                dep.updated_at_ms = now;
+                dep
+            }
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("deserialization error: {e}"),
+                )
+                    .into_response();
+            }
+        },
+        Ok(None) => ModelDeployment {
+            model_uid: model_uid.clone(),
+            desired_state: DesiredState::Running,
+            replicas: req.replicas.max(1),
+            min_replicas: req.min_replicas,
+            max_replicas: req.max_replicas,
+            node_affinity: req.node_id.clone(),
+            gpu_affinity,
+            config_overrides: req.config.clone(),
+            version: 1,
+            updated_at_ms: now,
+        },
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("etcd error: {e}"),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = put_json(&st.store, &dep_key, &deployment).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+
+    // Compat: callers that still expect request_id get model_uid back.
     let body = json!({
-        "request_id": request_id,
-        "status": "pending"
+        "request_id": model_uid,
+        "model_uid": deployment.model_uid,
+        "status": "running_desired",
+        "path": "deployments",
     });
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -1017,57 +1142,53 @@ pub async fn admin_scale_request(
     if let Some(resp) = require_role(&st.metrics, &ctx, Role::Operator) {
         return resp;
     }
-    let key = format!("/model_requests/{}", id);
+    let model_uid = match resolve_model_uid(&st.store, &id).await {
+        Ok(Some(uid)) => uid,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, "model/deployment not found").into_response();
+        }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
 
-    let (data, _) = match st.store.get(&key).await {
-        Ok(Some(kv)) => kv,
-        Ok(None) => return (StatusCode::NOT_FOUND, "request not found").into_response(),
+    let dep_key = format!("/deployments/{model_uid}");
+    let mut dep = match st.store.get(&dep_key).await {
+        Ok(Some((data, _))) => match serde_json::from_slice::<ModelDeployment>(&data) {
+            Ok(d) => d,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("deserialization error: {e}"),
+                )
+                    .into_response();
+            }
+        },
+        Ok(None) => return (StatusCode::NOT_FOUND, "deployment not found").into_response(),
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("etcd error: {}", e),
+                format!("etcd error: {e}"),
             )
                 .into_response();
         }
     };
 
-    let mut req: ModelRequest = match serde_json::from_slice(&data) {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("deserialization error: {}", e),
-            )
-                .into_response();
-        }
-    };
-
-    let old = req.request.replicas;
-    req.request.replicas = body.replicas;
-    let val = match serde_json::to_vec(&req) {
-        Ok(val) => val,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("serialization error: {}", e),
-            )
-                .into_response();
-        }
-    };
-    if let Err(e) = st.store.put(&key, val, None).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("etcd error: {}", e),
-        )
-            .into_response();
+    let old = dep.replicas;
+    dep.replicas = body.replicas.max(1);
+    dep.desired_state = DesiredState::Running;
+    dep.version = dep.version.saturating_add(1);
+    dep.updated_at_ms = now_ms();
+    if let Err(e) = put_json(&st.store, &dep_key, &dep).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
     (
         StatusCode::OK,
         Json(json!({
             "request_id": id,
+            "model_uid": model_uid,
             "old_replicas": old,
-            "new_replicas": body.replicas,
+            "new_replicas": dep.replicas,
+            "path": "deployments",
         })),
     )
         .into_response()

@@ -83,27 +83,27 @@
 
 ---
 
-## Sprint 3 — 收敛与性能
+## Sprint 3 — 收敛与性能（进行中）
 
-### Day 11：B4 placement version 单调
+### Day 11：B4 placement version 单调 ✅
 
-CAS 写 plan 时 `version = old.version + 1`；新增/使用 `updated_at_ms` 存时间；扫掉所有 `version: now_ms()` 写入点（planner + reconcile）。
+CAS 写 plan 时 `version = old.version + 1`；`updated_at_ms` 存墙钟；grace/cooldown 改读 `effective_updated_at_ms()`。
 
-### Day 12–13：B5 声明式单路径
+### Day 12–13：B5 声明式单路径 ✅
 
-API/BFF/CLI 只写 `/deployments/`；Scheduler 去掉 `/model_requests/` watch 与 fallback；保留一次性迁移说明（旧 key → deployment）。验收：集群内无新写入 `/model_requests/`。
+Gateway/BFF load·scale·stop 写 `/deployments/`（+ spec）；Scheduler 只 watch `/deployments/`；reconcile 去掉 model_requests fallback。迁移说明：[`migrate_deployments.md`](./migrate_deployments.md)。
 
-### Day 14：C1 header-driven 流式
+### Day 14：C1 header-driven 流式 ✅
 
-Gateway 解析 model 注入 `X-Nebula-Model-Uid`；Router 按 header 选路并流式转发 body（保留 body 上限作防线）。可与 B5 后半并行若人手够。
+Gateway 轻量 peek `model` → 注入 `x-nebula-model`；Router 优先 header 选路，model 字段字节级改写（无完整 JSON DOM）。
 
 ### Day 15：C2 / C3 / C4
 
-| 项 | 内容 |
-|----|------|
-| C2 | Node：锁内快照/提交，锁外下载/启动/health/scrape（可与 A0 若未做完则本轮收尾） |
-| C3 | 节点启动创建 lease + keepalive；status/endpoints 共用 |
-| C4 | 补多副本/缩容/Drain 集成测试；`cargo test --workspace` 绿；architecture/optimization 与代码一致 |
+| 项 | 状态 | 内容 |
+|----|------|------|
+| C2 | 部分 | heartbeat 已 `try_lock` 跳过忙锁；reconcile 持锁下沉仍待拆（锁外 download/start） |
+| C3 | ✅ | Node 启动 `grant_lease` + keepalive；status/endpoints 共用 `put_with_lease` |
+| C4 | 进行中 | 单测覆盖 B4/C1；文档已同步；workspace 测试跟进 |
 
 **Sprint 3 出口：** 声明式单路径；大 body 不双层缓冲；lease/锁无显著浪费。
 

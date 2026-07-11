@@ -92,10 +92,15 @@ pub async fn register_endpoint(
     store: &EtcdMetaStore,
     info: &EndpointInfo,
     ttl_ms: u64,
+    lease_id: Option<i64>,
 ) -> anyhow::Result<()> {
     let key = format!("/endpoints/{}/{}", info.model_uid, info.replica_id);
     let bytes = serde_json::to_vec(info)?;
-    let _ = store.put(&key, bytes, Some(ttl_ms)).await?;
+    if let Some(lease_id) = lease_id {
+        let _ = store.put_with_lease(&key, bytes, lease_id).await?;
+    } else {
+        let _ = store.put(&key, bytes, Some(ttl_ms)).await?;
+    }
     Ok(())
 }
 
@@ -119,6 +124,7 @@ pub async fn heartbeat_loop(
     running: Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
     xtrace: Option<xtrace_client::Client>,
     shared_metrics: SharedNodeMetrics,
+    lease_id: Option<i64>,
 ) {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
@@ -193,7 +199,10 @@ pub async fn heartbeat_loop(
             }
         };
 
-        if let Err(e) = store.put(&key, bytes, Some(ttl_ms)).await {
+        if let Err(e) = match lease_id {
+            Some(id) => store.put_with_lease(&key, bytes, id).await.map(|_| ()),
+            None => store.put(&key, bytes, Some(ttl_ms)).await.map(|_| ()),
+        } {
             tracing::warn!(error=%e, "failed to write heartbeat");
         }
 
@@ -201,7 +210,7 @@ pub async fn heartbeat_loop(
         if let Ok(mut guard) = endpoint.try_lock() {
             for info in guard.values_mut() {
                 info.last_heartbeat_ms = now_ms();
-                if let Err(e) = register_endpoint(&store, info, ttl_ms).await {
+                if let Err(e) = register_endpoint(&store, info, ttl_ms, lease_id).await {
                     tracing::warn!(error=%e, "failed to refresh endpoint");
                 }
             }
@@ -260,7 +269,7 @@ pub async fn heartbeat_loop(
                         if let Some(info) = ep_guard.get_mut(&rkey) {
                             if info.status == EndpointStatus::Unhealthy {
                                 info.status = EndpointStatus::Ready;
-                                let _ = register_endpoint(&store, info, ttl_ms).await;
+                                let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
                                 tracing::info!(
                                     model_uid=%rm.model_uid,
                                     replica_id=rm.replica_id,
@@ -347,7 +356,7 @@ pub async fn heartbeat_loop(
                         let mut ep_guard = endpoint.lock().await;
                         if let Some(info) = ep_guard.get_mut(&rkey) {
                             info.status = EndpointStatus::Unhealthy;
-                            let _ = register_endpoint(&store, info, ttl_ms).await;
+                            let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
                             tracing::warn!(
                                 model_uid=%rm.model_uid,
                                 replica_id=rm.replica_id,
@@ -401,7 +410,7 @@ pub async fn heartbeat_loop(
                                 let mut ep_guard = endpoint.lock().await;
                                 if let Some(info) = ep_guard.get_mut(&rkey) {
                                     info.status = EndpointStatus::Failed;
-                                    let _ = register_endpoint(&store, info, ttl_ms).await;
+                                    let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
                                 }
                                 if let Some(request_id) = rm.request_id.as_deref() {
                                     mark_request_failed(&store, request_id, reason).await;

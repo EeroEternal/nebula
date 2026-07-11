@@ -14,8 +14,8 @@ use crate::args::XtraceAuthMode;
 use crate::auth::{require_role, AuthContext, Role};
 use crate::state::AppState;
 use nebula_common::{
-    ClusterStatus, EndpointInfo, EndpointStats, ModelLoadRequest, ModelRequest, ModelRequestStatus,
-    NodeStatus, PlacementPlan,
+    ClusterStatus, EndpointInfo, EndpointStats, ModelLoadRequest, ModelRequest, NodeStatus,
+    PlacementPlan,
 };
 use nebula_meta::MetaStore;
 
@@ -509,42 +509,64 @@ async fn load_model_with_request(st: AppState, req: Option<ModelLoadRequest>) ->
         }
     };
 
-    let request_id = Uuid::new_v4().to_string();
-    let model_req = ModelRequest {
-        id: request_id.clone(),
-        request: req,
-        status: ModelRequestStatus::Pending,
-        created_at_ms: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64,
+    let model_uid = req.model_uid.clone();
+    let replicas = req.replicas.max(1);
+    let config = req.config.clone();
+    let node_id = req.node_id.clone();
+    let gpu_indices = req
+        .gpu_indices
+        .clone()
+        .or_else(|| req.gpu_index.map(|i| vec![i]));
+
+    let create = crate::service::CreateModelRequest {
+        model_name: req.model_name,
+        model_uid: Some(model_uid.clone()),
+        model_source: None,
+        model_path: None,
+        engine_type: req.engine_type,
+        docker_image: req.docker_image,
+        config: config.clone(),
+        labels: None,
+        auto_start: Some(true),
+        replicas: Some(replicas),
+        node_id: node_id.clone(),
+        gpu_indices: gpu_indices.clone(),
     };
 
-    let val = match serde_json::to_vec(&model_req) {
-        Ok(val) => val,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "serialization_error",
-                &format!("serialization error: {}", e),
-            )
+    match crate::service::create_model(&*st.store, "legacy-load".into(), create).await {
+        Ok(spec) => (
+            StatusCode::OK,
+            Json(json!({
+                "request_id": spec.model_uid,
+                "model_uid": spec.model_uid,
+                "status": "running_desired",
+                "path": "deployments",
+            })),
+        )
+            .into_response(),
+        Err(crate::service::ServiceError::Conflict(_)) => {
+            let start = crate::service::StartModelRequest {
+                replicas: Some(replicas),
+                config_overrides: config,
+                node_id,
+                gpu_indices,
+            };
+            match crate::service::start_model(&*st.store, &model_uid, start).await {
+                Ok(dep) => (
+                    StatusCode::OK,
+                    Json(json!({
+                        "request_id": dep.model_uid,
+                        "model_uid": dep.model_uid,
+                        "status": "running_desired",
+                        "path": "deployments",
+                    })),
+                )
+                    .into_response(),
+                Err(e) => e.into_response(),
+            }
         }
-    };
-
-    let key = format!("/model_requests/{}", model_req.id);
-    if let Err(e) = st.store.put(&key, val, None).await {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "etcd_error",
-            &format!("etcd error: {}", e),
-        );
+        Err(e) => e.into_response(),
     }
-
-    (
-        StatusCode::OK,
-        Json(json!({"request_id": request_id, "status": "pending"})),
-    )
-        .into_response()
 }
 
 /// Generic helper: proxy a GET request to xtrace, forwarding query string.
@@ -723,55 +745,62 @@ async fn unload_model_inner(st: AppState, id: String) -> Response {
         );
     }
 
-    let key = format!("/model_requests/{}", id);
-    let (data, _) = match st.store.get(&key).await {
-        Ok(Some(kv)) => kv,
-        Ok(None) => return error_response(StatusCode::NOT_FOUND, "not_found", "request not found"),
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "etcd_error",
-                &format!("etcd error: {}", e),
-            )
+    // Prefer treating id as model_uid (deployments path). Fall back to legacy request id.
+    let model_uid = {
+        let dep_key = format!("/deployments/{id}");
+        match st.store.get(&dep_key).await {
+            Ok(Some(_)) => id.clone(),
+            Ok(None) => {
+                let req_key = format!("/model_requests/{id}");
+                match st.store.get(&req_key).await {
+                    Ok(Some((data, _))) => match serde_json::from_slice::<ModelRequest>(&data) {
+                        Ok(r) => r.request.model_uid,
+                        Err(e) => {
+                            return error_response(
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "deserialization_error",
+                                &format!("deserialization error: {e}"),
+                            )
+                        }
+                    },
+                    Ok(None) => {
+                        return error_response(
+                            StatusCode::NOT_FOUND,
+                            "not_found",
+                            "model/deployment not found",
+                        )
+                    }
+                    Err(e) => {
+                        return error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "etcd_error",
+                            &format!("etcd error: {e}"),
+                        )
+                    }
+                }
+            }
+            Err(e) => {
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "etcd_error",
+                    &format!("etcd error: {e}"),
+                )
+            }
         }
     };
 
-    let mut req: ModelRequest = match serde_json::from_slice(&data) {
-        Ok(r) => r,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "deserialization_error",
-                &format!("deserialization error: {}", e),
-            )
-        }
-    };
-
-    req.status = ModelRequestStatus::Unloading;
-    let val = match serde_json::to_vec(&req) {
-        Ok(val) => val,
-        Err(e) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "serialization_error",
-                &format!("serialization error: {}", e),
-            )
-        }
-    };
-
-    if let Err(e) = st.store.put(&key, val, None).await {
-        return error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "etcd_error",
-            &format!("etcd error: {}", e),
-        );
+    match crate::service::stop_model(&*st.store, &model_uid).await {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(json!({
+                "status": "stop_triggered",
+                "model_uid": model_uid,
+                "path": "deployments",
+            })),
+        )
+            .into_response(),
+        Err(e) => e.into_response(),
     }
-
-    (
-        StatusCode::OK,
-        Json(json!({"status": "unloading_triggered"})),
-    )
-        .into_response()
 }
 
 pub async fn audit_logs(

@@ -113,32 +113,26 @@ pub async fn proxy_chat_completions(
                     }
                 };
 
-            let raw_model =
-                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                    json.get("model")
-                        .and_then(|m| m.as_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| st.model_uid.clone())
-                } else {
-                    st.model_uid.clone()
-                };
+            // Prefer Gateway-injected header (C1); fall back to lightweight peek.
+            let raw_model = headers
+                .get(nebula_common::HEADER_NEBULA_MODEL_UID)
+                .or_else(|| headers.get(nebula_common::HEADER_NEBULA_MODEL))
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .or_else(|| nebula_common::peek_json_model_field(&body_bytes))
+                .unwrap_or_else(|| st.model_uid.clone());
 
-            // Resolve model_name → model_uid (or pass through if already a uid)
             let model_uid = st.router.resolve_model(&raw_model);
 
-            // Rewrite the body's "model" field using serde_json::Value
-            let body_bytes = {
-                let model_name = st
-                    .router
-                    .get_model_name(&model_uid)
-                    .unwrap_or_else(|| raw_model.clone());
-                if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                    json["model"] = serde_json::Value::String(model_name);
-                    Bytes::from(serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()))
-                } else {
-                    body_bytes
-                }
-            };
+            // Rewrite only the model string for the engine — no full JSON DOM.
+            let model_name = st
+                .router
+                .get_model_name(&model_uid)
+                .unwrap_or_else(|| raw_model.clone());
+            let body_bytes =
+                nebula_common::rewrite_json_model_field(&body_bytes, &model_name)
+                    .map(Bytes::from)
+                    .unwrap_or(body_bytes);
 
             (reqwest::Method::POST, Some(body_bytes), model_uid)
         }
