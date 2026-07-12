@@ -14,7 +14,7 @@ Release date: 2026-02-15
 - App bootstrap integration:
   - `frontend/src/main.tsx` wrapped with `I18nProvider`
 - QA checklist document:
-  - `docs/i18n_acceptance_checklist.md`
+  - `docs/dev/i18n_checklist.md`
 
 ## Changed
 - Localized major frontend surfaces, including:

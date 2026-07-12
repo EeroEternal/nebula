@@ -1,16 +1,10 @@
-# Gateway 文档索引
+# Gateway 文档
 
-本目录用于集中维护 Nebula Gateway 相关方案文档，范围限定为内部调度语义（`gateway + router + etcd`），不引入 provider-domain 抽象。
+范围：Gateway + Router 入口边界（etcd placement/endpoint/stats），不引入 provider pool。
 
-## 目录
+- [P0 执行 Runbook](./p0_execution.md) — 仍可用
+- [面板 API 契约](./panel_api_contract.md)
+- [可观测性](../observability.md)
+- [优化方案（归档）](./optimization_plan.md) — header/缓冲等已落地，见 [`../../arch/architecture.md`](../../arch/architecture.md)
 
-- [Gateway 优化方案](./optimization_plan.md)
-- [Gateway P0 执行 Runbook](./p0_execution.md)
-- [Gateway 可观测性面板规范](../observability.md)（统一可观测文档）
-- [Gateway 面板 API 契约](./panel_api_contract.md)
-
-## 维护原则
-
-1. 每个改动必须绑定可观测指标。
-2. 每个阶段必须有可执行验收用例。
-3. 文档变更应与代码变更同 PR 更新。
+边界与下一步：[`../api_ownership.md`](../api_ownership.md)、[`../../arch/optimization.md`](../../arch/optimization.md)。

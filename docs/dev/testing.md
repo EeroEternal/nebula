@@ -1,5 +1,7 @@
 # Nebula 端到端测试记录
 
+> **历史快照（2025-02-08）。** 不代表当前 HA / 多副本能力。现行架构与计划见 [`../arch/architecture.md`](../arch/architecture.md)、[`../arch/optimization.md`](../arch/optimization.md)。
+
 ## 测试日期
 
 2025-02-08

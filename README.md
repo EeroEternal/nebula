@@ -58,4 +58,4 @@ curl -N http://127.0.0.1:8080/v1/responses \
 - Responses streaming **不使用** `event:` 行。
 - Responses streaming **不使用** `data: [DONE]` 哨兵。
 
-全量单测：`cargo test --workspace`。架构与优化计划见 [docs/arch/architecture.md](docs/arch/architecture.md)、[docs/arch/optimization.md](docs/arch/optimization.md)。
+全量单测：`cargo test --workspace`。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)；下一步计划见 [docs/arch/optimization.md](docs/arch/optimization.md)。

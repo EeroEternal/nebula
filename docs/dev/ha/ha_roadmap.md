@@ -1,11 +1,11 @@
 # Nebula HA 执行路线图
 
-> 状态：执行中（与工程成熟度清单对齐）
-> 更新时间：2026-07-10
-> 主清单：[`../engineering_maturity_checklist.md`](../engineering_maturity_checklist.md)
-> 原则：[`../absorb_powerllm_engineering_guidance.md`](../absorb_powerllm_engineering_guidance.md)
+> 状态：Phase A–D 主体完成；**生产 etcd 三节点迁移暂缓**（2026-07-11 决策）  
+> 更新时间：2026-07-11  
+> 原则与架构：[`../../arch/architecture.md`](../../arch/architecture.md)  
+> 真机报告：[`report-20260711.md`](./report-20260711.md)
 
-本文件从「规划中暂不改代码」转为**执行清单**。控制面正确性（选主 / fencing / CI）优先于基础设施扩容（etcd 三节点）；顺序与旧稿 Phase 1→3 对调。
+Scheduler 选主 / fencing / Drain、接入多副本真机演练已完成。生产 `nebula-etcd` 保持单节点即可；三节点能力已在旁路集群验证，需要生产 SLA 时再迁。
 
 ---
 
@@ -15,13 +15,19 @@
 
 ---
 
-## 2. 当前状态
+## 2. 当前状态（2026-07-11）
 
 - 多机部署基础：有
-- Scheduler 多副本选主 + fencing：无（Wave 0 主线）
-- Drain 闭环：弱（Draining 近似硬切）
-- PR CI 跑 HA/契约测试：无
-- etcd / gateway / bff / router 生产多副本：弱（Wave 2 / P1.4）
+- Scheduler 多副本选主 + fencing：✅（Wave D1）
+- Drain 闭环：✅（Wave A2 / D2）
+- 控制面正确性（多副本 / 缩容 / `/stats/` / deployments）：✅
+- etcd / gateway / bff / router 多副本拓扑：✅（`docker-compose.ha.yml` + `deploy/ha/`；见 [runbook-phase-c.md](./runbook-phase-c.md)）
+- 多 etcd endpoint 连接串：✅（`ETCD_ENDPOINT` 逗号分隔）
+- PR CI 全量 gate：✅（`cargo test --workspace`）
+- Phase D 真机演练报告：✅（[report-20260711.md](./report-20260711.md)）
+- 生产 etcd 三节点：⏸ **暂缓**（旁路 3 节点已验证；不阻塞当前排期）
+
+下一优先：按 [`optimization.md`](../../arch/optimization.md) 开 N3/N4（业务驱动）；etcd 迁移不排期。
 
 ---
 
@@ -40,9 +46,9 @@
 
 ## 4. 执行阶段（按顺序）
 
-### Phase A — 调度正确性（= 清单 Wave 0 的 HA 部分）
+### Phase A — 调度正确性（已完成）
 
-对应清单：`W0.1`–`W0.6`。
+对应已关闭的选主 / fencing / CAS 工作。
 
 1. `nebula-meta`：election / lease API，`leader_epoch`
 2. `nebula-scheduler`：leader-only 写；follower healthz 503
@@ -51,22 +57,18 @@
 
 **验收**：双实例单 leader；切换 &lt;10s；旧主写被拒；CI 绿。
 
-### Phase B — Drain 与请求生命周期
-
-对应清单：`W0.7`、`P0.4`。
+### Phase B — Drain 与请求生命周期（已完成）
 
 1. Draining：不接新流量；in-flight 完成再停引擎、删 endpoint
 2. Abort / disconnect：Gateway → Router → 断引擎；metrics 口径正确
 
 **验收**：缩容与取消不误伤成功率口径；无孤儿 endpoint。
 
-### Phase C — 接入与元数据层多副本（原 Phase 1–2，延后）
-
-对应清单：`P1.4`。
+### Phase C — 接入与元数据层多副本（= optimization N1，当前主线）
 
 1. etcd 3 节点；组件改连集群 endpoint
 2. gateway / bff / router 至少 2 副本 + LB 健康检查
-3. postgres 主备或托管（可与本阶段并行，不阻塞 A/B）
+3. postgres 主备或托管（可与本阶段并行，不阻塞）
 
 **验收**：杀单一 etcd/接入副本，控制面与推理仍可用。
 
@@ -101,19 +103,21 @@
 
 ---
 
-## 7. 工单拆分（可直接建 issue）
+## 7. 工单拆分（剩余）
 
-| 优先级 | 工单 | 清单 ID |
-|--------|------|---------|
-| P0 | meta election + scheduler leader-only + healthz 503 | W0.1, W0.2 |
-| P0 | placement epoch/CAS + node 拒写 + 脑裂单测 | W0.3, W0.4, W0.5 |
-| P0 | GitHub Actions：`cargo test` gate | W0.6 |
-| P0 | Drain 闭环 | W0.7 |
-| P0 | Abort 传播 + CAS 清零 + API 边界 | P0.4, P0.5, P0.7 |
-| P1 | etcd 3 + 接入多副本 + 演练报告 | P1.4, Phase D |
+Phase A/B（选主、fencing、Drain、abort、CAS）已完成。当前只跟：
+
+| 优先级 | 工单 | 映射 | 状态 |
+|--------|------|------|------|
+| P0 | etcd 3 + gateway/bff/router 多副本 + LB | optimization **N1** / Phase C | 拓扑 ✅；真机 gateway/router×2 ✅ |
+| P0 | HA 演练报告 `report-*.md` | Phase D | ✅ [report-20260711.md](./report-20260711.md) |
+| — | 生产 etcd 迁 3 节点 + 客户端多 endpoint | Phase C 收尾 | ⏸ 暂缓 |
+| P1 | CI/工程质量（BFF 去重等） | optimization **N2** | ✅ |
+
+已关闭项勿再开 issue 重复做。详见 [`../../arch/optimization.md`](../../arch/optimization.md)。
 
 ---
 
 ## 8. 维护
 
-每完成一阶段更新：实施状态、风险与回滚、验收结果（或链接到 `report-*.md`）。与 `engineering_maturity_checklist.md` 的 `[x]` 同步勾选。
+每完成一阶段更新：实施状态、风险与回滚、验收结果（或链接到 `report-*.md`）。进度与 [`../../arch/optimization.md`](../../arch/optimization.md) N1 同步。

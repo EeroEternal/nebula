@@ -1,14 +1,15 @@
-# HA 文档目录
+# HA 文档
 
-本目录用于沉淀 Nebula 高可用（HA）相关设计、方案与实施记录。
+| 文档 | 用途 |
+|------|------|
+| [ha_roadmap.md](./ha_roadmap.md) | 执行清单与 DoD |
+| [runbook-phase-c.md](./runbook-phase-c.md) | compose 启停与演练步骤 |
+| [report-20260711.md](./report-20260711.md) | **真机 Phase D 报告**（8×5090） |
+| [report-template.md](./report-template.md) | 后续报告模板 |
+| [optimization.md](../../arch/optimization.md) | 全项目下一步（含 N1 收尾） |
+| [architecture.md](../../arch/architecture.md) | 架构原则 |
 
-## 当前文档
-- [HA 执行路线图](./ha_roadmap.md)
-- [工程成熟度优化清单](../engineering_maturity_checklist.md)（总执行顺序，含 Wave 0）
-- [吸收 PowerLLM 工程指导](../absorb_powerllm_engineering_guidance.md)
+约定：`report-*.md` 放演练报告；`runbook-*.md` 放应急手册。  
+仓库：`docker-compose.ha.yml`、`deploy/ha/Caddyfile.*`、`scripts/phase_d_ha_drill.sh`。
 
-## 目录约定（建议）
-- `ha_roadmap.md`：总体路线图与阶段目标
-- `phase-*.md`：各阶段实施方案
-- `runbook-*.md`：故障演练与应急手册
-- `report-*.md`：演练/验收报告
+**状态：** 接入/调度 HA 真机 PASS；生产 etcd 三节点**暂缓**（旁路已验证）。

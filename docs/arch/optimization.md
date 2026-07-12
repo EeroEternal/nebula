@@ -1,74 +1,147 @@
-# Nebula 工程优化计划
+# Nebula 下一步优化计划
 
-> 合并原 `docs/arch_optimization.md` 与 `docs/optimization_plan.md`（2026-07）。
-> 架构方向与生命周期 Wave 见 [`architecture.md`](./architecture.md)；HA 见 [`../dev/ha/ha_roadmap.md`](../dev/ha/ha_roadmap.md)。
+> 更新：2026-07-11（可观测 N4-Obs 为主线）。  
+> 已完成项摘要见 [`architecture.md`](./architecture.md) §6–7；可观测设计源见 [`../dev/observability.md`](../dev/observability.md)。
 
-## 总体判断
+## 当前进展（一句话）
 
-控制面主链路、Wave A–C、P0 全项与 P1-1/P1-3 已落地。架构方向无需调整。当前优先 Wave D（HA 无状态多副本）与 P2 可维护性。
+M1 / N2 / N1 HA 主体已闭环。**当前主线：可观测 N4-Obs**——全链路 **xtrace + Prometheus 双写** + **JSON stdout → Loki** 日志路径。生产 etcd 三节点暂缓；N3 按需。
 
-| 领域 | 当前状态 | 下一步 |
-|------|----------|--------|
-| Gateway | 鉴权、审计、metrics、body 上限、BFF 代理、SSE abort、`x-nebula-model` | — |
-| Router | 策略/熔断/过载、revision watch、plan_version、header 选路、watch `/stats/` | — |
-| Scheduler | reconcile + CAS + election、缩容、逻辑 version、deployments、list `/stats/` | — |
-| Node | 多副本、Drain、预算、lease、锁外 I/O、写 `/stats/` + lease | — |
-| Observability | 各组件 `init_tracing`；BFF session / 推理 token / OBSERVE_TOKEN 分离 | 面板口径 |
+## 优先级总表
 
-## 已落地（摘要）
+| 批次 | ID | 主题 | 状态 | 说明 |
+|------|----|------|------|------|
+| **N2** | Q1–Q4 | 工程质量 | ✅ | BFF 去重、HTTP client、observe、CI |
+| **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd 暂缓 |
+| **N4-Obs** | O1–O4 | **可观测** | 🟡 **当前主线** | 双写路径 + Loki 日志（本文 §N4-Obs） |
+| **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP；EngineShim |
+| **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能 |
 
-Gateway：共享 auth（fail-closed）、`/metrics`、body 上限、trace、部分 BFF 代理、断连 abort、C1 header 注入。  
-Router：策略插件、Ready/`plan_version` 过滤、affinity、重试/熔断/admission、TTFT/E2E、快照 revision watch、etcd `/stats/` watch。  
-Scheduler：周期 reconcile、placement CAS、逻辑单调 version、声明式 `/deployments/`、缩容截断、etcd `/stats/` 扩缩容信号。  
-Node：多副本状态键、Drain 周期推进、GPU/健康/预算重启、lease 复用、锁外 download/start/health、`/stats/` put_with_lease。
+原则：不阻塞日常推理；观测先于运维硬化；etcd 三节点仍暂缓。
 
-## P0
+---
 
-**P0-1 鉴权 fail-closed（已完成）**  
-未配置 token 则拒绝；仅 `NEBULA_AUTH_DISABLED` / `NEBULA_DEV_AUTH_DISABLED` 免鉴权。
+## 下一阶段顺序
 
-**P0-2 stats 控制面契约（已完成）**  
-Node 写 etcd `/stats/{model_uid}/{replica_id}`（TTL/lease）；Router watch `/stats/`；Scheduler list `/stats/` 做扩缩容；xtrace/Prometheus 只做历史与面板。详见 [`../dev/details/stats.md`](../dev/details/stats.md)。
+```
+① N4-Obs（进行中）  双写 + JSON/Loki + SLO 口径文档
+② 运维硬化（可选）  unit/env 固化、HA 拓扑脚本化
+③ N3 / 产品 N4（有需求再开）
+④ 生产 etcd 三节点（暂缓）
+```
 
-**P0-3 placement 全路径 CAS（已完成）**  
-生产路径无裸 `put`；`next_placement_version` 逻辑单调；`updated_at_ms` 存墙钟。
+---
 
-**P0-4 正确性三件套（已完成，architecture Wave A）**  
-同节点多副本、缩容截断 assignment、Node 周期 reconcile 推进 Drain。
+## N4-Obs — 全链路可观测（当前主线）
 
-**P0-5 生命周期闭环（已完成，architecture Wave B）**  
-进程树清理、恢复预算 + Failed、取消传播契约脚本。
+设计源：[`../dev/observability.md`](../dev/observability.md)、[`../dev/xtrace_requirements.md`](../dev/xtrace_requirements.md)、[`../dev/loki.md`](../dev/loki.md)。
 
-**P0-6 header-driven routing（已完成）**  
-Gateway 注入 `x-nebula-model`；Router header 优先选路 + 字节级 model 改写。
+### 目标架构（落地）
 
-## P1 边界与一致性
+```text
+  Gateway / Router / Node / Scheduler
+           │
+           ├─ OTLP traces ──► xtrace (nebula-observe)     # LLM 语义 / 链路
+           ├─ MetricPoint batch ──► xtrace                # 与 /metrics 同 emit 点
+           ├─ Prometheus Counter/Histogram ──► /metrics   # 客户 scrape
+           └─ JSON logs (stdout) ──► Promtail/Vector ──► Loki
 
-**P1-1 组件 owner（已完成）**  
-约定见 [`../dev/api_ownership.md`](../dev/api_ownership.md)。推理热路径 Gateway→Router；控制台写路径只走 BFF；禁止双实现。
+  关联：request_id + W3C traceparent（Gateway → Router）
+```
 
-| 组件 | Owner |
-|------|-------|
-| Gateway | 外部协议、鉴权、审计、错误映射、请求上下文 |
-| Router | endpoint 选择、重试、熔断、过载、上游代理 |
-| BFF | 控制台 API、用户/session、模型管理视图 |
-| UniGateway | 可选协议库，不拥有集群调度语义 |
+**禁止**：xtrace→VM/Loki 桥；应用直连 Loki；高基数 label（user_id/request_id）进 Prometheus。
 
-**P1-2 声明式单路径（已完成）**  
-API/BFF 写 `/deployments/`；Scheduler 只 watch deployments。迁移说明见 [`../dev/migrate_deployments.md`](../dev/migrate_deployments.md)。
+### 执行清单
 
-**P1-3 telemetry / auth 初始化（已完成）**  
-BFF 使用 `nebula_common::telemetry::init_tracing`（与 Gateway/Router/Scheduler/Node 一致）。鉴权面分离：推理 `NEBULA_AUTH_TOKENS`、控制台 BFF session、观测 `OBSERVE_TOKEN` / `OBSERVE_AUTH_MODE`。
+| ID | 项 | 状态 | 落点 |
+|----|----|------|------|
+| **O1** | 公共双写发射器 | ✅ | `nebula_common::DualWriteEmitter`（`dual_write.rs`） |
+| **O2** | Gateway 热路径双写 | ✅ | `/metrics` 原子计数 + xtrace `nebula_gateway_*` outcome/e2e |
+| **O3** | Router 热路径双写 | ✅ | latency/TTFT/outcome → Prometheus + xtrace `nebula_router_*` |
+| **O4** | Node GPU/引擎 → xtrace | ✅（既有） | heartbeat `push_metrics`；etcd `/stats/` 仍为控制面热路径 |
+| **O5** | OTLP + W3C 传播 | ✅ | `init_tracing` 设 `TraceContextPropagator`；Router `inject_trace_context` |
+| **O6** | JSON 日志（Loki 路径） | ✅ | `NEBULA_LOG_FORMAT=json`；span 带 `request_id`/`service` |
+| **O7** | Loki 采集文档 + 示例 | ✅ | [`../dev/loki.md`](../dev/loki.md)、`deploy/observe/promtail-nebula.yaml` |
+| **O8** | SLO / 告警草案 | ⏳ | 5xx、retry、circuit、timeout 阈值（见 observability §5.3）进 runbook |
+| **O9** | 双写缺口审计 | ⏳ 持续 | Scheduler 等业务点按需补 xtrace；保持低基数 |
+| **O10** | xtrace 深度需求 | ⏸ 上游 | 流式 Span / 引擎 Python 拼接：见 `xtrace_requirements.md`，不阻塞 O1–O7 |
 
-**P1-4 watch revision 续传（已完成）**  
-Router 快照 revision + compact/重连全量校正；Node periodic full reconcile。
+### 环境变量（全链路打开）
 
-## P2 测试与可维护性
+| 变量 | 作用 |
+|------|------|
+| `OBSERVE_URL` | xtrace 基址（metrics batch + 可选 OTLP） |
+| `OBSERVE_TOKEN` | xtrace Bearer |
+| `NEBULA_LOG_FORMAT=json` | stdout JSON → Loki 采集 |
+| 组件 `/metrics` | 默认暴露；Prometheus/VM scrape |
 
-多副本差量、缩容选副本、Drain/plan_version 过滤、B4 version、C1 peek/rewrite、恢复预算单测已覆盖；`cargo test --workspace` 绿。后续再拆 `nebula-common`、统一 HTTP client 超时、前端按视图拆包。
+### 验收
 
-## 建议执行顺序
+1. 开 `OBSERVE_URL` 后，推理请求在 xtrace 可见 `nebula_router_*` / `nebula_gateway_*` 点（或 traces）。  
+2. 同请求在 `GET /metrics` 上计数/直方图增加。  
+3. `NEBULA_LOG_FORMAT=json` 时日志可被 Promtail 解析，并按 `request_id` 检索。  
+4. abort/drain 仍**不计入** 5xx 错误预算（Prometheus 独立 `*_aborted_total`）。
 
-1. ~~Wave A–C / P0 / P1~~ ✅  
-2. Wave D3 HA 无状态多副本（见 [`../dev/ha/ha_roadmap.md`](../dev/ha/ha_roadmap.md)）  
-3. D4/D5 按需；P2 可维护性按需
+### 与旧 P1.5 / P2.5
+
+| 旧 ID | 并入 |
+|-------|------|
+| P1.5 SLI/SLO | O8 + observability §5 |
+| P2.5 前端运维 | 仍按需；面板只绑 BFF，不直连 xtrace |
+
+---
+
+## N1 — 接入面 HA（主体完成）
+
+| 项 | 状态 |
+|----|------|
+| Scheduler 选主 + fencing 真机 | ✅ |
+| Gateway / Router ×2 + LB 真机 | ✅ |
+| 真机报告 | ✅ [`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md) |
+| 生产 etcd 三节点 | ⏸ **暂缓** |
+
+---
+
+## N2 — 工程质量（已落地）
+
+Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
+
+---
+
+## N3 — 按需能力
+
+| ID | 项 | 触发 |
+|----|-----|------|
+| D4 | 跨节点 TP | 单机 GPU 不够 |
+| D5 | EngineShim | Passthrough 不够 |
+
+---
+
+## N4 — 产品化（观测以外）
+
+- 硬件感知镜像映射、Console 大功能、模型预热 UI：单独产品排期。  
+- 观测面板 UI 在 O1–O8 稳定后做 BFF 聚合增强。
+
+---
+
+## 明确不做
+
+- 改架构主轴；Actor 回潮  
+- Gateway 绕过 Router / 双写资源  
+- xtrace 当 Prometheus 替代或 xtrace→Loki 桥  
+- 应用直连 Loki  
+- 只有 metrics、没有 abort/drain SLO 口径  
+
+---
+
+## 文档地图
+
+| 文档 | 用途 |
+|------|------|
+| [`architecture.md`](./architecture.md) | 架构现状 |
+| 本文 | **下一步**（N4-Obs 主线） |
+| [`../dev/observability.md`](../dev/observability.md) | 可观测设计权威 |
+| [`../dev/xtrace_requirements.md`](../dev/xtrace_requirements.md) | xtrace 上游扩展需求 |
+| [`../dev/loki.md`](../dev/loki.md) | Loki 采集路径 |
+| [`../dev/ha/`](../dev/ha/) | HA 报告与 runbook |
+| [`../dev/details/stats.md`](../dev/details/stats.md) | etcd `/stats/` 控制面契约 |

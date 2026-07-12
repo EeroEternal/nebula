@@ -1,7 +1,7 @@
 # 架构文档
 
-- [架构与路径评估 + Wave 优化计划](./architecture.md)
-- [工程优化计划（P0/P1/P2）](./optimization.md)
-- [历史深度分析（归档）](./history.md)
+- [架构现状](./architecture.md) — 权威说明与已关闭 Wave
+- [下一步优化计划](./optimization.md) — **先读**：N4-Obs 可观测主线；etcd 三节点暂缓
+- [历史分析（归档）](./history.md) — 拓扑示意；结论以 architecture 为准
 
-HA 执行路线图在 [`../dev/ha/`](../dev/ha/)。
+HA：[`../dev/ha/`](../dev/ha/)（路线图、runbook、[2026-07-11 真机报告](../dev/ha/report-20260711.md)）。

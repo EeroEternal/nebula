@@ -1,9 +1,9 @@
 # Nebula 可观测性
 
-> 状态：统一设计与实施规范（2026-07-11）
-> 读者：控制面 / 交付 / 前端运维流（P1.5 / P2.5）
-> 对照 PowerLLM：`xtrace_observability_plan.md`、`xtrace_vm_dual_write.md`、`manual/logging_collection.md`、`observability_slo.md`
-> 清单：`engineering_maturity_checklist.md`（P1.5 / P2.5）
+> 状态：统一设计与实施规范（2026-07-11）  
+> **执行清单：** [`../arch/optimization.md`](../arch/optimization.md) **N4-Obs**（双写 O1–O7 已落代码；O8 SLO 草案待补）。  
+> Loki 采集：[`loki.md`](./loki.md)。
+
 
 本文合并原 `observability_external.md`、`observability_contract.md`、`memory/observability.md`、`gateway/gateway_observability.md`。
 
@@ -66,17 +66,16 @@
 
 已落地：
 
-1. **nebula-observe** — 内嵌 xtrace（示例部署 10.21.11.92:8742）
+1. **nebula-observe** — 内嵌 xtrace
 2. **nebula-node** — xtrace-client 上报 GPU / KV cache / pending 等
-3. **OTLP tracing** — gateway/node/router 经 `nebula-common::telemetry` 推 OTLP traces
-4. 组件支持 `--xtrace-url` / `--xtrace-token`（`OBSERVE_URL` / `OBSERVE_TOKEN`）
-5. 各组件已有 Prometheus 风格 `/metrics`（业务点双写仍需审计补齐）
+3. **OTLP tracing** — gateway/node/router 经 `nebula-common::telemetry`；**W3C TraceContext** 全局 propagator
+4. **`DualWriteEmitter`** — Gateway/Router 热路径同点写 Prometheus 原子 + xtrace `push_metrics`
+5. 组件 `--xtrace-url` / `--xtrace-token`（`OBSERVE_URL` / `OBSERVE_TOKEN`）
+6. Prometheus `/metrics` 导出面（Router 含 latency/TTFT histogram）
+7. **JSON 日志** — `NEBULA_LOG_FORMAT=json` → stdout → Promtail/Vector → Loki（见 [`loki.md`](./loki.md)）
 
-xtrace 能力摘要：Langfuse 兼容 + OTLP traces、`/v1/metrics/batch`、PG 存储、traces/metrics 查询 API。
-
-etcd 只存控制面（placement / endpoint / 热路径 stats）；历史观测不进 etcd。
-
-OpenTelemetry 依赖：opentelemetry 0.27、otlp 0.27、tracing-opentelemetry 0.28。
+xtrace：Langfuse 兼容 + OTLP、`/v1/metrics/batch`、查询 API。  
+etcd 只存控制面 stats；历史观测不进 etcd。
 
 ---
 
@@ -162,11 +161,12 @@ P2.5 不做：自建第二套时序 UI、把客户 Grafana/Loki 搬进控制台�
 
 ## 7. 落地顺序
 
-1. 本文为唯一可观测设计源；旧拆分文档删除或改跳转。
-2. P1.5：SLO + 双口径告警草案。
-3. 双写缺口审计：只进 xtrace、未进 `/metrics` 的业务点补齐。
-4. 各组件 JSON 日志 + correlation；补 Loki 接入短文（可参考 PowerLLM `logging_collection.md`）。
-5. P2.5：前端只绑 BFF；设置/交付文档链出客户 VM/Loki。
+1. 本文为设计源；执行勾选见 **optimization N4-Obs**。
+2. ~~双写脚手架 + Gateway/Router 热路径~~ ✅（`DualWriteEmitter`）
+3. ~~JSON 日志 + Loki 采集文档~~ ✅（[`loki.md`](./loki.md)）
+4. **下一步 O8**：SLO + 告警阈值写入 runbook（§5.3 初值）。
+5. O9：Scheduler 等业务点双写缺口按需审计。
+6. 前端运维面板（P2.5）：只绑 BFF；客户 VM/Loki 走文档出口。
 
 ---
 
