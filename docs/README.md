@@ -7,4 +7,4 @@
 | [`manual/`](manual/) | 部署与 Release Notes |
 | [`dev/`](dev/) | 开发/运维细节（边界、观测、HA、组件短文） |
 
-产品入口：[`product/positioning.md`](product/positioning.md)。工程入口：[`arch/optimization.md`](arch/optimization.md)。HA 报告：[`dev/ha/report-20260711.md`](dev/ha/report-20260711.md)。
+产品入口：[`product/positioning.md`](product/positioning.md)。全面开发计划：[`dev/product_plan.md`](dev/product_plan.md)。工程入口：[`arch/optimization.md`](arch/optimization.md)。HA 报告：[`dev/ha/report-20260711.md`](dev/ha/report-20260711.md)。
