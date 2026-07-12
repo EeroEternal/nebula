@@ -1,13 +1,13 @@
 {
-  "model_uid": "virtual-deepseek-test",
-  "model_name": "deepseek-v3",
+  "model_uid": "vllm-demo",
+  "model_name": "demo-model",
   "version": 1,
   "assignments": [
     {
       "node_id": "local-node",
       "replica_id": 0,
       "port": 8080,
-      "engine_type": "virtual",
+      "engine_type": "vllm",
       "docker_image": null
     }
   ]

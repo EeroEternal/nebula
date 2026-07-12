@@ -25,7 +25,6 @@ We use the OKLch color space for perceptual uniformity and vibrant dark-mode ren
 | **Sub-surface** | `oklch(22% 0.03 260)` | Card and sidebar containers. |
 | **Elevated** | `oklch(26% 0.04 260)` | Overlays and dialogs. |
 | **Primary (Flow)** | `oklch(70% 0.18 190)` | Electric Cyan for active data and actions. |
-| **Proxy (Virtual)** | `oklch(75% 0.12 280)` | Amethyst for external/virtual model nodes. |
 | **Success** | `oklch(68% 0.22 150)` | Emerald for healthy/operational status. |
 | **Warning** | `oklch(82% 0.16 80)` | Amber for latency or degraded states. |
 | **Critical** | `oklch(60% 0.2 25)` | Ruby for failures and alerts. |

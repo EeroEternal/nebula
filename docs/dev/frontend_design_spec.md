@@ -15,7 +15,6 @@ We use the OKLch color space for perceptual uniformity.
 
 ### Signal (Traffic & Status)
 - **Primary (Flow):** `oklch(70% 0.18 190)` - Electric Cyan (Active data flow).
-- **Virtual (Proxy):** `oklch(75% 0.12 280)` - Amethyst (External/Virtual nodes).
 - **Health (Ready):** `oklch(68% 0.22 150)` - Emerald (Normal operation).
 - **Warning (Latency):** `oklch(82% 0.16 80)` - Amber (High latency/Issues).
 

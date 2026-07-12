@@ -5,6 +5,7 @@ This document defines rules and conventions for AI agents and developers working
 ## File Organization
 
 - **Documentation:** Keep filenames in the `docs/` directory concise and descriptive. Avoid excessively long names.
+  - `docs/product/` — product positioning and value proposition
   - `docs/manual/` — user manuals, install and deployment
   - `docs/dev/` — developer docs, engineering checklists, component designs
   - `docs/arch/` — architecture and optimization plans

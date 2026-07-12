@@ -2,8 +2,9 @@
 
 | 目录 | 用途 |
 |------|------|
-| [`arch/`](arch/) | **权威**：架构 + 排期（先读） |
+| [`product/`](product/) | **产品定位**与价值主张 |
+| [`arch/`](arch/) | **权威**：架构 + 排期 |
 | [`manual/`](manual/) | 部署与 Release Notes |
 | [`dev/`](dev/) | 开发/运维细节（边界、观测、HA、组件短文） |
 
-入口：[`arch/optimization.md`](arch/optimization.md)。HA 报告：[`dev/ha/report-20260711.md`](dev/ha/report-20260711.md)。
+产品入口：[`product/positioning.md`](product/positioning.md)。工程入口：[`arch/optimization.md`](arch/optimization.md)。HA 报告：[`dev/ha/report-20260711.md`](dev/ha/report-20260711.md)。

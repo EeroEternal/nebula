@@ -1,5 +1,4 @@
 pub mod sglang;
-pub mod r#virtual;
 pub mod vllm;
 
 use std::path::Path;
@@ -263,7 +262,6 @@ pub fn create_engine(
             }
             Box::new(engine)
         }
-        "virtual" => Box::new(r#virtual::VirtualEngine::new(args)),
         other => {
             tracing::warn!(engine_type=%other, "unknown engine type, falling back to vllm");
             let mut engine = vllm::VllmEngine::new(args);
