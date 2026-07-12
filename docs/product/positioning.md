@@ -47,7 +47,7 @@
 - **多引擎编排层：** 把各引擎（含其原生拓扑 / gateway）当作可调度单元，而不是重做一套「更懂 PD 的引擎」
 - **企业增强层：** 统一协议与鉴权审计、跨副本调度与 Drain、可观测与 SLO、控制台与运维闭环
 
-简单副本模式保持 **Engine-Passthrough**：客户流量经 Nebula Gateway / Router 到达引擎原生 HTTP。对 PD、DP、KV Transfer 等复杂拓扑，Nebula 将引擎原生 gateway 作为服务入口纳管，不绕过它直达 worker；引擎升级尽量不牵动控制面。
+简单副本模式保持 **Engine-Passthrough**：客户流量经 Nebula Gateway / Router 到达引擎原生 HTTP。对 PD、DP、KV Transfer 等复杂拓扑，Nebula 将引擎原生 gateway 作为一个整体服务入口接入，不绕过它直达 worker，也不管理其内部 worker 池；引擎升级尽量不牵动控制面。
 
 ### 3.2 Nebula 不是什么
 
@@ -79,9 +79,9 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
       └─ KV Transfer / Cache 等引擎配套组件
 ```
 
-简单模式由 Nebula Router 在同质 worker 间选路；复杂模式由 vLLM Router、SGLang Model Gateway 等原生组件负责 Cell 内请求编排。Nebula 负责创建、放置、扩缩、升级和观测整个 Cell，并只把 Cell Ingress 暴露给上层。
+简单模式由 Nebula Router 在 Nebula 已管理的同质副本间选路；复杂模式由 vLLM Router、SGLang Model Gateway 等原生组件负责 Cell 内请求编排与 worker 管理。Nebula 只接入 Cell Ingress，提供统一发现、健康检查、流量治理和可观测，不承诺创建、扩缩或调整其内部 Prefill / Decode 池。
 
-同一状态必须只有一个 owner：Nebula 是部署期望、进程生命周期和资源放置的权威；引擎 gateway 是 Cell 内请求路由、worker 实时负载和 KV 协同的权威。不得让两边同时扩缩同一 worker 池，也不得叠加语义冲突的重试、熔断和负载均衡。
+同一状态必须只有一个 owner：普通副本的部署期望、进程生命周期和资源放置由 Nebula 管理；原生 Serving Cell 的内部拓扑、worker 生命周期、请求路由和 KV 协同由引擎 serving 栈管理。Nebula 不对原生 Cell 的 Prefill / Decode 池做第二套扩缩，也不叠加语义冲突的重试、熔断和负载均衡。
 
 ---
 
@@ -111,9 +111,9 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
 
 统一 OpenAI 兼容接入、鉴权与审计、abort/drain、可观测三平面（trace / metrics / 日志）。客户买到的是「可运营的本地推理服务」，不是「能 curl 通的端口」。
 
-### 4.7 用 SLO 和成本驱动推理舰队
+### 4.7 用 SLO 和成本治理推理舰队
 
-客户声明 TTFT、TPOT、吞吐、可用性和预算目标，Nebula 结合真实流量、队列、KV、GPU 利用率与硬件成本，调整副本数、Prefill/Decode 比例、放置和引擎配置。优化对象是整个 Serving Cell 和集群，而不是单个进程的 GPU 利用率。
+客户声明 TTFT、TPOT、吞吐、可用性和预算目标，Nebula 统一观测不同引擎服务是否达标，并据此执行准入、跨 Cell 流量治理、普通副本扩缩或给出配置建议。原生 Serving Cell 内部的 Prefill / Decode 比例、worker 扩缩和 KV 调度仍由对应引擎 serving 栈负责。
 
 ### 4.8 让引擎选择从经验变成证据
 
@@ -126,16 +126,16 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
 以下能力与定位直接对应，按客户感知优先级排列：
 
 1. **能力声明与 Serving Cell 拓扑**
-   建立 `EngineCapability` 与 `ServingTopology`：描述引擎版本支持的 PD / DP / TP、gRPC、LoRA、结构化输出、KV Connector 和指标能力；支持 `standalone`、`replicated`、`native_gateway`、`pd_disaggregated` 等拓扑。控制面按能力选节点、生成参数并把整个 Cell 作为部署单元编排，不能把所有引擎压成最低公共能力。
+   建立 `EngineCapability` 与 `ServingTopology`：描述引擎版本支持的 PD / DP / TP、gRPC、LoRA、结构化输出、KV Connector 和指标能力；识别 `standalone`、`replicated`、`native_gateway`、`pd_disaggregated` 等拓扑。对原生复杂拓扑只做能力发现和整体接入，不把所有引擎压成最低公共能力，也不接管其内部 worker。
 
 2. **Engine Adapter 与原生 Gateway 纳管**
-   Engine 抽象从启动单个进程扩展为能力发现、配置校验、拓扑编译、部署、服务发现、Drain 和指标转换。优先让 SGLang Model Gateway、vLLM Router 成为可管理的 Cell Ingress，同时明确控制权边界。
+   Engine 抽象补充能力发现、配置校验、服务发现、健康检查和指标转换。优先让 SGLang Model Gateway、vLLM Router 作为整体 Cell Ingress 接入，同时明确其内部拓扑和 worker 生命周期仍归原生 serving 栈。
 
 3. **引擎指标方言 → 统一服务语义**
    稳定适配各引擎 metrics，统一 TTFT、TPOT、排队、KV、吞吐、错误和成本口径；保留引擎特有指标，避免统一抽象丢失关键能力。
 
-4. **SLO / 成本驱动的弹性与调优**
-   从固定阈值扩缩升级到面向服务目标的决策：调整普通副本或 Prefill/Decode 池，支持流量预测、容量保护和成本约束，并对每次自动决策提供原因和回滚点。
+4. **SLO / 成本驱动的治理与建议**
+   从单一资源指标升级到面向服务目标的观测和决策：支持普通副本弹性、跨 Cell 流量治理、容量保护和成本约束；对于原生 Serving Cell，提供可解释的容量与配置建议，不自动调整 Prefill / Decode 池。
 
 5. **发行版 / 镜像矩阵**
    硬件感知选镜像或运行时、版本兼容表、灰度与回滚——版本痛点产品化。
@@ -175,10 +175,10 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
 - 新模型上线：从「选引擎/镜像/参数」到「可服务」的步骤与耗时下降  
 - 换卡或升级引擎：回滚成功率、人为改配置次数下降  
 - 多引擎并存时：仍只有一套对外 API 与一套运维视角（硬件 / 模型 / 副本）  
-- 客户是否仍需直接运维引擎原生 gateway 才能完成日常扩缩与发布（目标：默认不需要）  
+- 客户是否能通过 Nebula 统一查看、接入和治理原生 gateway，同时保持其内部管理权归属清晰  
 - 引擎覆盖：在真实硬件上可声明式交付的引擎种类持续增加（含 MLX 等非 CUDA 路径）
 - 服务目标：TTFT / TPOT / 可用性达标率提高，单位有效 token 成本下降
-- 自动决策：Serving Cell 扩缩、P/D 比例调整、升级回滚均可解释、可审计、可恢复
+- 治理决策：普通副本扩缩、跨 Cell 流量调整、升级回滚均可解释、可审计、可恢复
 
 ---
 
