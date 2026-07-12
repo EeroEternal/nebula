@@ -125,34 +125,34 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
 
 以下能力与定位直接对应，按客户感知优先级排列：
 
-1. **能力声明与 Serving Cell 拓扑**  
+1. **能力声明与 Serving Cell 拓扑**
    建立 `EngineCapability` 与 `ServingTopology`：描述引擎版本支持的 PD / DP / TP、gRPC、LoRA、结构化输出、KV Connector 和指标能力；支持 `standalone`、`replicated`、`native_gateway`、`pd_disaggregated` 等拓扑。控制面按能力选节点、生成参数并把整个 Cell 作为部署单元编排，不能把所有引擎压成最低公共能力。
 
-2. **Engine Adapter 与原生 Gateway 纳管**  
+2. **Engine Adapter 与原生 Gateway 纳管**
    Engine 抽象从启动单个进程扩展为能力发现、配置校验、拓扑编译、部署、服务发现、Drain 和指标转换。优先让 SGLang Model Gateway、vLLM Router 成为可管理的 Cell Ingress，同时明确控制权边界。
 
-3. **引擎指标方言 → 统一服务语义**  
+3. **引擎指标方言 → 统一服务语义**
    稳定适配各引擎 metrics，统一 TTFT、TPOT、排队、KV、吞吐、错误和成本口径；保留引擎特有指标，避免统一抽象丢失关键能力。
 
-4. **SLO / 成本驱动的弹性与调优**  
+4. **SLO / 成本驱动的弹性与调优**
    从固定阈值扩缩升级到面向服务目标的决策：调整普通副本或 Prefill/Decode 池，支持流量预测、容量保护和成本约束，并对每次自动决策提供原因和回滚点。
 
-5. **发行版 / 镜像矩阵**  
+5. **发行版 / 镜像矩阵**
    硬件感知选镜像或运行时、版本兼容表、灰度与回滚——版本痛点产品化。
 
-6. **加速器库存与统计**  
+6. **加速器库存与统计**
    多样硬件的登记、健康、利用率与调度约束。
 
-7. **Benchmark 与推荐系统**  
+7. **Benchmark 与推荐系统**
    沉淀模型 × 引擎 × 版本 × 硬件 × 参数的性能画像，以真实目标推荐运行方案，并通过线上灰度校正推荐。
 
-8. **多租户治理与企业运维**  
+8. **多租户治理与企业运维**
    统一租户配额、优先级、准入、审计、成本归因、发布、Drain、故障迁移与回滚；控制台配置硬件–引擎–模型匹配，背后仍是声明式 Deployment / Placement。
 
-9. **引擎覆盖面持续扩大**  
+9. **引擎覆盖面持续扩大**
    在 Engine 抽象上优先做深 vLLM / SGLang，并扩展 TensorRT-LLM、MLX、llama.cpp 等；多样性是产品目标，不是附属项。
 
-10. **按需协议加深（EngineShim）**  
+10. **按需协议加深（EngineShim）**
    仅当 Passthrough 接不住引擎高级能力时启用；默认不与引擎 gateway 抢数据面。
 
 ---
