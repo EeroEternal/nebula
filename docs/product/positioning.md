@@ -47,7 +47,7 @@
 - **多引擎编排层：** 把各引擎（含其原生拓扑 / gateway）当作可调度单元，而不是重做一套「更懂 PD 的引擎」
 - **企业增强层：** 统一协议与鉴权审计、跨副本调度与 Drain、可观测与 SLO、控制台与运维闭环
 
-默认路径保持 **Engine-Passthrough**：客户流量经 Nebula Gateway / Router 到达引擎原生 HTTP；引擎升级尽量不牵动控制面。
+简单副本模式保持 **Engine-Passthrough**：客户流量经 Nebula Gateway / Router 到达引擎原生 HTTP。对 PD、DP、KV Transfer 等复杂拓扑，Nebula 将引擎原生 gateway 作为一个整体服务入口接入，不绕过它直达 worker，也不管理其内部 worker 池；引擎升级尽量不牵动控制面。
 
 ### 3.2 Nebula 不是什么
 
@@ -66,6 +66,22 @@
 | 统一 API、租户、审计、机房可观测 | Nebula | Gateway、BFF、stats / trace / 日志 |
 
 原则：**引擎负责算得快；引擎原生 serving 负责同拓扑内路由；Nebula 负责声明式调度、异构舰队、企业接入，并在需要时把引擎原生 serving 当作可编排组件接入。**
+
+### 3.4 Serving Cell：Nebula 与原生 serving 的结合点
+
+Nebula 不再只把服务理解为一组同质副本，而是把一个模型的一套完整运行拓扑抽象为 **Serving Cell**：
+
+```text
+Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
+  └─ Serving Cell
+      ├─ Cell Ingress（Nebula Router 或引擎原生 Gateway）
+      ├─ Regular / Prefill / Decode Workers
+      └─ KV Transfer / Cache 等引擎配套组件
+```
+
+简单模式由 Nebula Router 在 Nebula 已管理的同质副本间选路；复杂模式由 vLLM Router、SGLang Model Gateway 等原生组件负责 Cell 内请求编排与 worker 管理。Nebula 只接入 Cell Ingress，提供统一发现、健康检查、流量治理和可观测，不承诺创建、扩缩或调整其内部 Prefill / Decode 池。
+
+同一状态必须只有一个 owner：普通副本的部署期望、进程生命周期和资源放置由 Nebula 管理；原生 Serving Cell 的内部拓扑、worker 生命周期、请求路由和 KV 协同由引擎 serving 栈管理。Nebula 不对原生 Cell 的 Prefill / Decode 池做第二套扩缩，也不叠加语义冲突的重试、熔断和负载均衡。
 
 ---
 
@@ -89,11 +105,21 @@
 
 ### 4.5 读懂引擎，再调度
 
-采集各引擎运行指标（排队、KV/显存、prefix hit 等），翻译成统一 stats 契约，供路由、过载保护与扩缩容使用。同引擎内的高级路由可委托引擎原生能力；Nebula 做跨组、跨模型、跨租户的集群级决策。
+当前已采集各引擎的少量运行指标（排队、KV/显存、部分 prefix hit），翻译成精简的统一 stats 契约，供普通副本路由、过载保护与扩缩容使用。强化方向是形成三层观测：少量实时控制面 stats、跨引擎统一 SLI、保留引擎方言的原始指标。Nebula 将模型、引擎版本、硬件、发布事件和请求表现关联起来，帮助客户判断问题发生在哪一层。
+
+对于 vLLM Router、SGLang Model Gateway 等原生 Serving Cell，Nebula 默认只读取 Cell Ingress 暴露的指标、健康和官方只读状态；只有上游稳定提供 worker 级观测接口时才展示内部角色状态。观测不等于控制，Nebula 不据此接管 Cell 内部调度或 Prefill / Decode worker。
 
 ### 4.6 企业级接入与运维闭环
 
 统一 OpenAI 兼容接入、鉴权与审计、abort/drain、可观测三平面（trace / metrics / 日志）。客户买到的是「可运营的本地推理服务」，不是「能 curl 通的端口」。
+
+### 4.7 用 SLO 和成本治理推理舰队
+
+客户声明 TTFT、TPOT、吞吐、可用性和预算目标，Nebula 统一观测不同引擎服务是否达标，并据此执行准入、跨 Cell 流量治理、普通副本扩缩或给出配置建议。原生 Serving Cell 内部的 Prefill / Decode 比例、worker 扩缩和 KV 调度仍由对应引擎 serving 栈负责。
+
+### 4.8 让引擎选择从经验变成证据
+
+对候选硬件、引擎版本和参数做标准化 benchmark 与线上反馈，形成可复用的性能画像。Nebula 给出可解释的推荐、灰度验证与回滚，而不是宣称存在一个适合所有模型和负载的默认引擎。
 
 ---
 
@@ -101,25 +127,34 @@
 
 以下能力与定位直接对应，按客户感知优先级排列：
 
-1. **能力声明与拓扑**  
-   部署时声明引擎能力与拓扑（含 PD 等），控制面按能力选节点、拼参数；复杂同引擎拓扑可作为「部署单元」编排。
+1. **能力声明与 Serving Cell 拓扑**
+   建立 `EngineCapability` 与 `ServingTopology`：描述引擎版本支持的 PD / DP / TP、gRPC、LoRA、结构化输出、KV Connector 和指标能力；识别 `standalone`、`replicated`、`native_gateway`、`pd_disaggregated` 等拓扑。对原生复杂拓扑只做能力发现和整体接入，不把所有引擎压成最低公共能力，也不接管其内部 worker。
 
-2. **引擎指标方言 → 统一 stats**  
-   稳定适配各引擎 metrics，驱动智能路由与弹性。
+2. **Engine Adapter 与原生 Gateway 纳管**
+   Engine 抽象补充能力发现、配置校验、服务发现、健康检查和指标转换。优先让 SGLang Model Gateway、vLLM Router 作为整体 Cell Ingress 接入，同时明确其内部拓扑和 worker 生命周期仍归原生 serving 栈。
 
-3. **发行版 / 镜像矩阵**  
+3. **引擎指标方言 → 统一服务语义**
+   稳定适配各引擎 metrics，分层处理：`/stats/` 只保留实时决策必需字段；Prometheus / xtrace 承载 TTFT、TPOT、排队、KV、吞吐、错误和成本等统一 SLI；原始引擎指标保留独立命名空间。统一语义不能以丢失引擎特有信息为代价。
+
+4. **SLO / 成本驱动的治理与建议**
+   从单一资源指标升级到面向服务目标的观测和决策：支持普通副本弹性、跨 Cell 流量治理、容量保护和成本约束；对于原生 Serving Cell，提供可解释的容量与配置建议，不自动调整 Prefill / Decode 池。
+
+5. **发行版 / 镜像矩阵**
    硬件感知选镜像或运行时、版本兼容表、灰度与回滚——版本痛点产品化。
 
-4. **加速器库存与统计**  
+6. **加速器库存与统计**
    多样硬件的登记、健康、利用率与调度约束。
 
-5. **控制台绑定与策略**  
-   界面化配置硬件–引擎–模型匹配、亲和与配额，背后仍是 Deployment / Placement。
+7. **Benchmark 与推荐系统**
+   沉淀模型 × 引擎 × 版本 × 硬件 × 参数的性能画像，以真实目标推荐运行方案，并通过线上灰度校正推荐。
 
-6. **引擎覆盖面持续扩大**  
+8. **多租户治理与企业运维**
+   统一租户配额、优先级、准入、审计、成本归因、发布、Drain、故障迁移与回滚；控制台配置硬件–引擎–模型匹配，背后仍是声明式 Deployment / Placement。
+
+9. **引擎覆盖面持续扩大**
    在 Engine 抽象上优先做深 vLLM / SGLang，并扩展 TensorRT-LLM、MLX、llama.cpp 等；多样性是产品目标，不是附属项。
 
-7. **按需协议加深（EngineShim）**  
+10. **按需协议加深（EngineShim）**
    仅当 Passthrough 接不住引擎高级能力时启用；默认不与引擎 gateway 抢数据面。
 
 ---
@@ -142,8 +177,10 @@
 - 新模型上线：从「选引擎/镜像/参数」到「可服务」的步骤与耗时下降  
 - 换卡或升级引擎：回滚成功率、人为改配置次数下降  
 - 多引擎并存时：仍只有一套对外 API 与一套运维视角（硬件 / 模型 / 副本）  
-- 客户是否仍需直接运维引擎原生 gateway 才能完成日常扩缩与发布（目标：默认不需要）  
+- 客户是否能通过 Nebula 统一查看、接入和治理原生 gateway，同时保持其内部管理权归属清晰
 - 引擎覆盖：在真实硬件上可声明式交付的引擎种类持续增加（含 MLX 等非 CUDA 路径）
+- 服务目标：TTFT / TPOT / 可用性达标率提高，单位有效 token 成本下降
+- 治理决策：普通副本扩缩、跨 Cell 流量调整、升级回滚均可解释、可审计、可恢复
 
 ---
 
@@ -154,4 +191,5 @@
 | 本文 | 产品定位与价值 |
 | [`../arch/architecture.md`](../arch/architecture.md) | 工程架构与组件边界 |
 | [`../arch/optimization.md`](../arch/optimization.md) | 排期与工程项 |
+| [`../dev/engine_observability_plan.md`](../dev/engine_observability_plan.md) | vLLM / SGLang 可观测开发与优化计划 |
 | [`../manual/deployment.md`](../manual/deployment.md) | 部署与运维手册 |
