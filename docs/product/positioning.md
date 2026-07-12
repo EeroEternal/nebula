@@ -105,7 +105,9 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
 
 ### 4.5 读懂引擎，再调度
 
-采集各引擎运行指标（排队、KV/显存、prefix hit 等），翻译成统一 stats 契约，供路由、过载保护与扩缩容使用。同引擎内的高级路由可委托引擎原生能力；Nebula 做跨组、跨模型、跨租户的集群级决策。
+当前已采集各引擎的少量运行指标（排队、KV/显存、部分 prefix hit），翻译成精简的统一 stats 契约，供普通副本路由、过载保护与扩缩容使用。强化方向是形成三层观测：少量实时控制面 stats、跨引擎统一 SLI、保留引擎方言的原始指标。Nebula 将模型、引擎版本、硬件、发布事件和请求表现关联起来，帮助客户判断问题发生在哪一层。
+
+对于 vLLM Router、SGLang Model Gateway 等原生 Serving Cell，Nebula 默认只读取 Cell Ingress 暴露的指标、健康和官方只读状态；只有上游稳定提供 worker 级观测接口时才展示内部角色状态。观测不等于控制，Nebula 不据此接管 Cell 内部调度或 Prefill / Decode worker。
 
 ### 4.6 企业级接入与运维闭环
 
@@ -132,7 +134,7 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
    Engine 抽象补充能力发现、配置校验、服务发现、健康检查和指标转换。优先让 SGLang Model Gateway、vLLM Router 作为整体 Cell Ingress 接入，同时明确其内部拓扑和 worker 生命周期仍归原生 serving 栈。
 
 3. **引擎指标方言 → 统一服务语义**
-   稳定适配各引擎 metrics，统一 TTFT、TPOT、排队、KV、吞吐、错误和成本口径；保留引擎特有指标，避免统一抽象丢失关键能力。
+   稳定适配各引擎 metrics，分层处理：`/stats/` 只保留实时决策必需字段；Prometheus / xtrace 承载 TTFT、TPOT、排队、KV、吞吐、错误和成本等统一 SLI；原始引擎指标保留独立命名空间。统一语义不能以丢失引擎特有信息为代价。
 
 4. **SLO / 成本驱动的治理与建议**
    从单一资源指标升级到面向服务目标的观测和决策：支持普通副本弹性、跨 Cell 流量治理、容量保护和成本约束；对于原生 Serving Cell，提供可解释的容量与配置建议，不自动调整 Prefill / Decode 池。
@@ -189,4 +191,5 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
 | 本文 | 产品定位与价值 |
 | [`../arch/architecture.md`](../arch/architecture.md) | 工程架构与组件边界 |
 | [`../arch/optimization.md`](../arch/optimization.md) | 排期与工程项 |
+| [`../dev/engine_observability_plan.md`](../dev/engine_observability_plan.md) | vLLM / SGLang 可观测开发与优化计划 |
 | [`../manual/deployment.md`](../manual/deployment.md) | 部署与运维手册 |
