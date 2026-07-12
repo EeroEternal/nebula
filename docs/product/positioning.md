@@ -191,5 +191,6 @@ Nebula Gateway（租户 / 鉴权 / 配额 / 模型与 Cell 选择）
 | 本文 | 产品定位与价值 |
 | [`../arch/architecture.md`](../arch/architecture.md) | 工程架构与组件边界 |
 | [`../arch/optimization.md`](../arch/optimization.md) | 排期与工程项 |
+| [`../dev/product_plan.md`](../dev/product_plan.md) | 产品定位对齐的全面开发与优化计划 |
 | [`../dev/engine_observability_plan.md`](../dev/engine_observability_plan.md) | vLLM / SGLang 可观测开发与优化计划 |
 | [`../manual/deployment.md`](../manual/deployment.md) | 部署与运维手册 |
