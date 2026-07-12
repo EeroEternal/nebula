@@ -1,5 +1,7 @@
 # Nebula 部署指南
 
+> 单机/开发起步见下文。多副本 HA compose 见仓库 `docker-compose.ha.yml` 与 [`../dev/ha/runbook-phase-c.md`](../dev/ha/runbook-phase-c.md)。排期 [`../arch/optimization.md`](../arch/optimization.md)。
+
 ## 1. 环境要求
 
 | 依赖 | 版本/说明 |

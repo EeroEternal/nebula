@@ -1,7 +1,7 @@
 # 历史深度分析（归档）
 
-> **归档说明（2026-07-11）：** 本文保留早期 crate 拓扑示意。过时结论请以 [`architecture.md`](./architecture.md) 与 [`optimization.md`](./optimization.md) 为准。  
-> 已删除并并入 arch 的文档：`docs/dev/gpt56-analysis.md`、`absorb_powerllm_engineering_guidance.md`、`engineering_maturity_checklist.md`。
+> **归档说明（2026-07-12）：** 仅保留早期 crate 拓扑示意。现状与排期见 [`architecture.md`](./architecture.md)、[`optimization.md`](./optimization.md)。  
+> 已删并并入 arch/dev 短文的文档包括：gpt56-analysis、absorb/checklist、以及大量 `docs/dev` 下归档 stub。
 
 ## 组件拓扑（仍有效）
 

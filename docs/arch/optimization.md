@@ -32,7 +32,7 @@ M1 / N1 HA 主体 / N2 已完成。可观测双写与 Loki 路径（O1–O7）�
 
 ## N4-Obs — 全链路可观测
 
-设计源：[`../dev/observability.md`](../dev/observability.md)、[`../dev/xtrace_requirements.md`](../dev/xtrace_requirements.md)、[`../dev/loki.md`](../dev/loki.md)。
+设计源：[`../dev/observability.md`](../dev/observability.md)、[`../dev/loki.md`](../dev/loki.md)。
 
 ### 目标架构（已落地）
 
@@ -62,7 +62,7 @@ M1 / N1 HA 主体 / N2 已完成。可观测双写与 Loki 路径（O1–O7）�
 | **O7** | Loki 采集文档 + 示例 | ✅ | [`../dev/loki.md`](../dev/loki.md)、`deploy/observe/` |
 | **O8** | SLO / 告警草案 | ⏳ **当前收尾** | observability §5.3 → runbook |
 | **O9** | 双写缺口审计 | ⏳ 持续 | Scheduler 等按需补；低基数 |
-| **O10** | xtrace 深度需求 | ⏸ 上游 | 见 `xtrace_requirements.md` |
+| **O10** | xtrace 深度需求 | ⏸ 上游 | 见 observability §9 |
 
 ### 环境变量（全链路打开）
 
@@ -138,8 +138,7 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 |------|------|
 | [`architecture.md`](./architecture.md) | 架构现状 |
 | 本文 | **排期真源**（剩余 O8 / 按需 N3–N4） |
-| [`../dev/observability.md`](../dev/observability.md) | 可观测设计权威 |
-| [`../dev/xtrace_requirements.md`](../dev/xtrace_requirements.md) | xtrace 上游扩展需求 |
+| [`../dev/observability.md`](../dev/observability.md) | 可观测设计权威（含上游 O10） |
 | [`../dev/loki.md`](../dev/loki.md) | Loki 采集路径 |
 | [`../dev/ha/`](../dev/ha/) | HA 报告与 runbook |
 | [`../dev/details/stats.md`](../dev/details/stats.md) | etcd `/stats/` 控制面契约 |

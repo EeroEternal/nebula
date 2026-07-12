@@ -181,6 +181,18 @@ P2.5 不做：自建第二套时序 UI、把客户 Grafana/Loki 搬进控制台�
 
 ---
 
-## 9. 一句话
+## 9. xtrace 上游扩展（O10，不阻塞）
+
+以下依赖 xtrace 产品侧能力，Nebula 侧不为此阻塞 O1–O8：
+
+1. **流式 Span / Event**：SSE 过程中多次上报 TTFT/吞吐事件。  
+2. **跨语言拼接**：Python 引擎侧 Span 挂到同一 TraceID。  
+3. **语义字段可视化**：如 `scheduling.decision`、`node.reconcile`。
+
+控制面已具备：W3C `traceparent`、OTLP export、热路径 MetricPoint 双写。
+
+---
+
+## 10. 一句话
 
 Nebula 可观测 = **xtrace（LLM 语义）+ Prometheus 面（客户运维）+ 结构化日志（Loki 等）**，用关联 ID 串起来；产品 UI 做运维体验，客户栈走标准出口。
