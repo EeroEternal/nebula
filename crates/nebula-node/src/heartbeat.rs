@@ -172,10 +172,7 @@ pub async fn heartbeat_loop(
     shared_metrics: SharedNodeMetrics,
     lease_id: Option<i64>,
 ) {
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
-        .build()
-        .unwrap_or_default();
+    let http = nebula_common::health_http_client().unwrap_or_default();
 
     // Track consecutive health-check failures per (model_uid, replica_id)
     let mut fail_counts: HashMap<ReplicaKey, u32> = HashMap::new();

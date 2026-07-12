@@ -6,6 +6,20 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- Shared HTTP client helpers in `nebula-common` (`proxy` / `control_plane` / `health` / `audit` presets).
+- Comma-separated `ETCD_ENDPOINT` multi-address support for HA clients.
+- HA topology: `docker-compose.ha.yml`, `deploy/ha/Caddyfile.*`, `scripts/phase_d_ha_drill.sh`.
+- Phase D bare-metal HA drill report: `docs/dev/ha/report-20260711.md`.
+- Observability dual-write: `nebula_common::DualWriteEmitter` (Prometheus local + xtrace `push_metrics` on Gateway/Router hot path).
+- W3C TraceContext propagator in `init_tracing`; JSON log path docs for Loki (`docs/dev/loki.md`, `deploy/observe/promtail-nebula.yaml`).
+
+### Changed
+- BFF v2 handlers are thin envelopes; shared logic lives in `service` (metrics parse, migrate, cache, errors).
+- `nebula-observe` uses common telemetry and aligned `OBSERVE_*` env conventions.
+- CI documents full-workspace test gate (`cargo test --workspace --all-targets`).
+- Architecture / optimization docs: N4-Obs is current mainline; production etcd 3-node deferred.
+
 ## [0.2.0] - 2026-07-11
 
 ### Added

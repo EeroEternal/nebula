@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use nebula_common::auth::AuthConfig;
+use nebula_common::DualWriteEmitter;
 
 use crate::metrics::Metrics;
 
@@ -10,6 +11,7 @@ pub struct AppState {
     pub router: Arc<nebula_router::Router>,
     pub http: reqwest::Client,
     pub metrics: Arc<Metrics>,
+    pub dual_write: DualWriteEmitter,
     pub max_request_body_bytes: usize,
     pub retry_max: u32,
     pub retry_backoff_ms: u64,

@@ -5,7 +5,6 @@ mod state;
 mod sync;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     middleware,
@@ -13,6 +12,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use nebula_common::proxy_http_client;
 
 use crate::args::Args;
 use crate::handlers::{healthz, proxy_chat_completions};
@@ -32,8 +32,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let store =
-        nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint))
-            .await?;
+        nebula_meta::EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
 
     let strategy =
         nebula_router::strategy::parse_strategy(&args.routing_strategy).unwrap_or_else(|e| {
@@ -67,16 +66,17 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(300))
-        .build()
-        .unwrap_or_else(|e| {
-            tracing::error!(error=%e, "failed to build reqwest client");
-            std::process::exit(1);
-        });
+    let http = proxy_http_client().unwrap_or_else(|e| {
+        tracing::error!(error=%e, "failed to build reqwest client");
+        std::process::exit(1);
+    });
 
     let metrics = Arc::new(metrics::Metrics::default());
+    let dual_write = nebula_common::DualWriteEmitter::from_env(
+        "nebula-router",
+        args.common.xtrace_url.as_deref(),
+        args.common.xtrace_token.as_deref(),
+    );
 
     let max_request_body_bytes = std::env::var("NEBULA_ROUTER_MAX_REQUEST_BODY_BYTES")
         .ok()
@@ -98,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         router,
         http,
         metrics,
+        dual_write,
         max_request_body_bytes,
         retry_max,
         retry_backoff_ms,

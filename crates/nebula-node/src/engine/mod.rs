@@ -190,10 +190,7 @@ pub(crate) async fn parse_yaml_defaults(path: &str) -> std::collections::HashMap
 
 /// Wait for an engine to become ready by polling /health and /v1/models.
 pub(crate) async fn wait_engine_ready(base_url: &str, timeout: Duration) -> anyhow::Result<String> {
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(5))
-        .build()?;
+    let http = nebula_common::health_http_client()?;
 
     let start = tokio::time::Instant::now();
     let health_url = format!("{}/health", base_url.trim_end_matches('/'));

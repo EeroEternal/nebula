@@ -1,0 +1,8 @@
+:18081 {
+	reverse_proxy router-a:18081 router-b:18081 {
+		lb_policy round_robin
+		health_uri /healthz
+		health_interval 5s
+		health_timeout 2s
+	}
+}

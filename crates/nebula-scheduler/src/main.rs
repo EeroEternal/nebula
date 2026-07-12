@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
     );
     info!("nebula-scheduler starting...");
 
-    let store = EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
+    let store = EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
     info!("connected to etcd at {}", args.common.etcd_endpoint);
 
     let leader = LeaderGate::new();

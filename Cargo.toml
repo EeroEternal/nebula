@@ -41,3 +41,4 @@ opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", default-features = false, features = ["http-proto", "internal-logs", "logs", "metrics", "reqwest-client", "reqwest-rustls", "trace"] }
 tracing-opentelemetry = "0.28"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

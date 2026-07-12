@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use nebula_common::DualWriteEmitter;
 use nebula_meta::EtcdMetaStore;
 
 use crate::audit::AuditWriter;
@@ -16,6 +17,7 @@ pub struct AppState {
     pub store: Arc<EtcdMetaStore>,
     pub auth: AuthConfig,
     pub metrics: Arc<Metrics>,
+    pub dual_write: DualWriteEmitter,
     pub max_request_body_bytes: usize,
     pub log_path: String,
     pub audit: Option<Arc<AuditWriter>>,

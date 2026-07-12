@@ -1,0 +1,278 @@
+# Nebula HA topology (optimization N1 / ha_roadmap Phase C)
+#
+# - etcd 3-node cluster
+# - gateway / router / bff ×2 (stateless) behind Caddy LB
+# - scheduler ×2 (etcd election; follower /healthz = 503)
+#
+# Usage:
+#   docker compose -f docker-compose.ha.yml up -d --build
+#
+# External ports:
+#   8081  → gateway LB
+#   18090 → bff LB
+#   18081 → router LB
+#   2379  → etcd client (etcd1)
+#
+# Drill checklist: docs/dev/ha/runbook-phase-c.md
+
+version: "3.9"
+
+x-etcd-endpoints: &etcd-endpoints
+  ETCD_ENDPOINT: http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+
+x-gateway-env: &gateway-env
+  <<: *etcd-endpoints
+  NEBULA_ROUTER_URL: http://router-lb:18081
+  NEBULA_BFF_URL: http://bff-lb:18090
+  NEBULA_GATEWAY_ADDR: 0.0.0.0:8081
+  NEBULA_AUTH_TOKENS: "devtoken:admin,viewtoken:viewer"
+
+x-bff-env: &bff-env
+  <<: *etcd-endpoints
+  NEBULA_ROUTER_URL: http://router-lb:18081
+  NEBULA_BFF_ADDR: 0.0.0.0:18090
+  BFF_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/nebula
+  OBSERVE_URL: ${OBSERVE_URL:-http://host.docker.internal:8742}
+  OBSERVE_AUTH_MODE: ${OBSERVE_AUTH_MODE:-internal}
+  OBSERVE_TOKEN: ${OBSERVE_TOKEN:-}
+
+x-router-env: &router-env
+  <<: *etcd-endpoints
+  RUST_LOG: info
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nebula
+    volumes:
+      - postgres_ha_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nebula"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- etcd 3-node ---
+  etcd1:
+    image: quay.io/coreos/etcd:v3.5.16
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd1
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd1:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd1:2380
+      - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - --initial-cluster-token=nebula-etcd
+      - --initial-cluster-state=new
+    ports:
+      - "2379:2379"
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health", "--endpoints=http://127.0.0.1:2379"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  etcd2:
+    image: quay.io/coreos/etcd:v3.5.16
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd2
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd2:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd2:2380
+      - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - --initial-cluster-token=nebula-etcd
+      - --initial-cluster-state=new
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health", "--endpoints=http://127.0.0.1:2379"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  etcd3:
+    image: quay.io/coreos/etcd:v3.5.16
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd3
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd3:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd3:2380
+      - --initial-cluster=etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      - --initial-cluster-token=nebula-etcd
+      - --initial-cluster-state=new
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health", "--endpoints=http://127.0.0.1:2379"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # --- gateway ×2 ---
+  gateway-a:
+    build:
+      context: .
+      dockerfile: crates/nebula-gateway/Dockerfile
+    environment:
+      <<: *gateway-env
+    depends_on:
+      etcd1:
+        condition: service_healthy
+      etcd2:
+        condition: service_healthy
+      etcd3:
+        condition: service_healthy
+
+  gateway-b:
+    build:
+      context: .
+      dockerfile: crates/nebula-gateway/Dockerfile
+    environment:
+      <<: *gateway-env
+    depends_on:
+      etcd1:
+        condition: service_healthy
+      etcd2:
+        condition: service_healthy
+      etcd3:
+        condition: service_healthy
+
+  # --- bff ×2 ---
+  bff-a:
+    build:
+      context: .
+      dockerfile: crates/nebula-bff/Dockerfile
+    environment:
+      <<: *bff-env
+    depends_on:
+      etcd1:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  bff-b:
+    build:
+      context: .
+      dockerfile: crates/nebula-bff/Dockerfile
+    environment:
+      <<: *bff-env
+    depends_on:
+      etcd1:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # --- router ×2 ---
+  router-a:
+    build:
+      context: .
+      dockerfile: crates/nebula-router/Dockerfile
+    environment:
+      <<: *router-env
+    command:
+      - /app/nebula-router
+      - --listen-addr
+      - 0.0.0.0:18081
+      - --etcd-endpoint
+      - http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+    depends_on:
+      etcd1:
+        condition: service_healthy
+
+  router-b:
+    build:
+      context: .
+      dockerfile: crates/nebula-router/Dockerfile
+    environment:
+      <<: *router-env
+    command:
+      - /app/nebula-router
+      - --listen-addr
+      - 0.0.0.0:18081
+      - --etcd-endpoint
+      - http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+    depends_on:
+      etcd1:
+        condition: service_healthy
+
+  # --- scheduler ×2 (leader election) ---
+  scheduler-a:
+    build:
+      context: .
+      dockerfile: crates/nebula-scheduler/Dockerfile
+    environment:
+      <<: *etcd-endpoints
+    command:
+      - /app/nebula-scheduler
+      - --etcd-endpoint
+      - http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+      - --default-node-id
+      - node_gpu0
+      - --default-port
+      - "10814"
+      - --listen-addr
+      - 0.0.0.0:18082
+    depends_on:
+      etcd1:
+        condition: service_healthy
+
+  scheduler-b:
+    build:
+      context: .
+      dockerfile: crates/nebula-scheduler/Dockerfile
+    environment:
+      <<: *etcd-endpoints
+    command:
+      - /app/nebula-scheduler
+      - --etcd-endpoint
+      - http://etcd1:2379,http://etcd2:2379,http://etcd3:2379
+      - --default-node-id
+      - node_gpu0
+      - --default-port
+      - "10814"
+      - --listen-addr
+      - 0.0.0.0:18082
+    depends_on:
+      etcd1:
+        condition: service_healthy
+
+  # --- L7 load balancers ---
+  gateway-lb:
+    image: caddy:2-alpine
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./deploy/ha/Caddyfile.gateway:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - gateway-a
+      - gateway-b
+
+  bff-lb:
+    image: caddy:2-alpine
+    ports:
+      - "18090:18090"
+    volumes:
+      - ./deploy/ha/Caddyfile.bff:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - bff-a
+      - bff-b
+
+  router-lb:
+    image: caddy:2-alpine
+    ports:
+      - "18081:18081"
+    volumes:
+      - ./deploy/ha/Caddyfile.router:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - router-a
+      - router-b
+
+volumes:
+  postgres_ha_data:

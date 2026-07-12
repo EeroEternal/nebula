@@ -1,45 +1,64 @@
-use clap::Parser;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+//! Nebula observability launcher — thin wrapper around the xtrace server.
+//!
+//! Prefer this binary (or the `xtrace` image) over ad-hoc process flags so
+//! `DATABASE_URL` / `OBSERVE_TOKEN` / bind address stay consistent with BFF
+//! (`OBSERVE_URL`, `OBSERVE_TOKEN`, `OBSERVE_AUTH_MODE`).
+//!
+//! Production compose may run the upstream image directly (`docker-compose`
+//! profile `observe`). This binary is for local/dev and custom packaging.
 
-#[derive(Parser)]
+use clap::Parser;
+
+#[derive(Parser, Debug)]
 #[command(
     name = "nebula-observe",
-    about = "Nebula observability service (powered by xtrace)"
+    about = "Nebula observability service (xtrace wrapper)"
 )]
 struct Args {
-    /// PostgreSQL connection URL
+    /// PostgreSQL connection URL (observe DB — not BFF session DB)
     #[arg(long, env = "DATABASE_URL")]
     database_url: String,
 
-    /// Bearer token for API authentication
+    /// Bearer token for API authentication (same value as BFF OBSERVE_TOKEN)
     #[arg(long, env = "OBSERVE_TOKEN", default_value = "")]
     token: String,
 
     /// Bind address for the HTTP server
-    #[arg(long, default_value = "0.0.0.0:8742")]
+    #[arg(long, env = "OBSERVE_BIND_ADDR", default_value = "0.0.0.0:8742")]
     bind_addr: String,
 
     /// Default project ID for metrics and traces
-    #[arg(long, default_value = "nebula")]
+    #[arg(long, env = "OBSERVE_PROJECT_ID", default_value = "nebula")]
     project_id: String,
+
+    /// Log format: text | json
+    #[arg(long, env = "LOG_FORMAT", default_value = "text")]
+    log_format: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,tower_http=info,sqlx=warn".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let args = Args::parse();
+
+    // Align with other Nebula components (stdout + optional OTLP later).
+    let _otel_guard = nebula_common::telemetry::init_tracing(
+        "nebula-observe",
+        None,
+        None,
+        &args.log_format,
+    );
+
+    if args.token.is_empty() {
+        tracing::warn!(
+            "OBSERVE_TOKEN is empty; xtrace API will accept unauthenticated requests \
+             (dev only). Set OBSERVE_TOKEN for production."
+        );
+    }
 
     tracing::info!(
         bind_addr = %args.bind_addr,
         project_id = %args.project_id,
-        "starting nebula-observe"
+        "starting nebula-observe (xtrace)"
     );
 
     xtrace::run_server(xtrace::ServerConfig {

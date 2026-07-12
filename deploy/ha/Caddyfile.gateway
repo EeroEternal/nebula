@@ -1,0 +1,8 @@
+:8081 {
+	reverse_proxy gateway-a:8081 gateway-b:8081 {
+		lb_policy round_robin
+		health_uri /healthz
+		health_interval 5s
+		health_timeout 2s
+	}
+}

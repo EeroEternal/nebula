@@ -1,7 +1,7 @@
 # Nebula 可观测性
 
-> 状态：统一设计与实施规范（2026-07-11）  
-> **执行清单：** [`../arch/optimization.md`](../arch/optimization.md) **N4-Obs**（双写 O1–O7 已落代码；O8 SLO 草案待补）。  
+> 状态：统一设计与实施规范（2026-07-12）  
+> **执行勾选：** [`../arch/optimization.md`](../arch/optimization.md) N4-Obs（O1–O7 ✅；**O8** SLO/告警待补）。  
 > Loki 采集：[`loki.md`](./loki.md)。
 
 

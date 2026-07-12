@@ -8,7 +8,7 @@
 ## 计划与架构（canonical）
 
 - [架构现状](../arch/architecture.md)
-- [下一步优化计划 N1–N4](../arch/optimization.md) — N1 主体完成；etcd 三节点暂缓；按需 N3/N4
+- [下一步优化计划](../arch/optimization.md) — 排期真源（O8 收尾；按需 N3/N4；etcd 三节点暂缓）
 - [HA 文档](./ha/) — 路线图 / runbook / [2026-07-11 真机报告](./ha/report-20260711.md)
 
 ## 控制面与接入

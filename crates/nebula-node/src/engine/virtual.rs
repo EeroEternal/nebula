@@ -7,7 +7,6 @@ use axum::{
     Router,
 };
 use reqwest::Client;
-use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -178,10 +177,7 @@ impl Engine for VirtualEngine {
 
     async fn health_check(&self, handle: &EngineHandle) -> bool {
         // Ping the local proxy /v1/models endpoint to verify it's up
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
-            .build()
-            .unwrap();
+        let client = nebula_common::health_http_client().unwrap_or_default();
         let url = format!("{}/v1/models", handle.base_url.trim_end_matches('/'));
         match client.get(&url).send().await {
             Ok(r) => r.status().is_success(),

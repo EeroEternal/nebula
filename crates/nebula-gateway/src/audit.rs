@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
 use chrono::Utc;
@@ -37,10 +37,7 @@ impl AuditWriter {
             _ => return None,
         };
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .ok()?;
+        let http = nebula_common::audit_http_client().ok()?;
 
         let (tx, rx) = mpsc::channel::<AuditEntry>(4096);
 

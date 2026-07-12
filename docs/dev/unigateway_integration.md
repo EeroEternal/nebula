@@ -1,8 +1,8 @@
 # 引入 UniGateway：定位、边界与落地建议
 
-> 状态：架构指导（2026-07-11）  
-> **边界仍有效；控制面 HA（选主/Drain/abort）已完成，剩余接入多副本见 optimization N1。**  
-> 相关：[`../arch/architecture.md`](../arch/architecture.md)、[`../arch/optimization.md`](../arch/optimization.md)、[`api_ownership.md`](./api_ownership.md)、[`gateway/`](./gateway/)
+> 状态：架构指导（2026-07-12）  
+> **边界仍有效。** 选主/Drain/abort 与接入多副本真机均已完成；排期见 [`../arch/optimization.md`](../arch/optimization.md)。  
+> 相关：[`../arch/architecture.md`](../arch/architecture.md)、[`api_ownership.md`](./api_ownership.md)、[`gateway/`](./gateway/)
 
 ---
 
@@ -146,7 +146,7 @@ UG 只应出现在 **Gateway 进程内**（或 Gateway 调用的库边界内）�
 - client disconnect / abort 经 Gateway 取消下游到 Router，再断开引擎连接。
 - abort / 主动 drain 的 metrics 口径与 SLO 文档一致（不算错误预算，除非另有定义）。
 
-不在本文件范围：etcd 三节点与接入多副本——见 [`../arch/optimization.md`](../arch/optimization.md) N1 与 [`ha/ha_roadmap.md`](./ha/ha_roadmap.md)。
+不在本文件范围：生产 etcd 三节点（暂缓）与 HA 演练细节——见 [`ha/ha_roadmap.md`](./ha/ha_roadmap.md)；排期见 [`../arch/optimization.md`](../arch/optimization.md)。
 
 ---
 

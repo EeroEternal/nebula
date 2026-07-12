@@ -304,11 +304,7 @@ impl Engine for VllmEngine {
         let base_url = format!("http://127.0.0.1:{}", _port);
 
         // Health check
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(5))
-            .build()
-            .ok()?;
+        let http = nebula_common::health_http_client().ok()?;
 
         let health_url = format!("{}/health", base_url);
         match http.get(&health_url).send().await {
@@ -378,10 +374,7 @@ impl Engine for VllmEngine {
     }
 
     async fn health_check(&self, handle: &EngineHandle) -> bool {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(3))
-            .build()
-            .unwrap_or_default();
+        let http = nebula_common::health_http_client().unwrap_or_default();
         let health_url = format!("{}/health", handle.base_url);
         match http.get(&health_url).send().await {
             Ok(resp) => resp.status().is_success(),

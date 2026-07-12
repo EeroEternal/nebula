@@ -1,8 +1,8 @@
 use std::pin::Pin;
-use std::time::Duration;
 
 use futures_core::Stream;
 use futures_util::StreamExt;
+use nebula_common::proxy_http_client;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -22,14 +22,10 @@ pub struct OpenAIEngineClient {
 
 impl OpenAIEngineClient {
     pub fn new(base_url: String, model: String) -> Self {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(300))
-            .build()
-            .unwrap_or_else(|e| {
-                tracing::error!(error=%e, "failed to build reqwest client");
-                std::process::exit(1);
-            });
+        let http = proxy_http_client().unwrap_or_else(|e| {
+            tracing::error!(error=%e, "failed to build reqwest client");
+            std::process::exit(1);
+        });
 
         Self {
             base_url,

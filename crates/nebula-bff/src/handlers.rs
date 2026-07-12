@@ -8,42 +8,16 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use uuid::Uuid;
 
 use crate::args::XtraceAuthMode;
 use crate::auth::{require_role, AuthContext, Role};
+use crate::service::{self, error_response};
 use crate::state::AppState;
 use nebula_common::{
     ClusterStatus, EndpointInfo, EndpointStats, ModelLoadRequest, ModelRequest, NodeStatus,
     PlacementPlan,
 };
 use nebula_meta::MetaStore;
-
-#[derive(Serialize)]
-struct ErrorDetail {
-    code: String,
-    message: String,
-    request_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    details: Option<serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: ErrorDetail,
-}
-
-fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
-    let body = ErrorResponse {
-        error: ErrorDetail {
-            code: code.to_string(),
-            message: message.to_string(),
-            request_id: format!("req_{}", Uuid::new_v4()),
-            details: None,
-        },
-    };
-    (status, Json(body)).into_response()
-}
 
 pub async fn healthz() -> impl IntoResponse {
     Json(json!({"status": "ok"}))
@@ -205,31 +179,10 @@ pub async fn metrics(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return resp;
     }
-    let url = format!("{}/metrics", st.router_url.trim_end_matches('/'));
-    let resp = match st.http.get(url).send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "upstream_error",
-                &format!("router request failed: {}", e),
-            )
-        }
-    };
-
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let text = match resp.text().await {
-        Ok(text) => text,
-        Err(e) => {
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "upstream_error",
-                &format!("failed to read router response: {}", e),
-            )
-        }
-    };
-
-    (status, text).into_response()
+    match service::fetch_router_metrics_text(&st.http, &st.router_url).await {
+        Ok(text) => (StatusCode::OK, text).into_response(),
+        Err(e) => e.into_response(),
+    }
 }
 
 pub async fn logs(State(_st): State<AppState>) -> impl IntoResponse {

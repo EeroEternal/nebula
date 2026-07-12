@@ -1,11 +1,10 @@
 # Nebula 下一步优化计划
 
-> 更新：2026-07-11（可观测 N4-Obs 为主线）。  
-> 已完成项摘要见 [`architecture.md`](./architecture.md) §6–7；可观测设计源见 [`../dev/observability.md`](../dev/observability.md)。
+> 更新：2026-07-12。已完成项摘要见 [`architecture.md`](./architecture.md)；可观测设计见 [`../dev/observability.md`](../dev/observability.md)。
 
 ## 当前进展（一句话）
 
-M1 / N2 / N1 HA 主体已闭环。**当前主线：可观测 N4-Obs**——全链路 **xtrace + Prometheus 双写** + **JSON stdout → Loki** 日志路径。生产 etcd 三节点暂缓；N3 按需。
+M1 / N1 HA 主体 / N2 已完成。可观测双写与 Loki 路径（O1–O7）已落地；**剩余工程勾选：O8 SLO/告警草案**，以及按需 N3/N4。生产 etcd 三节点暂缓。
 
 ## 优先级总表
 
@@ -13,37 +12,36 @@ M1 / N2 / N1 HA 主体已闭环。**当前主线：可观测 N4-Obs**——全�
 |------|----|------|------|------|
 | **N2** | Q1–Q4 | 工程质量 | ✅ | BFF 去重、HTTP client、observe、CI |
 | **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd 暂缓 |
-| **N4-Obs** | O1–O4 | **可观测** | 🟡 **当前主线** | 双写路径 + Loki 日志（本文 §N4-Obs） |
+| **N4-Obs** | O1–O10 | 可观测 | ✅ O1–O7 / ⏳ O8 | 双写+Loki 已通；SLO runbook 待补 |
 | **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP；EngineShim |
 | **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能 |
 
-原则：不阻塞日常推理；观测先于运维硬化；etcd 三节点仍暂缓。
+原则：不阻塞日常推理；生产 etcd 三节点仍暂缓。
 
 ---
 
 ## 下一阶段顺序
 
 ```
-① N4-Obs（进行中）  双写 + JSON/Loki + SLO 口径文档
-② 运维硬化（可选）  unit/env 固化、HA 拓扑脚本化
-③ N3 / 产品 N4（有需求再开）
-④ 生产 etcd 三节点（暂缓）
+① O8（收尾）           SLO / 告警阈值写入 runbook
+② N3 / 产品 N4（有需求再开）
+③ 生产 etcd 三节点（暂缓）
 ```
 
 ---
 
-## N4-Obs — 全链路可观测（当前主线）
+## N4-Obs — 全链路可观测
 
 设计源：[`../dev/observability.md`](../dev/observability.md)、[`../dev/xtrace_requirements.md`](../dev/xtrace_requirements.md)、[`../dev/loki.md`](../dev/loki.md)。
 
-### 目标架构（落地）
+### 目标架构（已落地）
 
 ```text
   Gateway / Router / Node / Scheduler
            │
-           ├─ OTLP traces ──► xtrace (nebula-observe)     # LLM 语义 / 链路
-           ├─ MetricPoint batch ──► xtrace                # 与 /metrics 同 emit 点
-           ├─ Prometheus Counter/Histogram ──► /metrics   # 客户 scrape
+           ├─ OTLP traces ──► xtrace (nebula-observe)
+           ├─ MetricPoint batch ──► xtrace
+           ├─ Prometheus Counter/Histogram ──► /metrics
            └─ JSON logs (stdout) ──► Promtail/Vector ──► Loki
 
   关联：request_id + W3C traceparent（Gateway → Router）
@@ -55,16 +53,16 @@ M1 / N2 / N1 HA 主体已闭环。**当前主线：可观测 N4-Obs**——全�
 
 | ID | 项 | 状态 | 落点 |
 |----|----|------|------|
-| **O1** | 公共双写发射器 | ✅ | `nebula_common::DualWriteEmitter`（`dual_write.rs`） |
-| **O2** | Gateway 热路径双写 | ✅ | `/metrics` 原子计数 + xtrace `nebula_gateway_*` outcome/e2e |
-| **O3** | Router 热路径双写 | ✅ | latency/TTFT/outcome → Prometheus + xtrace `nebula_router_*` |
-| **O4** | Node GPU/引擎 → xtrace | ✅（既有） | heartbeat `push_metrics`；etcd `/stats/` 仍为控制面热路径 |
-| **O5** | OTLP + W3C 传播 | ✅ | `init_tracing` 设 `TraceContextPropagator`；Router `inject_trace_context` |
-| **O6** | JSON 日志（Loki 路径） | ✅ | `NEBULA_LOG_FORMAT=json`；span 带 `request_id`/`service` |
-| **O7** | Loki 采集文档 + 示例 | ✅ | [`../dev/loki.md`](../dev/loki.md)、`deploy/observe/promtail-nebula.yaml` |
-| **O8** | SLO / 告警草案 | ⏳ | 5xx、retry、circuit、timeout 阈值（见 observability §5.3）进 runbook |
-| **O9** | 双写缺口审计 | ⏳ 持续 | Scheduler 等业务点按需补 xtrace；保持低基数 |
-| **O10** | xtrace 深度需求 | ⏸ 上游 | 流式 Span / 引擎 Python 拼接：见 `xtrace_requirements.md`，不阻塞 O1–O7 |
+| **O1** | 公共双写发射器 | ✅ | `nebula_common::DualWriteEmitter` |
+| **O2** | Gateway 热路径双写 | ✅ | `/metrics` + xtrace `nebula_gateway_*` |
+| **O3** | Router 热路径双写 | ✅ | latency/TTFT/outcome 双写 |
+| **O4** | Node GPU/引擎 → xtrace | ✅ | heartbeat `push_metrics`；etcd `/stats/` 仍为控制面 |
+| **O5** | OTLP + W3C 传播 | ✅ | `TraceContextPropagator`；Router inject |
+| **O6** | JSON 日志（Loki 路径） | ✅ | `NEBULA_LOG_FORMAT=json` |
+| **O7** | Loki 采集文档 + 示例 | ✅ | [`../dev/loki.md`](../dev/loki.md)、`deploy/observe/` |
+| **O8** | SLO / 告警草案 | ⏳ **当前收尾** | observability §5.3 → runbook |
+| **O9** | 双写缺口审计 | ⏳ 持续 | Scheduler 等按需补；低基数 |
+| **O10** | xtrace 深度需求 | ⏸ 上游 | 见 `xtrace_requirements.md` |
 
 ### 环境变量（全链路打开）
 
@@ -139,7 +137,7 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 | 文档 | 用途 |
 |------|------|
 | [`architecture.md`](./architecture.md) | 架构现状 |
-| 本文 | **下一步**（N4-Obs 主线） |
+| 本文 | **排期真源**（剩余 O8 / 按需 N3–N4） |
 | [`../dev/observability.md`](../dev/observability.md) | 可观测设计权威 |
 | [`../dev/xtrace_requirements.md`](../dev/xtrace_requirements.md) | xtrace 上游扩展需求 |
 | [`../dev/loki.md`](../dev/loki.md) | Loki 采集路径 |

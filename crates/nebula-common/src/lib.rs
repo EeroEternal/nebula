@@ -30,5 +30,12 @@ pub use placement::{next_placement_version, PlacementAssignment, PlacementPlan};
 
 pub mod args;
 pub mod auth;
+pub mod dual_write;
+pub mod http;
 pub mod telemetry;
-pub use args::CommonArgs;
+pub use args::{parse_etcd_endpoints, CommonArgs};
+pub use dual_write::DualWriteEmitter;
+pub use http::{
+    audit_http_client, build_http_client, control_plane_http_client, health_http_client,
+    proxy_http_client, HttpClientOptions,
+};

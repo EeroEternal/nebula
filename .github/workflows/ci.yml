@@ -5,9 +5,10 @@ on:
   push:
     branches: [main]
 
+# N2-Q4: PR must green on full workspace tests (includes election / fencing unit tests).
 jobs:
   test:
-    name: cargo test
+    name: cargo test --workspace
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,5 +17,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Test workspace
+      - name: Test workspace (gate)
         run: cargo test --workspace --all-targets -- --nocapture
+

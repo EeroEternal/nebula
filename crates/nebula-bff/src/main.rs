@@ -7,7 +7,6 @@ mod service;
 mod state;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::{
     middleware,
@@ -15,6 +14,7 @@ use axum::{
     Router,
 };
 use clap::Parser;
+use nebula_common::control_plane_http_client;
 
 use crate::args::Args;
 use crate::auth::{db_auth_middleware, initialize_auth_schema};
@@ -41,17 +41,12 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let store =
-        nebula_meta::EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint))
-            .await?;
+        nebula_meta::EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
 
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|e| {
-            tracing::error!(error=%e, "failed to build reqwest client");
-            std::process::exit(1);
-        });
+    let http = control_plane_http_client().unwrap_or_else(|e| {
+        tracing::error!(error=%e, "failed to build reqwest client");
+        std::process::exit(1);
+    });
 
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(10)

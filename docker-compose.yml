@@ -74,10 +74,11 @@ services:
       dockerfile: crates/nebula-router/Dockerfile
     environment:
       RUST_LOG: info
+      ETCD_ENDPOINT: http://etcd:2379
     command: >-
       /app/nebula-router
-      --listen 0.0.0.0:18081
-      --etcd-endpoints http://etcd:2379
+      --listen-addr 0.0.0.0:18081
+      --etcd-endpoint http://etcd:2379
     ports:
       - "18081:18081"
     depends_on:
@@ -88,6 +89,8 @@ services:
     build:
       context: .
       dockerfile: crates/nebula-scheduler/Dockerfile
+    environment:
+      ETCD_ENDPOINT: http://etcd:2379
     command: >-
       /app/nebula-scheduler
       --etcd-endpoint http://etcd:2379

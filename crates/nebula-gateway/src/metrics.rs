@@ -172,6 +172,7 @@ pub async fn track_requests(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, std::convert::Infallible> {
+    let start = std::time::Instant::now();
     st.metrics.requests_inflight.fetch_add(1, Ordering::Relaxed);
     let resp = next.run(req).await;
     st.metrics.requests_inflight.fetch_sub(1, Ordering::Relaxed);
@@ -185,6 +186,16 @@ pub async fn track_requests(
     } else if status >= 200 {
         st.metrics.status_2xx.fetch_add(1, Ordering::Relaxed);
     }
+
+    // Dual-write to xtrace (Prometheus already updated above). Abort counting is
+    // separate in handlers; here we mirror aggregate gateway traffic.
+    st.dual_write.emit_request_outcome(
+        "nebula_gateway",
+        None,
+        status,
+        Some(start.elapsed().as_secs_f64()),
+        false,
+    );
 
     Ok(resp)
 }

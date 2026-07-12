@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!(node_id=%args.node_id, "nebula-node starting...");
 
-    let store = EtcdMetaStore::connect(std::slice::from_ref(&args.common.etcd_endpoint)).await?;
+    let store = EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
 
     // C3: one shared lease for node status + endpoints, refreshed by keepalive.
     let lease_ttl_secs = ((args.heartbeat_ttl_ms as f64 / 1000.0).ceil() as i64).max(10);

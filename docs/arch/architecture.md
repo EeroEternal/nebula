@@ -1,9 +1,8 @@
 # Nebula 架构
 
-> 权威架构说明（2026-07-11 修订）。路径评估已吸收原 vs_xoscar / GPT 审查结论。  
-> 下一步工程计划见 [`optimization.md`](./optimization.md)；HA 细节见 [`../dev/ha/`](../dev/ha/)；组件边界见 [`../dev/api_ownership.md`](../dev/api_ownership.md)。
+> 权威架构说明（2026-07-12）。排期与勾选见 [`optimization.md`](./optimization.md)；HA 报告见 [`../dev/ha/`](../dev/ha/)；边界见 [`../dev/api_ownership.md`](../dev/api_ownership.md)。
 
-**结论：** 架构方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 / N2 / N1 HA 主体已闭环；**当前主线可观测（N4-Obs：xtrace+Prometheus 双写 + Loki 日志）**；生产 etcd 三节点暂缓；N3/N4 产品按需。
+**结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 正确性、N1 接入/调度 HA（真机）、N2 工程质量已完成；生产 etcd 三节点暂缓。剩余工程项以 [`optimization.md`](./optimization.md) 为准（可观测收尾 O8、按需 N3/N4）。
 
 ---
 
@@ -32,7 +31,7 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 
 | 组件 | 职责 |
 |------|------|
-| **Gateway** | OpenAI 兼容 HTTP/SSE；鉴权、规范化、错误映射；abort 传播；注入 `x-nebula-model` |
+| **Gateway** | OpenAI 兼容 HTTP/SSE；鉴权、规范化、错误映射；abort；注入 `x-nebula-model` |
 | **Router** | endpoint 选择 + 代理；plan_version / stats / 熔断过载 |
 | **Scheduler** | PlacementPlan CAS；只认 `/deployments/`；leader election + fencing |
 | **MetaStore (etcd)** | 权威元数据（watch / lease / CAS） |
@@ -47,6 +46,8 @@ Client → Gateway → Router → Engine
                 ↗
 Node / Scheduler / BFF ⇄ etcd
 ```
+
+生产元数据默认可单节点 etcd；接入面可多副本（见 HA 文档）。三节点 etcd 能力已旁路验证，生产迁移暂缓。
 
 ---
 
@@ -66,7 +67,7 @@ Node / Scheduler / BFF ⇄ etcd
 
 ---
 
-## 4. 调度与节点（已落地行为）
+## 4. 调度与节点
 
 **扩缩容：** `healthy > desired` 截断 assignment；`<` 增加；`==` 不改（除非 stale）。缩容优先低 pending。
 
@@ -85,8 +86,13 @@ Node / Scheduler / BFF ⇄ etcd
 
 控制台写路径走 BFF；Gateway `/v1/admin/*` 写接口不扩新双实现（见 api_ownership）。
 
-Tracing：各组件 `nebula_common::telemetry::init_tracing`（OTLP + W3C 传播；`NEBULA_LOG_FORMAT=json` → Loki）。  
-热路径指标：**Prometheus `/metrics` + xtrace batch 双写**（`DualWriteEmitter`）。鉴权分离：推理 token、BFF session、`OBSERVE_TOKEN`。
+可观测三平面（设计见 [`../dev/observability.md`](../dev/observability.md)）：
+
+- **Trace / LLM 语义：** OTLP → xtrace（`init_tracing` + W3C `traceparent`）
+- **时序：** Prometheus `/metrics`；热路径与 xtrace **双写**（`DualWriteEmitter`）
+- **日志：** `NEBULA_LOG_FORMAT=json` → stdout → Promtail/Vector → Loki（[`../dev/loki.md`](../dev/loki.md)）
+
+鉴权分离：推理 token、BFF session、`OBSERVE_TOKEN`。abort/drain 指标不计入 5xx 错误预算。
 
 ---
 
@@ -96,9 +102,12 @@ Tracing：各组件 `nebula_common::telemetry::init_tracing`（OTLP + W3C 传播
 |------|------|------|
 | **M0** | 单机 etcd + gateway/router/node + 引擎 streaming | ✅ |
 | **M1** | 多机调度：多副本 + 缩容/Drain + watch + 自愈 + `/stats/` | ✅ |
-| **M2** | 声明式单路径；header 热路径；能力面增强（部分已做） | 部分 ✅；capabilities 按需 |
-| **M3** | affinity + prefix/KV 路由深化；Agent 友好 | 策略已有，持续打磨 |
-| **HA** | Scheduler election ✅；接入多副本真机 ✅；etcd 三节点拓扑/旁路 ✅ | 报告 [`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)；生产 etcd 三节点**暂缓** |
+| **M2** | 声明式单路径；header 热路径 | ✅；capabilities 按需 |
+| **M3** | affinity + prefix/KV 路由深化 | 策略已有，持续打磨 |
+| **HA** | Scheduler election；接入多副本真机；旁路 etcd 三节点 | ✅ 主体；生产 etcd 三节点 ⏸ |
+| **Obs** | 双写 + JSON/Loki 路径 | ✅ O1–O7；O8 SLO runbook 见 optimization |
+
+HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)。
 
 ---
 
@@ -106,16 +115,15 @@ Tracing：各组件 `nebula_common::telemetry::init_tracing`（OTLP + W3C 传播
 
 | Wave | 内容 |
 |------|------|
-| A | 同节点多副本、自动缩容、Drain 周期、取消契约 |
-| B | 恢复预算/进程树、Router revision、每模型 plan_version、逻辑 version、deployments 单路径 |
-| C | header 热路径、锁外 I/O、lease 复用、文档与单测 |
+| A–C | 多副本、缩容、Drain、恢复预算、plan_version、deployments、header、lease、锁外 I/O |
 | D1/D2 | Scheduler HA、Drain 闭环 |
-| D3 主体 | 接入多副本 + 真机 Phase D 演练（生产 etcd 迁移除外） |
+| D3 主体 | 接入多副本 + Phase D 真机演练（生产 etcd 迁移除外） |
+| N2 | BFF 去重、HTTP client、observe、CI |
 
-未完成与按需项见 [`optimization.md`](./optimization.md)。
+未尽项（O8、N3、产品 N4、生产 etcd）只在 [`optimization.md`](./optimization.md) 维护，本文不另开排期表。
 
 ---
 
 ## 8. 总评
 
-Nebula 用 etcd + 引擎原生 HTTP 重新分解了 actor 式进程管理问题。方向无需调整；正确性、工程可维护性与接入/调度 HA 行为已在真机验证。生产 etcd 三节点**暂缓**；下一步按业务做能力面（N3）与产品化（N4）——而不是再改架构主轴。
+Nebula 用 etcd + 引擎原生 HTTP 重新分解了 actor 式进程管理问题，架构主轴无需再改。正确性与接入/调度 HA 行为已有真机报告；工程债 N2 已收。生产继续单节点 etcd 即可。具体「下一步做什么」以 [`optimization.md`](./optimization.md) 为唯一排期源，避免在本文重复过时结论。

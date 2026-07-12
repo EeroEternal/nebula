@@ -86,8 +86,14 @@ pub async fn proxy_chat_completions(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Response {
-    let _ctx = build_execution_context(&headers);
+    let ctx = build_execution_context(&headers);
+    let request_id = ctx.request_id.clone();
     let request_start = std::time::Instant::now();
+    tracing::debug!(
+        request_id = %request_id,
+        service = "nebula-router",
+        "router proxy start"
+    );
 
     let method = req.method().clone();
     let uri_path = req.uri().path().to_string();
@@ -108,6 +114,13 @@ pub async fn proxy_chat_completions(
                             .request_too_large_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         st.metrics.record_model_status(&st.model_uid, 413);
+                        st.dual_write.emit_request_outcome(
+                            "nebula_router",
+                            Some(&st.model_uid),
+                            413,
+                            None,
+                            false,
+                        );
                         return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
                             .into_response();
                     }
@@ -151,19 +164,19 @@ pub async fn proxy_chat_completions(
         let ep = match (plan_version, excluded_endpoint.as_ref()) {
             (Some(pv), Some((exclude_model_uid, exclude_replica_id))) => {
                 st.router.route_with_plan_version_excluding(
-                    &_ctx,
+                    &ctx,
                     &model_uid,
                     pv,
                     (exclude_model_uid.as_str(), *exclude_replica_id),
                 )
             }
-            (Some(pv), None) => st.router.route_with_plan_version(&_ctx, &model_uid, pv),
+            (Some(pv), None) => st.router.route_with_plan_version(&ctx, &model_uid, pv),
             (None, Some((exclude_model_uid, exclude_replica_id))) => st.router.route_excluding(
-                &_ctx,
+                &ctx,
                 &model_uid,
                 (exclude_model_uid.as_str(), *exclude_replica_id),
             ),
-            (None, None) => st.router.route(&_ctx, &model_uid),
+            (None, None) => st.router.route(&ctx, &model_uid),
         };
 
         let ep = match ep {
@@ -254,9 +267,16 @@ pub async fn proxy_chat_completions(
                     continue;
                 }
 
+                let e2e = request_start.elapsed().as_secs_f64();
                 st.metrics.record_model_status(&model_uid, 502);
-                st.metrics
-                    .observe_e2e_latency(&model_uid, request_start.elapsed().as_secs_f64());
+                st.metrics.observe_e2e_latency(&model_uid, e2e);
+                st.dual_write.emit_request_outcome(
+                    "nebula_router",
+                    Some(&model_uid),
+                    502,
+                    Some(e2e),
+                    false,
+                );
                 return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
             }
         }
@@ -275,8 +295,10 @@ pub async fn proxy_chat_completions(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
+        let dual = st.dual_write.clone();
         let model_uid_for_stream = model_uid.clone();
         let status_code = status.as_u16();
+        let request_id = request_id.clone();
         tokio::spawn(async move {
             let mut first_chunk = true;
             let mut aborted = false;
@@ -294,6 +316,7 @@ pub async fn proxy_chat_completions(
                                     first_chunk = false;
                                     let ttft = request_start.elapsed().as_secs_f64();
                                     metrics.observe_ttft(&model_uid_for_stream, ttft);
+                                    dual.emit_ttft("nebula_router", &model_uid_for_stream, ttft);
                                 }
                                 if tx.send(Ok(b)).await.is_err() {
                                     aborted = true;
@@ -311,10 +334,28 @@ pub async fn proxy_chat_completions(
                 metrics
                     .requests_aborted_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::info!(model_uid=%model_uid_for_stream, "router SSE aborted: client disconnected");
+                dual.emit_request_outcome(
+                    "nebula_router",
+                    Some(&model_uid_for_stream),
+                    status_code,
+                    Some(e2e),
+                    true,
+                );
+                tracing::info!(
+                    model_uid = %model_uid_for_stream,
+                    request_id = %request_id,
+                    "router SSE aborted: client disconnected"
+                );
                 // Abort is not a 5xx / model error.
             } else {
                 metrics.record_model_status(&model_uid_for_stream, status_code);
+                dual.emit_request_outcome(
+                    "nebula_router",
+                    Some(&model_uid_for_stream),
+                    status_code,
+                    Some(e2e),
+                    false,
+                );
             }
             // Dropping `upstream` closes the connection to the engine.
         });
@@ -337,6 +378,13 @@ pub async fn proxy_chat_completions(
     let e2e = request_start.elapsed().as_secs_f64();
     st.metrics.observe_e2e_latency(&model_uid, e2e);
     st.metrics.record_model_status(&model_uid, status.as_u16());
+    st.dual_write.emit_request_outcome(
+        "nebula_router",
+        Some(&model_uid),
+        status.as_u16(),
+        Some(e2e),
+        false,
+    );
 
     let mut out = Response::builder()
         .status(status)

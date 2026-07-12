@@ -1,8 +1,9 @@
 # Nebula HA 执行路线图
 
 > 状态：Phase A–D 主体完成；**生产 etcd 三节点迁移暂缓**（2026-07-11 决策）  
-> 更新时间：2026-07-11  
+> 更新时间：2026-07-12  
 > 原则与架构：[`../../arch/architecture.md`](../../arch/architecture.md)  
+> 排期真源：[`../../arch/optimization.md`](../../arch/optimization.md)  
 > 真机报告：[`report-20260711.md`](./report-20260711.md)
 
 Scheduler 选主 / fencing / Drain、接入多副本真机演练已完成。生产 `nebula-etcd` 保持单节点即可；三节点能力已在旁路集群验证，需要生产 SLA 时再迁。
@@ -27,7 +28,7 @@ Scheduler 选主 / fencing / Drain、接入多副本真机演练已完成。生�
 - Phase D 真机演练报告：✅（[report-20260711.md](./report-20260711.md)）
 - 生产 etcd 三节点：⏸ **暂缓**（旁路 3 节点已验证；不阻塞当前排期）
 
-下一优先：按 [`optimization.md`](../../arch/optimization.md) 开 N3/N4（业务驱动）；etcd 迁移不排期。
+排期见 [`optimization.md`](../../arch/optimization.md)（O8 收尾 / 按需 N3–N4）；etcd 生产迁移不排期。
 
 ---
 
@@ -38,7 +39,7 @@ Scheduler 选主 / fencing / Drain、接入多副本真机演练已完成。生�
 | `gateway` / `bff` | 无状态多副本，LB 后；不参与选主 |
 | `router` | 无状态多副本；只读 etcd endpoint；认 `plan_version` |
 | `scheduler` | 2~3 副本 + etcd election；仅 leader 写；follower `/healthz`=503 |
-| `etcd` | 权威存储；先单节点跑通选主，再上 3 节点 |
+| `etcd` | 权威存储；**生产默认单节点**；三节点旁路已验证，SLA 需要时再迁 |
 | `postgres` | 用户/会话等；不参与 Placement 权威；HA 可后置 |
 | `node` | 按 GPU 机器扩展；拒落后 epoch；执行 drain stop |
 
@@ -64,22 +65,22 @@ Scheduler 选主 / fencing / Drain、接入多副本真机演练已完成。生�
 
 **验收**：缩容与取消不误伤成功率口径；无孤儿 endpoint。
 
-### Phase C — 接入与元数据层多副本（= optimization N1，当前主线）
+### Phase C — 接入与元数据层多副本（已完成主体）
 
-1. etcd 3 节点；组件改连集群 endpoint
-2. gateway / bff / router 至少 2 副本 + LB 健康检查
-3. postgres 主备或托管（可与本阶段并行，不阻塞）
+1. ~~etcd 3 节点生产迁移~~ → ⏸ 暂缓（旁路验证即可）
+2. gateway / bff / router 至少 2 副本 + LB 健康检查 → ✅ 真机
+3. postgres 主备或托管 → 可后置
 
-**验收**：杀单一 etcd/接入副本，控制面与推理仍可用。
+**验收：** 杀单一接入副本，控制面与推理仍可用（见报告）。
 
-### Phase D — 全链路演练
+### Phase D — 全链路演练（已完成）
 
 1. 杀接入层副本
 2. 杀 scheduler leader（含旧主复活脑裂）
 3. 下线单台 GPU 节点
-4. 记录成功率、RTO；报告写入 `docs/dev/ha/report-*.md`
+4. 记录成功率、RTO → [`report-20260711.md`](./report-20260711.md)
 
-**验收**：满足下方 Definition of Done；真机演练不替代 Phase A 的 CI 单测。
+**验收：** 真机报告 PASS；CI election/fencing 单测仍为门禁。
 
 ---
 
@@ -105,19 +106,15 @@ Scheduler 选主 / fencing / Drain、接入多副本真机演练已完成。生�
 
 ## 7. 工单拆分（剩余）
 
-Phase A/B（选主、fencing、Drain、abort、CAS）已完成。当前只跟：
-
 | 优先级 | 工单 | 映射 | 状态 |
 |--------|------|------|------|
-| P0 | etcd 3 + gateway/bff/router 多副本 + LB | optimization **N1** / Phase C | 拓扑 ✅；真机 gateway/router×2 ✅ |
-| P0 | HA 演练报告 `report-*.md` | Phase D | ✅ [report-20260711.md](./report-20260711.md) |
-| — | 生产 etcd 迁 3 节点 + 客户端多 endpoint | Phase C 收尾 | ⏸ 暂缓 |
-| P1 | CI/工程质量（BFF 去重等） | optimization **N2** | ✅ |
+| — | 生产 etcd 迁 3 节点 | Phase C 收尾 | ⏸ 暂缓 |
+| — | 其余工程 | [`optimization.md`](../../arch/optimization.md) | O8 / 按需 N3–N4 |
 
-已关闭项勿再开 issue 重复做。详见 [`../../arch/optimization.md`](../../arch/optimization.md)。
+N1 接入多副本、Phase D 报告、N2 CI/质量均已关闭，勿重复开 issue。
 
 ---
 
 ## 8. 维护
 
-每完成一阶段更新：实施状态、风险与回滚、验收结果（或链接到 `report-*.md`）。进度与 [`../../arch/optimization.md`](../../arch/optimization.md) N1 同步。
+每完成一阶段更新本页状态与 `report-*.md`。排期只改 [`optimization.md`](../../arch/optimization.md)，避免与 architecture 双写「下一步」。
