@@ -6,19 +6,23 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-13
+
+Product-alignment release covering P0–P6 from `docs/dev/product_plan.md`. Real GPU / native Gateway e2e and multi-tenant load tests remain deferred.
+
 ### Added
-- Shared HTTP client helpers in `nebula-common` (`proxy` / `control_plane` / `health` / `audit` presets).
-- Comma-separated `ETCD_ENDPOINT` multi-address support for HA clients.
-- HA topology: `docker-compose.ha.yml`, `deploy/ha/Caddyfile.*`, `scripts/phase_d_ha_drill.sh`.
-- Phase D bare-metal HA drill report: `docs/dev/ha/report-20260711.md`.
-- Observability dual-write: `nebula_common::DualWriteEmitter` (Prometheus local + xtrace `push_metrics` on Gateway/Router hot path).
-- W3C TraceContext propagator in `init_tracing`; JSON log path docs for Loki (`docs/dev/loki.md`, `deploy/observe/promtail-nebula.yaml`).
+- **P0 Observability trust:** `kv_cache_usage` semantics, scrape health metrics/fixtures, Gateway API `data_source: router`, O8 SLO/alert runbook samples.
+- **P1 Engine Capability / Adapter:** capability contracts, static tables, dialect CLI, runtime discovery persisted to etcd `/capabilities/`, engine version support checks.
+- **P2 Serving Cell:** etcd `/cells/` CRUD, BFF observe + OpenAI probe, Router whole-ingress routing without Nebula retry/circuit amplification, console `/cells`.
+- **P3 Compat / hardware ledger:** `NodeStatus.platform` + GPU identity, `CompatibilityRule` + etcd `/compat/`, placement rejects, inventory API, console governance matrix.
+- **P4 Model SLO / diagnostics:** `ModelSlo` + evaluate (never fake-green on low traffic), `DiagnosticEvent` timeline, console governance SLO panel.
+- **P5 Benchmark / recommend / canary:** `scripts/benchmark/`, etcd profiles/runs, recommend API (insufficient data → no silent default engine), canary promote/rollback, console panels.
+- **P6 Multi-tenant / cost:** `Tenant` + quotas, `token:role[:tenant_id]`, Gateway admission (`NEBULA_MULTI_TENANT`), usage/pricing/cost APIs, low-cardinality deny metrics, audit tenant/deny tags, console tenant view.
+- Shared `ExecutionContext` header propagation (`x-nebula-tenant-id` / priority / deadline / budget).
 
 ### Changed
-- BFF v2 handlers are thin envelopes; shared logic lives in `service` (metrics parse, migrate, cache, errors).
-- `nebula-observe` uses common telemetry and aligned `OBSERVE_*` env conventions.
-- CI documents full-workspace test gate (`cargo test --workspace --all-targets`).
-- Architecture / optimization docs: N4-Obs is current mainline; production etcd 3-node deferred.
+- Auth tokens accept optional tenant binding; rate-limit keys are tenant-scoped when bound.
+- Product plan / optimization docs mark P0–P6 Batch 1 complete; true hardware e2e left paused.
 
 ## [0.2.0] - 2026-07-11
 
@@ -29,14 +33,9 @@ The format is based on Keep a Changelog.
 - Meta `list_prefix_snapshot` and Router per-model `plan_version` filtering (snapshot-revision watch).
 - Cancel/SSE contract script: `scripts/test_cancel_sse.sh`.
 - Docs layout: `docs/arch/`, `docs/dev/`, `docs/manual/` with index at `docs/README.md`.
-
-### Fixed
-- Scheduler reconcile panic when replica bounds had `min > max` (orphan empty placement).
-- Node refreshes endpoint `plan_version` after placement version bumps so Router keeps accepting remaining replicas.
-
-### Changed
-- Architecture and sprint plan docs rewritten around correctness (multi-replica / scale-in / Drain) before recovery and performance.
-
+- Shared HTTP client helpers in `nebula-common` (`proxy` / `control_plane` / `health` / `audit` presets).
+- Comma-separated `ETCD_ENDPOINT` multi-address support for HA clients.
+- HA topology: `docker-compose.ha.yml`, `deploy/ha/Caddyfile.*`, `scripts/phase_d_ha_drill.sh`.
 ## [0.1.1] - 2026-04-28
 
 ### Changed
@@ -86,4 +85,6 @@ The format is based on Keep a Changelog.
 ### Fixed
 - Fixed Audit Logs Unauthorized behavior by clarifying and enforcing service/internal auth configuration paths.
 
-[Unreleased]: https://github.com/lipish/nebula/compare/555ddec...HEAD
+[Unreleased]: https://github.com/EeroEternal/nebula/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/EeroEternal/nebula/compare/v1.2.1...v1.3.0
+[0.2.0]: https://github.com/EeroEternal/nebula/compare/v0.1.1...v0.2.0

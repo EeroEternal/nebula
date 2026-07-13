@@ -17,8 +17,9 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use uuid::Uuid;
 
 use nebula_common::{
-    ClusterStatus, DesiredState, EndpointInfo, ExecutionContext, ModelDeployment, ModelLoadRequest,
-    ModelRequest, ModelSource, ModelSpec, NodeStatus, PlacementPlan,
+    build_execution_context, inject_execution_context, peek_json_model_field, ClusterStatus,
+    DesiredState, EndpointInfo, ModelDeployment, ModelLoadRequest, ModelRequest, ModelSource,
+    ModelSpec, NodeStatus, PlacementPlan, Tenant, TenantDenyCode,
 };
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
@@ -37,10 +38,11 @@ pub(crate) struct LogsQuery {
 
 pub async fn create_responses(
     State(st): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let _ctx = build_execution_context(&headers);
+    let _ctx = build_execution_context(&headers, auth.tenant_id.as_deref(), None);
 
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -403,28 +405,16 @@ async fn proxy_chat_as_anthropic(
     (StatusCode::OK, Json(anth)).into_response()
 }
 
-pub fn build_execution_context(headers: &HeaderMap) -> ExecutionContext {
-    let session_id = headers
-        .get("x-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    ExecutionContext {
-        request_id: format!("req_{}", Uuid::new_v4()),
-        session_id,
-        tenant_id: None,
-        priority: None,
-        deadline_ms: None,
-        budget_tokens: None,
-    }
-}
-
 pub async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-pub async fn not_implemented(State(_st): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    let ctx = build_execution_context(&headers);
+pub async fn not_implemented(
+    State(_st): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let ctx = build_execution_context(&headers, auth.tenant_id.as_deref(), None);
     let body = json!({
         "error": {
             "message": "not implemented",
@@ -471,6 +461,7 @@ fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
 
 pub async fn proxy_post(
     State(st): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Response {
@@ -493,17 +484,55 @@ pub async fn proxy_post(
         }
     };
 
-    let mut req_headers = to_reqwest_headers(&headers);
-    // C1: inject model header so Router can route without a second full JSON parse.
-    if let Some(model) = nebula_common::peek_json_model_field(&body_bytes) {
-        if let Ok(v) = HeaderValue::from_str(&model) {
-            req_headers.insert(
+    let model = peek_json_model_field(&body_bytes);
+    let ctx = build_execution_context(&headers, auth.tenant_id.as_deref(), None);
+
+    // Tenant admission at Gateway boundary (not pushed into engines).
+    let _conc_guard = if st.auth.multi_tenant {
+        if let Some(ref tenant_id) = ctx.tenant_id {
+            match load_tenant(&*st.store, tenant_id).await {
+                Ok(Some(tenant)) => {
+                    let est = ctx.budget_tokens.unwrap_or(0);
+                    match st
+                        .tenant_admission
+                        .try_admit(&tenant, model.as_deref(), est)
+                        .await
+                    {
+                        Ok(g) => Some(g),
+                        Err(code) => {
+                            st.metrics.record_tenant_deny(code.as_str());
+                            return deny_response(code);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Multi-tenant on but tenant record missing: allow with auth RPS only.
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!(error=%e, tenant_id=%tenant_id, "tenant lookup failed; allowing request");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let mut outbound = headers.clone();
+    if let Some(ref model) = model {
+        if let Ok(v) = HeaderValue::from_str(model) {
+            outbound.insert(
                 HeaderName::from_static(nebula_common::HEADER_NEBULA_MODEL),
                 v,
             );
         }
     }
-    nebula_common::telemetry::inject_trace_context(&mut req_headers);
+    inject_execution_context(&mut outbound, &ctx);
+    nebula_common::telemetry::inject_trace_context(&mut outbound);
+    let req_headers = to_reqwest_headers(&outbound);
 
     let resp = match st
         .http
@@ -540,7 +569,6 @@ pub async fn proxy_post(
                 tokio::select! {
                     biased;
                     _ = tx.closed() => {
-                        // Client disconnected — drop upstream to abort engine generation.
                         metrics
                             .requests_aborted_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -563,7 +591,6 @@ pub async fn proxy_post(
                     }
                 }
             }
-            // Dropping `upstream` closes the TCP connection to Router/engine.
         });
 
         let stream = ReceiverStream::new(rx);
@@ -589,6 +616,24 @@ pub async fn proxy_post(
         .unwrap_or_else(|_| Response::new(Body::empty()));
     append_headers(&resp_headers, &mut out);
     out
+}
+
+async fn load_tenant(store: &dyn MetaStore, tenant_id: &str) -> anyhow::Result<Option<Tenant>> {
+    match store.get(&format!("/tenants/{tenant_id}")).await? {
+        Some((data, _)) => Ok(serde_json::from_slice(&data).ok()),
+        None => Ok(None),
+    }
+}
+
+fn deny_response(code: TenantDenyCode) -> Response {
+    let mut resp = nebula_common::auth::tenant_denied(code.as_str(), code.message());
+    if let Ok(v) = HeaderValue::from_str(code.as_str()) {
+        resp.headers_mut().insert(
+            HeaderName::from_static("x-nebula-deny-code"),
+            v,
+        );
+    }
+    resp
 }
 
 pub async fn proxy_v2(
@@ -1103,6 +1148,9 @@ pub async fn admin_load_model(
             node_affinity: req.node_id.clone(),
             gpu_affinity,
             config_overrides: req.config.clone(),
+            image_id: None,
+            image_override_reason: None,
+            compat_rule_ids: vec![],
             version: 1,
             updated_at_ms: now,
         },

@@ -58,6 +58,10 @@ impl Engine for SglangEngine {
         "sglang"
     }
 
+    fn capabilities(&self) -> nebula_common::EngineCapability {
+        nebula_common::static_capability_sglang()
+    }
+
     async fn start(&self, ctx: EngineStartContext) -> anyhow::Result<EngineHandle> {
         let cfg = parse_yaml_defaults(&ctx.engine_config_path).await;
         let model_tag = cfg
@@ -356,7 +360,7 @@ impl Engine for SglangEngine {
         handle: &EngineHandle,
         model_uid: &str,
         replica_id: u32,
-    ) -> Option<EndpointStats> {
+    ) -> super::ScrapeResult {
         scrape_sglang_stats(http, &handle.base_url, model_uid, replica_id).await
     }
 
@@ -398,35 +402,13 @@ impl Engine for SglangEngine {
 // SGLang-specific metrics scraping
 // ---------------------------------------------------------------------------
 
-/// Scrape SGLang /metrics endpoint and parse into EndpointStats.
-///
-/// SGLang exposes Prometheus metrics with prefixes like:
-///   sglang:num_requests_waiting{...} 3
-///   sglang:num_requests_running{...} 1
-///   sglang:token_usage{...} 0.45
-///
-/// It also exposes /get_model_info for model metadata.
-pub async fn scrape_sglang_stats(
-    http: &reqwest::Client,
-    base_url: &str,
+/// Parse a SGLang Prometheus `/metrics` body into `EndpointStats`.
+pub fn parse_sglang_metrics_text(
+    text: &str,
     model_uid: &str,
     replica_id: u32,
-) -> Option<EndpointStats> {
-    let url = format!("{}/metrics", base_url.trim_end_matches('/'));
-    let text = match http.get(&url).send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::debug!(error=%e, %base_url, "failed to read sglang metrics body");
-                return None;
-            }
-        },
-        Err(e) => {
-            tracing::debug!(error=%e, %base_url, "failed to scrape sglang metrics");
-            return None;
-        }
-    };
-
+    last_updated_ms: u64,
+) -> EndpointStats {
     let mut pending_requests: u64 = 0;
     let mut running_requests: u64 = 0;
     let mut kv_cache_usage: Option<f64> = None;
@@ -454,25 +436,49 @@ pub async fn scrape_sglang_stats(
         }
     }
 
-    let (kv_cache_used, kv_cache_free) = match kv_cache_usage {
-        Some(pct) => {
-            let used = (pct * 1000.0) as u64;
-            let free = 1000u64.saturating_sub(used);
-            (Some(used), Some(free))
-        }
-        None => (None, None),
-    };
-
-    Some(EndpointStats {
+    EndpointStats {
         model_uid: model_uid.to_string(),
         replica_id,
-        last_updated_ms: now_ms(),
+        last_updated_ms,
         pending_requests: pending_requests + running_requests,
+        // Prefix/prompt cache are not mapped until official metrics are confirmed.
         prefix_cache_hit_rate: None,
         prompt_cache_hit_rate: None,
-        kv_cache_used_bytes: kv_cache_used,
-        kv_cache_free_bytes: kv_cache_free,
-    })
+        kv_cache_usage,
+    }
+}
+
+/// Scrape SGLang `/metrics` and parse into EndpointStats.
+pub async fn scrape_sglang_stats(
+    http: &reqwest::Client,
+    base_url: &str,
+    model_uid: &str,
+    replica_id: u32,
+) -> super::ScrapeResult {
+    let url = format!("{}/metrics", base_url.trim_end_matches('/'));
+    let text = match http.get(&url).send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(error=%e, %base_url, "failed to read sglang metrics body");
+                return Err(super::ScrapeError::ParseFailed);
+            }
+        },
+        Err(e) => {
+            tracing::debug!(error=%e, %base_url, "failed to scrape sglang metrics");
+            if e.is_timeout() {
+                return Err(super::ScrapeError::Timeout);
+            }
+            return Err(super::ScrapeError::Unreachable);
+        }
+    };
+
+    Ok(parse_sglang_metrics_text(
+        &text,
+        model_uid,
+        replica_id,
+        now_ms(),
+    ))
 }
 
 /// Extract a numeric value from a SGLang Prometheus metric line.
@@ -516,5 +522,19 @@ mod tests {
             extract_sglang_metric("unrelated_metric{} 1.0", "num_requests_waiting"),
             None,
         );
+    }
+
+    #[test]
+    fn parse_basic_fixture() {
+        let path = format!(
+            "{}/tests/fixtures/sglang/basic.prom",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        let stats = parse_sglang_metrics_text(&text, "m", 0, 1);
+        assert_eq!(stats.pending_requests, 5);
+        assert!((stats.kv_cache_usage.unwrap() - 0.55).abs() < 1e-9);
+        // Prefix cache not mapped until official metrics are confirmed.
+        assert!(stats.prefix_cache_hit_rate.is_none());
     }
 }

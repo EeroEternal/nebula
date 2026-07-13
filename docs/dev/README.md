@@ -14,6 +14,7 @@
 ## 可观测
 
 - [可观测性设计](./observability.md)
+- [SLO / 告警 Runbook（O8）](./slo_alerts.md)
 - [vLLM / SGLang 引擎可观测开发与优化计划](./engine_observability_plan.md)
 - [Loki 日志路径](./loki.md)
 

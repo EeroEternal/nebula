@@ -1,0 +1,15 @@
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="Qwen/Qwen2.5-0.5B-Instruct"} 2.0
+# HELP vllm:num_requests_running Number of requests currently running.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="Qwen/Qwen2.5-0.5B-Instruct"} 1.0
+# HELP vllm:kv_cache_usage_perc GPU KV-cache usage. 1 means 100 percent usage.
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{engine="0"} 0.45
+# HELP vllm:prefix_cache_hits_total Prefix cache hits.
+# TYPE vllm:prefix_cache_hits_total counter
+vllm:prefix_cache_hits_total{engine="0"} 100.0
+# HELP vllm:prefix_cache_queries_total Prefix cache queries.
+# TYPE vllm:prefix_cache_queries_total counter
+vllm:prefix_cache_queries_total{engine="0"} 200.0

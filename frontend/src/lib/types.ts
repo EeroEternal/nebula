@@ -4,6 +4,9 @@ export interface GpuStatus {
   memory_used_mb: number
   temperature_c?: number | null
   utilization_gpu?: number | null
+  name?: string | null
+  driver_version?: string | null
+  cuda_version?: string | null
 }
 
 export interface NodeStatus {
@@ -11,6 +14,7 @@ export interface NodeStatus {
   last_heartbeat_ms: number
   gpus: GpuStatus[]
   api_addr?: string | null
+  platform?: string | null
 }
 
 export interface EndpointInfo {
@@ -91,8 +95,8 @@ export interface EndpointStats {
   pending_requests: number
   prefix_cache_hit_rate?: number | null
   prompt_cache_hit_rate?: number | null
-  kv_cache_used_bytes?: number | null
-  kv_cache_free_bytes?: number | null
+  /** KV / cache occupancy ratio in [0, 1]. Absent means unsupported/unknown — not zero. */
+  kv_cache_usage?: number | null
 }
 
 export interface ClusterStatus {
@@ -183,8 +187,28 @@ export interface ModelDetailView {
   placement: PlacementPlan | null
   endpoints: EndpointInfo[]
   stats: EndpointStats[]
+  capabilities: ReplicaCapability[]
   download_progress: DownloadProgressView | null
   cache_status: CacheStatusView | null
+}
+
+export interface ReplicaCapability {
+  model_uid: string
+  replica_id: number
+  updated_at_ms: number
+  capability: {
+    engine_type: string
+    engine_version?: string | null
+    source: string
+    openai_compatible?: boolean | null
+    observability?: {
+      pending_requests?: string
+      kv_cache_usage?: string
+      prefix_cache_hit_rate?: string
+      prompt_cache_hit_rate?: string
+    }
+    notes?: string | null
+  }
 }
 
 export interface ModelSpec {
@@ -271,6 +295,8 @@ export interface GatewayTimePoint {
 
 export interface GatewayOverview {
   window: string
+  /** Prometheus source; currently "router". */
+  data_source?: string
   rps: number
   error_5xx_ratio: number
   retry_success_ratio: number
@@ -279,6 +305,7 @@ export interface GatewayOverview {
 
 export interface GatewayTraffic {
   window: string
+  data_source?: string
   series: {
     requests_total: GatewayTimePoint[]
     responses_2xx: GatewayTimePoint[]
@@ -289,6 +316,7 @@ export interface GatewayTraffic {
 
 export interface GatewayReliability {
   window: string
+  data_source?: string
   series: {
     retry_total: GatewayTimePoint[]
     retry_success_total: GatewayTimePoint[]
@@ -301,6 +329,7 @@ export interface GatewayReliability {
 
 export interface GatewayProtection {
   window: string
+  data_source?: string
   request_too_large_count: number
   circuit_skipped_count: number
   circuit_open_count: number
@@ -308,6 +337,8 @@ export interface GatewayProtection {
 
 export interface GatewayLatency {
   window: string
+  /** Prometheus source; currently always "router" (`nebula_route_*`). */
+  data_source?: string
   series: {
     latency_p50_ms: GatewayTimePoint[]
     latency_p95_ms: GatewayTimePoint[]
@@ -354,4 +385,237 @@ export interface UpdateUserPayload {
   email?: string
   is_active?: boolean
   password?: string
+}
+
+export interface ServingTopology {
+  kind: string
+  native_stack?: string | null
+  notes?: string | null
+}
+
+export interface CellIngress {
+  cell_id: string
+  model_uid: string
+  base_url: string
+  topology: ServingTopology
+  health_url?: string | null
+  metrics_url?: string | null
+  engine_type?: string | null
+  engine_version?: string | null
+  status: string
+  internal_topology: string
+  last_checked_ms: number
+  updated_at_ms: number
+}
+
+export interface CellIngressStats {
+  scraped_at_ms: number
+  metrics_url: string
+  data_source: string
+  pending_requests?: number | null
+  kv_cache_usage?: number | null
+  prefix_cache_hit_rate?: number | null
+  scrape_status: string
+}
+
+export interface CellObservation {
+  cell: CellIngress
+  health_ok: boolean
+  stats: CellIngressStats
+  internal_topology: string
+}
+
+export interface RegisterCellPayload {
+  model_uid: string
+  cell_id?: string
+  base_url: string
+  topology: ServingTopology
+  health_url?: string
+  metrics_url?: string
+  engine_type?: string
+  engine_version?: string
+  skip_probe?: boolean
+}
+
+export interface CompatibilityRule {
+  id: string
+  engine_type: string
+  engine_version_min?: string | null
+  engine_version_max?: string | null
+  platforms: string[]
+  min_driver_version?: string | null
+  min_cuda_version?: string | null
+  verdict: 'allow' | 'deny'
+  known_issues?: string[]
+  notes?: string | null
+  updated_at_ms: number
+}
+
+export interface HardwareInventory {
+  nodes: Array<{
+    node_id: string
+    platform?: string | null
+    last_heartbeat_ms: number
+    gpus: Array<{
+      index: number
+      name?: string | null
+      driver_version?: string | null
+      cuda_version?: string | null
+      memory_total_mb: number
+      memory_used_mb: number
+      temperature_c?: number | null
+      utilization_gpu?: number | null
+      occupied_by?: string | null
+    }>
+  }>
+  placements: Array<{
+    model_uid: string
+    replica_id: number
+    node_id: string
+    gpu_indices: number[]
+  }>
+}
+
+export interface ModelSlo {
+  model_uid: string
+  availability_target?: number | null
+  ttft_p95_ms?: number | null
+  tpot_p95_ms?: number | null
+  latency_p95_ms?: number | null
+  throughput_tps?: number | null
+  window: string
+  exclude_abort_from_error_budget: boolean
+  exclude_drain_from_error_budget: boolean
+  notes?: string | null
+  updated_at_ms: number
+}
+
+export interface SloEvaluation {
+  model_uid: string
+  window: string
+  status: 'compliant' | 'breaching' | 'insufficient_data' | 'unknown'
+  samples: Array<{ name: string; value?: number | null; data_source: string; unit: string }>
+  breaches: string[]
+  suggestions: Array<{ kind: string; message: string; target: string }>
+  evaluated_at_ms: number
+  abort_excluded: boolean
+  drain_excluded: boolean
+}
+
+export interface DiagnosticEvent {
+  ts_ms: number
+  kind: string
+  summary: string
+  model_uid?: string | null
+  node_id?: string | null
+  cell_id?: string | null
+  data_source?: string | null
+}
+
+export interface BenchmarkRun {
+  run_id: string
+  profile_key: {
+    model_name: string
+    engine_type: string
+    engine_version?: string | null
+    platform?: string | null
+    gpu_name?: string | null
+    workload_id: string
+    param_fingerprint?: string | null
+  }
+  status: string
+  ttft_p95_ms?: number | null
+  throughput_tps?: number | null
+  error_rate?: number | null
+  cost_per_1k_tokens?: number | null
+  image_id?: string | null
+  finished_at_ms: number
+}
+
+export interface RecommendRequest {
+  model_name: string
+  workload_id?: string
+  platform?: string
+  ttft_p95_ms_max?: number
+  throughput_tps_min?: number
+  budget_cost_per_1k?: number
+  max_candidates?: number
+}
+
+export interface RecommendResponse {
+  model_name: string
+  status: string
+  candidates: Array<{
+    engine_type: string
+    engine_version?: string | null
+    image_id?: string | null
+    platform?: string | null
+    confidence: string
+    evidence_run_ids: string[]
+    ttft_p95_ms?: number | null
+    throughput_tps?: number | null
+    cost_per_1k_tokens?: number | null
+    rationale: string
+  }>
+  message?: string | null
+}
+
+export interface CanaryRelease {
+  canary_id: string
+  model_uid: string
+  stable_image_id?: string | null
+  candidate_image_id: string
+  traffic_weight_percent: number
+  state: string
+  slo_breach?: boolean | null
+  rollback_reason?: string | null
+  updated_at_ms: number
+}
+
+export interface TenantQuota {
+  rps_per_minute?: number | null
+  max_concurrency?: number | null
+  max_tokens_per_minute?: number | null
+  allowed_models?: string[] | null
+}
+
+export interface Tenant {
+  tenant_id: string
+  display_name: string
+  enabled: boolean
+  quotas: TenantQuota
+  api_token_principals?: string[]
+  priority_default?: number | null
+  created_at_ms: number
+  updated_at_ms: number
+}
+
+export interface CostPriceConfig {
+  price_id: string
+  engine_type: string
+  platform?: string | null
+  price_per_1k_input: number
+  price_per_1k_output: number
+  currency: string
+  notes?: string | null
+  updated_at_ms: number
+}
+
+export interface TenantCostSummary {
+  tenant_id: string
+  window: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  denied_total: number
+  deny_breakdown: {
+    rps: number
+    concurrency: number
+    model: number
+    token_budget: number
+    disabled: number
+  }
+  cost_estimate?: number | null
+  currency?: string | null
+  windows_merged: number
 }

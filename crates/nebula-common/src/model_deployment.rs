@@ -45,6 +45,18 @@ pub struct ModelDeployment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_overrides: Option<ModelConfig>,
 
+    /// Pin to a registered `EngineImage.id` (preferred over free-form docker_image).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_id: Option<String>,
+
+    /// Human reason when forcing an image / platform override past defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_override_reason: Option<String>,
+
+    /// Compatibility rule ids applied when this deployment was last validated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compat_rule_ids: Vec<String>,
+
     /// Monotonically increasing version; bumped on every change.
     /// Scheduler uses this to detect whether a re-plan is needed.
     #[serde(default)]

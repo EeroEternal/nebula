@@ -67,6 +67,10 @@ impl Engine for VllmEngine {
         "vllm"
     }
 
+    fn capabilities(&self) -> nebula_common::EngineCapability {
+        nebula_common::static_capability_vllm()
+    }
+
     async fn start(&self, ctx: EngineStartContext) -> anyhow::Result<EngineHandle> {
         let cfg = parse_yaml_defaults(&ctx.engine_config_path).await;
         let model_tag = cfg
@@ -388,7 +392,7 @@ impl Engine for VllmEngine {
         handle: &EngineHandle,
         model_uid: &str,
         replica_id: u32,
-    ) -> Option<EndpointStats> {
+    ) -> super::ScrapeResult {
         scrape_vllm_stats(http, &handle.base_url, model_uid, replica_id).await
     }
 
@@ -430,28 +434,13 @@ impl Engine for VllmEngine {
 // vLLM-specific metrics scraping (moved from scrape.rs)
 // ---------------------------------------------------------------------------
 
-/// Scrape vLLM /metrics endpoint and parse into EndpointStats.
-pub async fn scrape_vllm_stats(
-    http: &reqwest::Client,
-    base_url: &str,
+/// Parse a Prometheus `/metrics` body into `EndpointStats`.
+pub fn parse_vllm_metrics_text(
+    text: &str,
     model_uid: &str,
     replica_id: u32,
-) -> Option<EndpointStats> {
-    let url = format!("{}/metrics", base_url.trim_end_matches('/'));
-    let text = match http.get(&url).send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::debug!(error=%e, %base_url, "failed to read metrics body");
-                return None;
-            }
-        },
-        Err(e) => {
-            tracing::debug!(error=%e, %base_url, "failed to scrape engine metrics");
-            return None;
-        }
-    };
-
+    last_updated_ms: u64,
+) -> EndpointStats {
     let mut pending_requests: u64 = 0;
     let mut running_requests: u64 = 0;
     let mut kv_cache_usage: Option<f64> = None;
@@ -515,27 +504,48 @@ pub async fn scrape_vllm_stats(
         }
     }
 
-    // Convert kv_cache_usage percentage (0.0-1.0) to used/free in permille units.
-    // (e.g., 0.45 → used=450, free=550, treating 1000 as full capacity).
-    let (kv_cache_used, kv_cache_free) = match kv_cache_usage {
-        Some(pct) => {
-            let used = (pct * 1000.0) as u64;
-            let free = 1000u64.saturating_sub(used);
-            (Some(used), Some(free))
-        }
-        None => (None, None),
-    };
-
-    Some(EndpointStats {
+    EndpointStats {
         model_uid: model_uid.to_string(),
         replica_id,
-        last_updated_ms: now_ms(),
+        last_updated_ms,
         pending_requests: pending_requests + running_requests,
         prefix_cache_hit_rate,
         prompt_cache_hit_rate: None,
-        kv_cache_used_bytes: kv_cache_used,
-        kv_cache_free_bytes: kv_cache_free,
-    })
+        kv_cache_usage,
+    }
+}
+
+/// Scrape vLLM `/metrics` and parse into EndpointStats.
+pub async fn scrape_vllm_stats(
+    http: &reqwest::Client,
+    base_url: &str,
+    model_uid: &str,
+    replica_id: u32,
+) -> super::ScrapeResult {
+    let url = format!("{}/metrics", base_url.trim_end_matches('/'));
+    let text = match http.get(&url).send().await {
+        Ok(resp) => match resp.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::debug!(error=%e, %base_url, "failed to read metrics body");
+                return Err(super::ScrapeError::ParseFailed);
+            }
+        },
+        Err(e) => {
+            tracing::debug!(error=%e, %base_url, "failed to scrape engine metrics");
+            if e.is_timeout() {
+                return Err(super::ScrapeError::Timeout);
+            }
+            return Err(super::ScrapeError::Unreachable);
+        }
+    };
+
+    Ok(parse_vllm_metrics_text(
+        &text,
+        model_uid,
+        replica_id,
+        now_ms(),
+    ))
 }
 
 /// Extract a numeric value from a Prometheus metric line.
@@ -606,5 +616,31 @@ mod tests {
             extract_metric("unrelated_metric{} 1.0", "num_requests_waiting"),
             None,
         );
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = format!(
+            "{}/tests/fixtures/vllm/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            name
+        );
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"))
+    }
+
+    #[test]
+    fn parse_v0_11_basic_fixture() {
+        let stats = parse_vllm_metrics_text(&fixture("v0.11_basic.prom"), "m", 0, 1);
+        assert_eq!(stats.pending_requests, 3);
+        assert!((stats.kv_cache_usage.unwrap() - 0.45).abs() < 1e-9);
+        assert!((stats.prefix_cache_hit_rate.unwrap() - 0.5).abs() < 1e-9);
+        assert!(stats.prompt_cache_hit_rate.is_none());
+    }
+
+    #[test]
+    fn parse_legacy_gpu_cache_fixture() {
+        let stats = parse_vllm_metrics_text(&fixture("legacy_gpu_cache.prom"), "m", 1, 1);
+        assert_eq!(stats.pending_requests, 4);
+        assert!((stats.kv_cache_usage.unwrap() - 0.30).abs() < 1e-9);
+        assert!((stats.prefix_cache_hit_rate.unwrap() - 0.75).abs() < 1e-9);
     }
 }

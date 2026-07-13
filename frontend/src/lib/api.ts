@@ -102,18 +102,34 @@ export async function apiDelete<T>(path: string, token?: string): Promise<T> {
 
 import type {
   AuthUser,
+  CellIngress,
+  CellObservation,
+  CompatibilityRule,
   CreateUserPayload,
+  DiagnosticEvent,
+  BenchmarkRun,
+  RecommendRequest,
+  RecommendResponse,
+  CanaryRelease,
+  Tenant,
+  TenantCostSummary,
+  CostPriceConfig,
+  TenantQuota,
   GatewayLatency,
   GatewayOverview,
   GatewayProtection,
   GatewayReliability,
   GatewayTraffic,
+  HardwareInventory,
   ManagedUser,
+  ModelSlo,
   ModelView,
   ModelDetailView,
   ModelTemplate,
   DiskAlert,
   LoginResponse,
+  RegisterCellPayload,
+  SloEvaluation,
   UpdateUserPayload,
   UserSettings,
 } from '@/lib/types'
@@ -198,4 +214,123 @@ export const v2 = {
 
   gatewayLatency: (window: string, token?: string) =>
     apiGetWithParams<GatewayLatency>('/v2/observability/gateway/latency', { window }, token),
+
+  listCells: (token?: string) =>
+    apiGet<CellIngress[]>('/v2/cells', token),
+
+  getCell: (modelUid: string, cellId: string, token?: string) =>
+    apiGet<CellIngress>(`/v2/cells/${modelUid}/${cellId}`, token),
+
+  registerCell: (body: RegisterCellPayload, token?: string) =>
+    apiPost<CellIngress, RegisterCellPayload>('/v2/cells', body, token),
+
+  deregisterCell: (modelUid: string, cellId: string, token?: string) =>
+    apiDelete<unknown>(`/v2/cells/${modelUid}/${cellId}`, token),
+
+  observeCell: (modelUid: string, cellId: string, token?: string) =>
+    apiGet<CellObservation>(`/v2/cells/${modelUid}/${cellId}/observe`, token),
+
+  listCompatRules: (token?: string) =>
+    apiGet<CompatibilityRule[]>('/v2/compat', token),
+
+  putCompatRule: (rule: CompatibilityRule, token?: string) =>
+    apiPut<CompatibilityRule, CompatibilityRule>('/v2/compat', rule, token),
+
+  seedCompatRules: (token?: string) =>
+    apiPost<CompatibilityRule[], Record<string, never>>('/v2/compat/seed', {}, token),
+
+  deleteCompatRule: (id: string, token?: string) =>
+    apiDelete<unknown>(`/v2/compat/${id}`, token),
+
+  hardwareInventory: (token?: string) =>
+    apiGet<HardwareInventory>('/v2/inventory/hardware', token),
+
+  listSlos: (token?: string) =>
+    apiGet<ModelSlo[]>('/v2/slos', token),
+
+  getSlo: (modelUid: string, token?: string) =>
+    apiGet<ModelSlo>(`/v2/slos/${modelUid}`, token),
+
+  upsertSlo: (modelUid: string, body: Partial<ModelSlo>, token?: string) =>
+    apiPut<ModelSlo, Partial<ModelSlo>>(`/v2/slos/${modelUid}`, body, token),
+
+  evaluateSlo: (modelUid: string, token?: string) =>
+    apiGet<SloEvaluation>(`/v2/slos/${modelUid}/evaluate`, token),
+
+  listDiagnostics: (modelUid?: string, token?: string) =>
+    apiGetWithParams<DiagnosticEvent[]>(
+      '/v2/diagnostics/events',
+      modelUid ? { model_uid: modelUid } : {},
+      token,
+    ),
+
+  listBenchmarkRuns: (token?: string) =>
+    apiGet<BenchmarkRun[]>('/v2/benchmarks/runs', token),
+
+  recommendEngines: (body: RecommendRequest, token?: string) =>
+    apiPost<RecommendResponse, RecommendRequest>('/v2/benchmarks/recommend', body, token),
+
+  listCanaries: (token?: string) =>
+    apiGet<CanaryRelease[]>('/v2/canaries', token),
+
+  createCanary: (
+    body: {
+      model_uid: string
+      candidate_image_id: string
+      stable_image_id?: string
+      traffic_weight_percent?: number
+    },
+    token?: string,
+  ) => apiPost<CanaryRelease, typeof body>('/v2/canaries', body, token),
+
+  evaluateCanary: (id: string, slo_breaching: boolean, token?: string) =>
+    apiPost<CanaryRelease, { slo_breaching: boolean }>(
+      `/v2/canaries/${id}/evaluate`,
+      { slo_breaching },
+      token,
+    ),
+
+  promoteCanary: (id: string, token?: string) =>
+    apiPost<CanaryRelease, Record<string, never>>(`/v2/canaries/${id}/promote`, {}, token),
+
+  rollbackCanary: (id: string, reason?: string, token?: string) =>
+    apiPost<CanaryRelease, { reason?: string }>(
+      `/v2/canaries/${id}/rollback`,
+      { reason },
+      token,
+    ),
+
+  listTenants: (token?: string) => apiGet<Tenant[]>('/v2/tenants', token),
+
+  upsertTenant: (
+    body: {
+      tenant_id: string
+      display_name?: string
+      enabled?: boolean
+      quotas?: TenantQuota
+      api_token_principals?: string[]
+      priority_default?: number
+    },
+    token?: string,
+  ) => apiPut<Tenant, typeof body>('/v2/tenants', body, token),
+
+  deleteTenant: (tenantId: string, token?: string) =>
+    apiDelete(`/v2/tenants/${tenantId}`, token),
+
+  tenantCost: (tenantId: string, token?: string) =>
+    apiGet<TenantCostSummary>(`/v2/tenants/${tenantId}/cost`, token),
+
+  listPricing: (token?: string) => apiGet<CostPriceConfig[]>('/v2/pricing', token),
+
+  upsertPricing: (
+    body: {
+      price_id: string
+      engine_type: string
+      platform?: string
+      price_per_1k_input: number
+      price_per_1k_output: number
+      currency?: string
+    },
+    token?: string,
+  ) => apiPut<CostPriceConfig, typeof body>('/v2/pricing', body, token),
 }

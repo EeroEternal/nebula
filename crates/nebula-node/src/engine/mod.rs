@@ -1,3 +1,4 @@
+pub mod discover;
 pub mod sglang;
 pub mod vllm;
 
@@ -5,7 +6,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nebula_common::EndpointStats;
+use nebula_common::{static_capability, validate_engine_type, EngineCapability, EndpointStats, ModelConfig};
 use tokio::fs;
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
@@ -42,10 +43,54 @@ pub enum EngineProcess {
     External,
 }
 
+/// Classified engine `/metrics` scrape failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrapeError {
+    Unreachable,
+    Timeout,
+    ParseFailed,
+}
+
+impl ScrapeError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreachable => "unreachable",
+            Self::Timeout => "timeout",
+            Self::ParseFailed => "parse_failed",
+        }
+    }
+}
+
+pub type ScrapeResult = Result<EndpointStats, ScrapeError>;
+
 #[async_trait]
 pub trait Engine: Send + Sync {
     /// Engine type identifier, e.g. "vllm", "sglang".
     fn engine_type(&self) -> &str;
+
+    /// Declared capabilities (static table by default; runtime discovery later).
+    fn capabilities(&self) -> EngineCapability {
+        static_capability(self.engine_type()).unwrap_or_else(|| EngineCapability {
+            engine_type: self.engine_type().to_string(),
+            engine_version: None,
+            source: nebula_common::CapabilitySource::StaticTable,
+            openai_compatible: None,
+            tensor_parallel: None,
+            data_parallel: None,
+            lora: None,
+            structured_output: None,
+            kv_connector: None,
+            grpc: None,
+            topologies: vec![],
+            observability: Default::default(),
+            notes: Some("unknown engine capability profile".into()),
+        })
+    }
+
+    /// Validate deployment config before start. Returns actionable error text.
+    fn validate_config(&self, config: &ModelConfig) -> Result<(), String> {
+        nebula_common::validate_model_config(self.engine_type(), config)
+    }
 
     /// Start a new engine instance.
     async fn start(&self, ctx: EngineStartContext) -> anyhow::Result<EngineHandle>;
@@ -70,7 +115,7 @@ pub trait Engine: Send + Sync {
         handle: &EngineHandle,
         model_uid: &str,
         replica_id: u32,
-    ) -> Option<EndpointStats>;
+    ) -> ScrapeResult;
 
     /// Attempt to restart the engine and refresh `handle`.
     /// Local processes must stop the process group and start again (no empty no-op).
@@ -240,35 +285,75 @@ pub(crate) async fn stop_docker_container_by_name(name: &str) {
 }
 
 /// Create the appropriate Engine implementation based on engine_type string.
-/// Defaults to "vllm" if engine_type is None or unrecognized.
+///
+/// `None` / empty defaults to `vllm` (compatible). Unknown types return `Err`
+/// and must not silently fall back to vLLM.
 /// If `docker_image_override` is Some, it takes precedence over the node-level CLI arg.
 pub fn create_engine(
     args: &Args,
     engine_type: Option<&str>,
     docker_image_override: Option<&str>,
-) -> Box<dyn Engine> {
-    match engine_type.unwrap_or("vllm") {
+) -> anyhow::Result<Box<dyn Engine>> {
+    let resolved = validate_engine_type(engine_type).map_err(anyhow::Error::msg)?;
+    match resolved.as_str() {
         "vllm" => {
             let mut engine = vllm::VllmEngine::new(args);
             if let Some(img) = docker_image_override {
                 engine.config.docker_image = Some(img.to_string());
             }
-            Box::new(engine)
+            Ok(Box::new(engine))
         }
         "sglang" => {
             let mut engine = sglang::SglangEngine::new(args);
             if let Some(img) = docker_image_override {
                 engine.config.docker_image = Some(img.to_string());
             }
-            Box::new(engine)
+            Ok(Box::new(engine))
         }
         other => {
-            tracing::warn!(engine_type=%other, "unknown engine type, falling back to vllm");
-            let mut engine = vllm::VllmEngine::new(args);
-            if let Some(img) = docker_image_override {
-                engine.config.docker_image = Some(img.to_string());
-            }
-            Box::new(engine)
+            // validate_engine_type should have rejected this; keep a hard error.
+            anyhow::bail!(
+                "unknown engine_type '{other}'; supported: {}",
+                nebula_common::KNOWN_ENGINE_TYPES.join(", ")
+            )
         }
+    }
+}
+
+#[cfg(test)]
+mod create_engine_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn test_args() -> Args {
+        Args::parse_from(["nebula-node"])
+    }
+
+    #[test]
+    fn unknown_engine_type_errors() {
+        match create_engine(&test_args(), Some("tensorrt"), None) {
+            Ok(_) => panic!("expected unknown engine_type error"),
+            Err(err) => {
+                let msg = format!("{err:#}");
+                assert!(msg.contains("unknown engine_type"), "{msg}");
+                assert!(!msg.to_lowercase().contains("falling back"));
+            }
+        }
+    }
+
+    #[test]
+    fn default_and_known_engines_ok() {
+        assert_eq!(
+            create_engine(&test_args(), None, None)
+                .unwrap()
+                .engine_type(),
+            "vllm"
+        );
+        assert_eq!(
+            create_engine(&test_args(), Some("sglang"), None)
+                .unwrap()
+                .engine_type(),
+            "sglang"
+        );
     }
 }

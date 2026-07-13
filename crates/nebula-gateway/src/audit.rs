@@ -17,6 +17,10 @@ pub struct AuditEntry {
     pub timestamp: chrono::DateTime<Utc>,
     pub principal: String,
     pub role: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deny_code: Option<String>,
     pub method: String,
     pub path: String,
     pub status: u16,
@@ -80,6 +84,13 @@ async fn audit_worker(
 
         // Send each entry to xtrace as a trace via batch ingest.
         for entry in buf.drain(..) {
+            let mut tags = vec!["audit".to_string(), format!("role:{}", entry.role)];
+            if let Some(ref t) = entry.tenant_id {
+                tags.push(format!("tenant:{t}"));
+            }
+            if let Some(ref c) = entry.deny_code {
+                tags.push(format!("deny:{c}"));
+            }
             let body = serde_json::json!({
                 "trace": {
                     "id": entry.id,
@@ -90,10 +101,12 @@ async fn audit_worker(
                     "userId": entry.principal,
                     "metadata": {
                         "role": entry.role,
+                        "tenant_id": entry.tenant_id,
+                        "deny_code": entry.deny_code,
                         "latency_ms": entry.latency_ms,
                         "status": entry.status,
                     },
-                    "tags": ["audit", format!("role:{}", entry.role)],
+                    "tags": tags,
                     "environment": "production",
                     "latency": entry.latency_ms as f64 / 1000.0,
                 },
@@ -133,23 +146,31 @@ pub async fn audit_middleware(
     let resp = next.run(req).await;
     let elapsed = start.elapsed();
 
-    let (principal, role) = match ctx {
+    let (principal, role, tenant_id) = match ctx {
         Some(c) => {
             let role_str = match c.role {
                 crate::auth::Role::Admin => "admin",
                 crate::auth::Role::Operator => "operator",
                 crate::auth::Role::Viewer => "viewer",
             };
-            (c.principal, role_str.to_string())
+            (c.principal, role_str.to_string(), c.tenant_id)
         }
-        None => ("anonymous".to_string(), "none".to_string()),
+        None => ("anonymous".to_string(), "none".to_string(), None),
     };
+
+    let deny_code = resp
+        .headers()
+        .get("x-nebula-deny-code")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let entry = AuditEntry {
         id: Uuid::new_v4().to_string(),
         timestamp: Utc::now(),
         principal,
         role,
+        tenant_id,
+        deny_code,
         method,
         path,
         status: resp.status().as_u16(),

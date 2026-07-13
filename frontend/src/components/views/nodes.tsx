@@ -79,6 +79,10 @@ export function NodesView() {
                                     <h3 className="text-lg font-bold font-mono text-foreground tracking-tight">{node.node_id}</h3>
                                     <div className="flex items-center gap-3 mt-0.5">
                                         <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
+                                            PLATFORM: {(node as { platform?: string }).platform || 'nvidia-cuda'}
+                                        </p>
+                                        <div className="w-1 h-1 rounded-full bg-muted-foreground/30" />
+                                        <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
                                             HEARTBEAT: {fmtTime(node.last_heartbeat_ms)} AGO
                                         </p>
                                         <div className="w-1 h-1 rounded-full bg-muted-foreground/30" />
@@ -116,6 +120,15 @@ export function NodesView() {
                                                 </span>
                                             </div>
                                         </div>
+                                        <p className="text-[10px] font-mono text-muted-foreground truncate">
+                                            {(gpu as { name?: string }).name || 'GPU'}
+                                            {(gpu as { driver_version?: string }).driver_version
+                                                ? ` · drv ${(gpu as { driver_version?: string }).driver_version}`
+                                                : ''}
+                                            {(gpu as { cuda_version?: string }).cuda_version
+                                                ? ` · cuda ${(gpu as { cuda_version?: string }).cuda_version}`
+                                                : ''}
+                                        </p>
 
                                         <div className="space-y-3">
                                             <Progress value={usage} className="h-1.5 bg-white/5" indicatorClassName={usage > 85 ? "bg-destructive" : "bg-primary"} />

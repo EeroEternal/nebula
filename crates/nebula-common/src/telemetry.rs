@@ -9,8 +9,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 /// Initialize tracing with optional OTLP export to xtrace + structured logs for Loki.
 ///
 /// - `service_name`: identifies this component (e.g. "nebula-gateway")
-/// - `otlp_endpoint`: if `Some`, traces are exported via OTLP/HTTP to this base URL
-///   (e.g. "http://10.21.11.92:8742/api/public/otel"). The exporter appends `/v1/traces`.
+/// - `otlp_endpoint`: if `Some`, traces are exported via OTLP/HTTP. Accepts either the
+///   xtrace base (`http://host:8742`) or a full OTLP root (`.../api/public/otel`);
+///   see [`normalize_otlp_endpoint`]. The exporter appends `/v1/traces`.
 /// - `otlp_token`: bearer token for xtrace authentication
 /// - `log_format`: `"text"` (human-readable) or `"json"` (Loki-friendly JSON lines)
 ///
@@ -34,6 +35,7 @@ pub fn init_tracing(
         init_stdout_only(use_json, env_filter, service_name);
         return None;
     };
+    let endpoint = normalize_otlp_endpoint(endpoint);
 
     let mut headers = std::collections::HashMap::new();
     if let Some(token) = otlp_token {
@@ -44,7 +46,7 @@ pub fn init_tracing(
 
     let exporter = match opentelemetry_otlp::SpanExporter::builder()
         .with_http()
-        .with_endpoint(endpoint)
+        .with_endpoint(&endpoint)
         .with_headers(headers)
         .build()
     {
@@ -178,5 +180,87 @@ pub fn current_trace_id_hex() -> Option<String> {
         Some(format!("{}", sc.trace_id()))
     } else {
         None
+    }
+}
+
+/// Map `OBSERVE_URL` (xtrace base or full OTLP root) to the OTLP HTTP root.
+///
+/// Metrics dual-write uses the xtrace HTTP API at the base URL; OTLP traces need
+/// `{base}/api/public/otel` (exporter then appends `/v1/traces`).
+pub fn normalize_otlp_endpoint(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if trimmed.ends_with("/api/public/otel") || trimmed.contains("/api/public/otel/") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed}/api/public/otel")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry::trace::{TraceContextExt, Tracer};
+    use opentelemetry_sdk::trace::TracerProvider;
+
+    #[test]
+    fn normalize_otlp_appends_public_otel_path() {
+        assert_eq!(
+            normalize_otlp_endpoint("http://127.0.0.1:8742"),
+            "http://127.0.0.1:8742/api/public/otel"
+        );
+        assert_eq!(
+            normalize_otlp_endpoint("http://127.0.0.1:8742/"),
+            "http://127.0.0.1:8742/api/public/otel"
+        );
+        assert_eq!(
+            normalize_otlp_endpoint("http://127.0.0.1:8742/api/public/otel"),
+            "http://127.0.0.1:8742/api/public/otel"
+        );
+    }
+
+    #[test]
+    fn w3c_propagator_preserves_trace_id_across_hops() {
+        // Same HeaderInjector/Extractor + TraceContextPropagator path used by
+        // inject_trace_context / trace_context_middleware for Gateway→Router→Engine.
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        let provider = TracerProvider::builder().build();
+        let tracer = provider.tracer("nebula-test");
+        let otel_span = tracer.start("gateway");
+        let mut cx = opentelemetry::Context::current_with_span(otel_span);
+        let expected = cx.span().span_context().trace_id();
+        assert!(cx.span().span_context().is_valid());
+
+        let mut router_headers = axum::http::HeaderMap::new();
+        global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(&cx, &mut HeaderInjector(&mut router_headers));
+        });
+        let tp = router_headers
+            .get("traceparent")
+            .and_then(|v| v.to_str().ok())
+            .expect("gateway hop must inject traceparent");
+        assert!(
+            tp.contains(&format!("{expected}")),
+            "traceparent={tp} expected={expected}"
+        );
+
+        cx = global::get_text_map_propagator(|propagator| {
+            propagator.extract(&HeaderExtractor(&router_headers))
+        });
+        assert_eq!(cx.span().span_context().trace_id(), expected);
+
+        let mut engine_headers = axum::http::HeaderMap::new();
+        global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(&cx, &mut HeaderInjector(&mut engine_headers));
+        });
+        let engine_tp = engine_headers
+            .get("traceparent")
+            .and_then(|v| v.to_str().ok())
+            .expect("router hop must inject traceparent");
+        assert!(
+            engine_tp.contains(&format!("{expected}")),
+            "engine hop lost trace_id: {engine_tp}"
+        );
     }
 }

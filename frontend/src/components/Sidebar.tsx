@@ -2,7 +2,7 @@ import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
     LayoutDashboard, Box, Server, Settings, HelpCircle, MessageSquare,
-    ChevronRight, ChevronDown, Activity, Cpu, Shield, BookOpen, Layers, Zap
+    ChevronRight, ChevronDown, Activity, Cpu, Shield, BookOpen, Layers, Zap, Network
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useI18n } from "@/lib/i18n";
@@ -18,6 +18,8 @@ const Sidebar = () => {
         { id: 'inference', icon: Activity, label: t('nav.inference'), path: '/inference' },
         { id: 'gateway', icon: Shield, label: t('nav.gateway'), path: '/inference/gateway' },
         { id: 'endpoints', icon: Cpu, label: t('nav.endpoints'), path: '/endpoints' },
+        { id: 'cells', icon: Network, label: t('nav.cells'), path: '/cells' },
+        { id: 'governance', icon: Shield, label: t('nav.governance'), path: '/governance' },
     ];
 
     const infrastructureItems = [

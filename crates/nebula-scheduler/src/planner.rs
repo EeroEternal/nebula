@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use nebula_common::{
+    build_engine_extra_args_lenient, image_platforms_match, resolve_node_platform, EngineImage,
     ModelConfig, ModelDeployment, ModelRequest, ModelSpec, NodeStatus, PlacementAssignment,
     PlacementPlan,
 };
@@ -9,6 +10,35 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 use crate::util::now_ms;
 
 const NODE_STALE_MS: u64 = 60_000;
+
+async fn load_image_platforms(
+    store: &EtcdMetaStore,
+    docker_image: Option<&str>,
+) -> Vec<String> {
+    let Some(wanted) = docker_image.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Vec::new();
+    };
+    let Ok(kvs) = store.list_prefix("/images/").await else {
+        return Vec::new();
+    };
+    for (_, val, _) in kvs {
+        let Ok(img) = serde_json::from_slice::<EngineImage>(&val) else {
+            continue;
+        };
+        if img.id == wanted || img.image == wanted {
+            return img.platforms;
+        }
+    }
+    Vec::new()
+}
+
+fn node_matches_platforms(node: &NodeStatus, platforms: &[String]) -> bool {
+    if platforms.is_empty() {
+        return true;
+    }
+    let platform = resolve_node_platform(node);
+    image_platforms_match(platforms, &platform)
+}
 
 pub async fn list_used_resources(
     store: &EtcdMetaStore,
@@ -74,12 +104,18 @@ pub async fn select_node_and_gpus(
     }
 
     let now = now_ms();
+    let image_platforms = load_image_platforms(store, req.request.docker_image.as_deref()).await;
 
     // Try to find a node with `tp_size` free GPUs
     let mut best_node: Option<(String, Vec<u32>, u64)> = None;
+    let mut rejected_platform = 0u32;
 
     for node in &nodes {
         if now.saturating_sub(node.last_heartbeat_ms) > NODE_STALE_MS {
+            continue;
+        }
+        if !node_matches_platforms(node, &image_platforms) {
+            rejected_platform += 1;
             continue;
         }
 
@@ -123,54 +159,42 @@ pub async fn select_node_and_gpus(
         return Ok((node_id, indices));
     }
 
-    // Fallback: return any healthy node with no GPU selection
+    // Fallback: return any healthy platform-compatible node with no GPU selection
     for node in &nodes {
         if now.saturating_sub(node.last_heartbeat_ms) > NODE_STALE_MS {
+            continue;
+        }
+        if !node_matches_platforms(node, &image_platforms) {
             continue;
         }
         return Ok((node.node_id.clone(), vec![]));
     }
 
-    anyhow::bail!("no healthy nodes available")
+    if rejected_platform > 0 && !image_platforms.is_empty() {
+        let reason = nebula_common::PlacementRejectReason::platform_incompatible(
+            image_platforms,
+            rejected_platform,
+            None,
+        );
+        anyhow::bail!("{}", reason.format_error());
+    }
+    anyhow::bail!(
+        "{}",
+        nebula_common::PlacementRejectReason::no_healthy_nodes().format_error()
+    )
 }
 
 #[allow(dead_code)] // kept for offline tooling / emergency rebuilds of legacy plans
 pub fn build_extra_args(req: &ModelRequest) -> Option<Vec<String>> {
-    build_extra_args_from_config(req.request.config.as_ref()?)
+    build_extra_args_from_config(req.request.engine_type.as_deref(), req.request.config.as_ref()?)
 }
 
-/// Build engine CLI extra args from a ModelConfig directly.
-pub fn build_extra_args_from_config(cfg: &ModelConfig) -> Option<Vec<String>> {
-    let mut args = Vec::new();
-
-    if let Some(tp) = cfg.tensor_parallel_size {
-        args.push("--tensor-parallel-size".to_string());
-        args.push(tp.to_string());
-    }
-
-    if let Some(util) = cfg.gpu_memory_utilization {
-        args.push("--gpu-memory-utilization".to_string());
-        args.push(util.to_string());
-    }
-
-    if let Some(max_len) = cfg.max_model_len {
-        args.push("--max-model-len".to_string());
-        args.push(max_len.to_string());
-    }
-
-    if let Some(mods) = cfg.lora_modules.as_ref() {
-        if !mods.is_empty() {
-            args.push("--enable-lora".to_string());
-            args.push("--lora-modules".to_string());
-            args.push(mods.join(","));
-        }
-    }
-
-    if args.is_empty() {
-        None
-    } else {
-        Some(args)
-    }
+/// Build engine CLI extra args from a ModelConfig for the given engine dialect.
+pub fn build_extra_args_from_config(
+    engine_type: Option<&str>,
+    cfg: &ModelConfig,
+) -> Option<Vec<String>> {
+    build_engine_extra_args_lenient(engine_type, cfg)
 }
 
 /// Find the next available port starting from `start`, skipping any in `used`.
@@ -299,18 +323,23 @@ pub async fn build_plan_from_deployment(
     let merged_config = merge_config(spec.config.as_ref(), deployment.config_overrides.as_ref());
     let extra_args = merged_config
         .as_ref()
-        .and_then(|c| build_extra_args_from_config(c));
+        .and_then(|c| build_extra_args_from_config(spec.engine_type.as_deref(), c));
 
     let mut assignments = Vec::with_capacity(replicas as usize);
 
     for replica_id in 0..replicas {
         // Node/GPU selection: respect affinity overrides from deployment
+        let image_ref = deployment
+            .image_id
+            .as_deref()
+            .or(spec.docker_image.as_deref());
         let (node_id, gpu_indices) = select_node_and_gpus_for_deployment(
             store,
             &merged_config,
             deployment.node_affinity.as_deref(),
             deployment.gpu_affinity.as_deref(),
             &used_gpus,
+            image_ref,
         )
         .await?;
 
@@ -333,7 +362,10 @@ pub async fn build_plan_from_deployment(
             gpu_indices,
             extra_args.clone(),
             spec.engine_type.clone(),
-            spec.docker_image.clone(),
+            deployment
+                .image_id
+                .clone()
+                .or_else(|| spec.docker_image.clone()),
         ));
     }
 
@@ -356,9 +388,29 @@ async fn select_node_and_gpus_for_deployment(
     node_affinity: Option<&str>,
     gpu_affinity: Option<&[u32]>,
     used_gpus: &HashMap<String, HashSet<u32>>,
+    docker_image: Option<&str>,
 ) -> anyhow::Result<(String, Vec<u32>)> {
-    // If both node and GPU affinity are specified, use them directly
+    let image_platforms = load_image_platforms(store, docker_image).await;
+
+    // If both node and GPU affinity are specified, use them directly (still check platform).
     if let Some(target_node) = node_affinity {
+        if !image_platforms.is_empty() {
+            if let Ok(kvs) = store.list_prefix("/nodes/").await {
+                for (_, val, _) in kvs {
+                    let Ok(status) = serde_json::from_slice::<NodeStatus>(&val) else {
+                        continue;
+                    };
+                    if status.node_id == target_node
+                        && !node_matches_platforms(&status, &image_platforms)
+                    {
+                        anyhow::bail!(
+                            "node '{target_node}' platform incompatible with image platforms {:?}",
+                            image_platforms
+                        );
+                    }
+                }
+            }
+        }
         let indices = gpu_affinity.map(|g| g.to_vec()).unwrap_or_default();
         return Ok((target_node.to_string(), indices));
     }
@@ -388,9 +440,14 @@ async fn select_node_and_gpus_for_deployment(
 
     let now = now_ms();
     let mut best_node: Option<(String, Vec<u32>, u64)> = None;
+    let mut rejected_platform = 0u32;
 
     for node in &nodes {
         if now.saturating_sub(node.last_heartbeat_ms) > NODE_STALE_MS {
+            continue;
+        }
+        if !node_matches_platforms(node, &image_platforms) {
+            rejected_platform += 1;
             continue;
         }
 
@@ -442,13 +499,26 @@ async fn select_node_and_gpus_for_deployment(
         return Ok((node_id, indices));
     }
 
-    // Fallback: return any healthy node with no GPU selection
     for node in &nodes {
         if now.saturating_sub(node.last_heartbeat_ms) > NODE_STALE_MS {
+            continue;
+        }
+        if !node_matches_platforms(node, &image_platforms) {
             continue;
         }
         return Ok((node.node_id.clone(), vec![]));
     }
 
-    anyhow::bail!("no healthy nodes available")
+    if rejected_platform > 0 && !image_platforms.is_empty() {
+        let reason = nebula_common::PlacementRejectReason::platform_incompatible(
+            image_platforms,
+            rejected_platform,
+            None,
+        );
+        anyhow::bail!("{}", reason.format_error());
+    }
+    anyhow::bail!(
+        "{}",
+        nebula_common::PlacementRejectReason::no_healthy_nodes().format_error()
+    )
 }

@@ -274,15 +274,6 @@ pub async fn engine_stats(
         let pending = pending_map.get(&key).copied().unwrap_or(0);
         let kv_usage = kv_usage_map.get(&key).copied();
 
-        const VIRTUAL_TOTAL: u64 = 1_000_000;
-        let (kv_used, kv_free) = match kv_usage {
-            Some(usage) => {
-                let used = (usage * VIRTUAL_TOTAL as f64) as u64;
-                (Some(used), Some(VIRTUAL_TOTAL - used))
-            }
-            None => (None, None),
-        };
-
         stats.push(EndpointStats {
             model_uid: key.0,
             replica_id: key.1,
@@ -290,8 +281,7 @@ pub async fn engine_stats(
             pending_requests: pending,
             prefix_cache_hit_rate: None,
             prompt_cache_hit_rate: None,
-            kv_cache_used_bytes: kv_used,
-            kv_cache_free_bytes: kv_free,
+            kv_cache_usage: kv_usage,
         });
     }
 
@@ -503,6 +493,8 @@ async fn load_model_with_request(st: AppState, req: Option<ModelLoadRequest>) ->
                 config_overrides: config,
                 node_id,
                 gpu_indices,
+                image_id: None,
+                image_override_reason: None,
             };
             match crate::service::start_model(&*st.store, &model_uid, start).await {
                 Ok(dep) => (

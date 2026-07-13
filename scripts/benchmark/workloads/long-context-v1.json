@@ -1,0 +1,9 @@
+{
+  "id": "long-context-v1",
+  "class": "long_context",
+  "prompt": "Summarize the following text in 3 bullets. Focus on key claims only.\n\nThe quick brown fox jumps over the lazy dog. Nebula is a control plane for local and private inference. Benchmarks must compare the same workload class. Online SLI may only correct profiles that share model, engine, platform and workload identity.",
+  "max_tokens": 256,
+  "concurrency": 1,
+  "request_count": 10,
+  "notes": "Longer prompt for context pressure"
+}

@@ -1,0 +1,99 @@
+# Prometheus / Alertmanager rule examples for Nebula O8.
+# Source of thresholds: docs/dev/observability.md §5.3
+# Runbook: docs/dev/slo_alerts.md
+#
+# Scrape Router (:18081/metrics) and Node (:<node-api>/metrics).
+# Abort counters are intentionally NOT used in 5xx ratio alerts.
+
+groups:
+  - name: nebula-router-slo
+    rules:
+      - alert: NebulaRouterHigh5xx
+        expr: |
+          (
+            sum(rate(nebula_router_responses_5xx[5m]))
+            /
+            clamp_min(sum(rate(nebula_router_requests_total[5m])), 0.1)
+          ) > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          service: nebula-router
+        annotations:
+          summary: "Router 5xx ratio > 2% for 5m"
+          description: >
+            Error budget burn on the access path. Abort/drain are excluded
+            (see nebula_router_requests_aborted_total). Runbook: docs/dev/slo_alerts.md §5.1
+
+      - alert: NebulaRouterLowRetrySuccess
+        expr: |
+          (
+            sum(rate(nebula_router_retry_total[10m])) > 0.05
+          )
+          and
+          (
+            sum(rate(nebula_router_retry_success_total[10m]))
+            /
+            clamp_min(sum(rate(nebula_router_retry_total[10m])), 1e-9)
+          ) < 0.20
+        for: 10m
+        labels:
+          severity: warning
+          service: nebula-router
+        annotations:
+          summary: "Router retry success ratio < 20% for 10m"
+          description: >
+            Retries are not recovering requests. Check upstream errors and
+            circuit breakers. Runbook: docs/dev/slo_alerts.md §5.2
+
+      - alert: NebulaRouterCircuitOpenSurge
+        expr: |
+          increase(nebula_router_circuit_open_total[5m])
+          >
+          3 * (increase(nebula_router_circuit_open_total[1h]) / 12)
+        for: 5m
+        labels:
+          severity: warning
+          service: nebula-router
+        annotations:
+          summary: "Circuit-open events surged vs 1h baseline"
+          description: >
+            5m circuit opens exceed 3x the per-5m average of the last hour.
+            Runbook: docs/dev/slo_alerts.md §5.3
+
+      - alert: NebulaRouterUpstreamTimeoutShare
+        expr: |
+          (
+            sum(rate(nebula_router_upstream_error_total{kind="timeout"}[10m]))
+            /
+            clamp_min(sum(rate(nebula_router_upstream_error_total[10m])), 1e-9)
+          ) > 0.40
+          and
+          sum(rate(nebula_router_upstream_error_total[10m])) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: nebula-router
+        annotations:
+          summary: "Timeouts > 40% of upstream errors for 10m"
+          description: >
+            Distinguish engine overload from client abort
+            (nebula_router_requests_aborted_total). Runbook: docs/dev/slo_alerts.md §5.4
+
+  - name: nebula-node-slo
+    rules:
+      - alert: NebulaNodeEngineScrapeFailing
+        expr: |
+          max by (model_uid, replica_id, engine_type, result) (
+            nebula_node_engine_scrape_result{result!="success"}
+          ) == 1
+        for: 5m
+        labels:
+          severity: warning
+          service: nebula-node
+        annotations:
+          summary: "Engine /metrics scrape not success"
+          description: >
+            result={{ $labels.result }} model={{ $labels.model_uid }}
+            replica={{ $labels.replica_id }}. Live /stats/ may go stale.
+            Runbook: docs/dev/slo_alerts.md §5.5

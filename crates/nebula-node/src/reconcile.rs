@@ -12,7 +12,9 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::args::Args;
 use crate::engine::{write_engine_env, Engine, EngineHandle, EngineStartContext};
-use crate::heartbeat::{delete_endpoint, delete_stats, register_endpoint};
+use crate::heartbeat::{
+    delete_capability, delete_endpoint, delete_stats, register_capability, register_endpoint,
+};
 use crate::util::now_ms;
 
 /// Local running / endpoint index key: (model_uid, replica_id).
@@ -33,6 +35,8 @@ pub struct RunningModel {
     pub drain_started_ms: Option<u64>,
     /// Recovery budget exhausted — skip further restarts.
     pub failed: bool,
+    /// Last runtime/static capability snapshot (refreshed into etcd by heartbeat).
+    pub capability: Option<nebula_common::ReplicaCapability>,
 }
 
 /// Max time to wait for in-flight traffic before force-stopping a draining replica.
@@ -184,6 +188,7 @@ async fn finish_drain_stop(
         let _ = stop_engine_outside(rm).await;
         let _ = delete_endpoint(store, model_uid, replica_id).await;
         let _ = delete_stats(store, model_uid, replica_id).await;
+        let _ = delete_capability(store, model_uid, replica_id).await;
         endpoint_state.lock().await.remove(&key);
     }
     Ok(())
@@ -273,6 +278,7 @@ async fn stop_replica(
         let _ = stop_engine_outside(rm).await;
         let _ = delete_endpoint(store, model_uid, replica_id).await;
         let _ = delete_stats(store, model_uid, replica_id).await;
+        let _ = delete_capability(store, model_uid, replica_id).await;
         endpoint_state.lock().await.remove(&key);
     }
     Ok(())
@@ -295,7 +301,13 @@ async fn launch_replica_engine(
         args,
         engine_type,
         docker_image_override,
-    ));
+    )?);
+    let caps = engine.capabilities();
+    tracing::info!(
+        engine_type = %engine.engine_type(),
+        capability_source = ?caps.source,
+        "engine adapter selected"
+    );
 
     let ctx = EngineStartContext {
         model_uid: model_uid.to_string(),
@@ -376,6 +388,35 @@ async fn launch_replica_engine(
         }
     };
 
+    // Best-effort runtime capability discovery (never blocks Ready).
+    let mut capability = None;
+    if let Ok(http) = nebula_common::health_http_client() {
+        let discovered = crate::engine::discover::discover_runtime_capability(
+            &http,
+            engine.engine_type(),
+            &handle.base_url,
+        )
+        .await;
+        tracing::info!(
+            %model_uid,
+            replica_id,
+            engine_type = %discovered.engine_type,
+            capability_source = ?discovered.source,
+            engine_version = ?discovered.engine_version,
+            pending = ?discovered.observability.pending_requests,
+            kv = ?discovered.observability.kv_cache_usage,
+            "runtime capability discovery"
+        );
+        let cap = nebula_common::ReplicaCapability {
+            model_uid: plan.model_uid.clone(),
+            replica_id,
+            capability: discovered,
+            updated_at_ms: now_ms(),
+        };
+        let _ = register_capability(store, &cap, args.heartbeat_ttl_ms, None).await;
+        capability = Some(cap);
+    }
+
     let env_path = format!("{}-{}", args.engine_env_path, replica_id);
     write_engine_env(&env_path, &handle.base_url, &handle.engine_model).await?;
 
@@ -403,6 +444,7 @@ async fn launch_replica_engine(
         request_id: plan.request_id.clone(),
         drain_started_ms: None,
         failed: false,
+        capability,
     };
     Ok(Some((rm, info)))
 }

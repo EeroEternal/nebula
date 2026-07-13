@@ -1,7 +1,8 @@
 # Nebula 可观测性
 
 > 状态：统一设计与实施规范（2026-07-12）  
-> **执行勾选：** [`../arch/optimization.md`](../arch/optimization.md) N4-Obs（O1–O7 ✅；**O8** SLO/告警待补）。  
+> **执行勾选：** [`../arch/optimization.md`](../arch/optimization.md) N4-Obs（O1–O8 ✅；O9 按需；O10 上游）。  
+> **SLO / 告警 runbook：** [`slo_alerts.md`](./slo_alerts.md)；规则样例 [`../../deploy/observe/prometheus-alerts.yml`](../../deploy/observe/prometheus-alerts.yml)。  
 > Loki 采集：[`loki.md`](./loki.md)。
 
 
@@ -164,7 +165,7 @@ P2.5 不做：自建第二套时序 UI、把客户 Grafana/Loki 搬进控制台�
 1. 本文为设计源；执行勾选见 **optimization N4-Obs**。
 2. ~~双写脚手架 + Gateway/Router 热路径~~ ✅（`DualWriteEmitter`）
 3. ~~JSON 日志 + Loki 采集文档~~ ✅（[`loki.md`](./loki.md)）
-4. **下一步 O8**：SLO + 告警阈值写入 runbook（§5.3 初值）。
+4. ~~下一步 O8：SLO + 告警阈值写入 runbook（§5.3 初值）~~ ✅（[`slo_alerts.md`](./slo_alerts.md)）
 5. O9：Scheduler 等业务点双写缺口按需审计。
 6. 前端运维面板（P2.5）：只绑 BFF；客户 VM/Loki 走文档出口。
 

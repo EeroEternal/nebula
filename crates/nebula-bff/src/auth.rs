@@ -180,6 +180,7 @@ pub async fn db_auth_middleware(
     req.extensions_mut().insert(AuthContext {
         principal: username,
         role,
+        tenant_id: None,
     });
 
     Ok(next.run(req).await)

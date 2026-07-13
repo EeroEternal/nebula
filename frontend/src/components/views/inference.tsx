@@ -10,16 +10,20 @@ import { useEngineStats } from "@/hooks/useEngineStats";
 import { useMetricsRaw } from "@/hooks/useMetricsRaw";
 import { cn } from "@/lib/utils";
 
-interface GatewayMetrics {
+interface AccessMetrics {
   requests_total: number;
   requests_inflight: number;
   responses_2xx: number;
   responses_4xx: number;
   responses_5xx: number;
-  auth_missing: number;
-  auth_invalid: number;
-  auth_forbidden: number;
-  auth_rate_limited: number;
+  /** Present only when Gateway /metrics is available; otherwise null. */
+  auth: {
+    missing: number;
+    invalid: number;
+    forbidden: number;
+    rate_limited: number;
+  } | null;
+  data_source: "router" | "gateway" | "mixed";
 }
 
 interface RouterModelMetrics {
@@ -33,12 +37,19 @@ interface RouterModelMetrics {
   ttft_sum: number;
 }
 
-function parseGatewayMetrics(raw: string = ""): GatewayMetrics {
-  const m: GatewayMetrics = {
+/** Parse Router (and optional Gateway) Prometheus text. Prefer Router as the control-plane scrape. */
+function parseAccessMetrics(raw: string = ""): AccessMetrics {
+  const m: AccessMetrics = {
     requests_total: 0, requests_inflight: 0,
     responses_2xx: 0, responses_4xx: 0, responses_5xx: 0,
-    auth_missing: 0, auth_invalid: 0, auth_forbidden: 0, auth_rate_limited: 0,
+    auth: null,
+    data_source: "router",
   };
+  let sawGateway = false;
+  let sawRouter = false;
+  let authMissing = 0, authInvalid = 0, authForbidden = 0, authLimited = 0;
+  let sawAuth = false;
+
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
@@ -47,21 +58,32 @@ function parseGatewayMetrics(raw: string = ""): GatewayMetrics {
     const [key, val] = parts;
     const n = parseInt(val, 10);
     if (isNaN(n)) continue;
-    if (key === "nebula_gateway_requests_total") m.requests_total = n;
-    else if (key === "nebula_gateway_requests_inflight") m.requests_inflight = n;
-    else if (key === "nebula_gateway_responses_2xx") m.responses_2xx = n;
-    else if (key === "nebula_gateway_responses_4xx") m.responses_4xx = n;
-    else if (key === "nebula_gateway_responses_5xx") m.responses_5xx = n;
-    else if (key === "nebula_router_requests_total" && m.requests_total === 0) m.requests_total = n;
-    else if (key === "nebula_router_requests_inflight" && m.requests_inflight === 0) m.requests_inflight = n;
-    else if (key === "nebula_router_responses_2xx" && m.responses_2xx === 0) m.responses_2xx = n;
-    else if (key === "nebula_router_responses_4xx" && m.responses_4xx === 0) m.responses_4xx = n;
-    else if (key === "nebula_router_responses_5xx" && m.responses_5xx === 0) m.responses_5xx = n;
-    else if (key === "nebula_gateway_auth_missing") m.auth_missing = n;
-    else if (key === "nebula_gateway_auth_invalid") m.auth_invalid = n;
-    else if (key === "nebula_gateway_auth_forbidden") m.auth_forbidden = n;
-    else if (key === "nebula_gateway_auth_rate_limited") m.auth_rate_limited = n;
+
+    if (key === "nebula_router_requests_total") { m.requests_total = n; sawRouter = true; }
+    else if (key === "nebula_router_requests_inflight") { m.requests_inflight = n; sawRouter = true; }
+    else if (key === "nebula_router_responses_2xx") { m.responses_2xx = n; sawRouter = true; }
+    else if (key === "nebula_router_responses_4xx") { m.responses_4xx = n; sawRouter = true; }
+    else if (key === "nebula_router_responses_5xx") { m.responses_5xx = n; sawRouter = true; }
+    else if (key === "nebula_gateway_requests_total") { if (!sawRouter) m.requests_total = n; sawGateway = true; }
+    else if (key === "nebula_gateway_requests_inflight") { if (!sawRouter) m.requests_inflight = n; sawGateway = true; }
+    else if (key === "nebula_gateway_responses_2xx") { if (!sawRouter) m.responses_2xx = n; sawGateway = true; }
+    else if (key === "nebula_gateway_responses_4xx") { if (!sawRouter) m.responses_4xx = n; sawGateway = true; }
+    else if (key === "nebula_gateway_responses_5xx") { if (!sawRouter) m.responses_5xx = n; sawGateway = true; }
+    else if (key === "nebula_gateway_auth_missing") { authMissing = n; sawAuth = true; }
+    else if (key === "nebula_gateway_auth_invalid") { authInvalid = n; sawAuth = true; }
+    else if (key === "nebula_gateway_auth_forbidden") { authForbidden = n; sawAuth = true; }
+    else if (key === "nebula_gateway_auth_rate_limited") { authLimited = n; sawAuth = true; }
   }
+
+  if (sawAuth) {
+    m.auth = {
+      missing: authMissing,
+      invalid: authInvalid,
+      forbidden: authForbidden,
+      rate_limited: authLimited,
+    };
+  }
+  m.data_source = sawRouter && sawGateway ? "mixed" : sawGateway && !sawRouter ? "gateway" : "router";
   return m;
 }
 
@@ -114,11 +136,11 @@ export function InferenceView() {
   const { data: engineStats = [] } = useEngineStats();
   const { data: metricsRaw = "" } = useMetricsRaw();
 
-  const gw = useMemo(() => parseGatewayMetrics(metricsRaw), [metricsRaw]);
+  const access = useMemo(() => parseAccessMetrics(metricsRaw), [metricsRaw]);
   const routerModels = useMemo(() => parseRouterModelMetrics(metricsRaw), [metricsRaw]);
 
-  const successRate = gw.requests_total > 0
-    ? ((gw.responses_2xx / gw.requests_total) * 100).toFixed(1)
+  const successRate = access.requests_total > 0
+    ? ((access.responses_2xx / access.requests_total) * 100).toFixed(1)
     : "—";
 
   const overloadedModels = useMemo(() => {
@@ -130,8 +152,7 @@ export function InferenceView() {
     const result: string[] = [];
     for (const [uid, stats] of byModel) {
       const allOverloaded = stats.every(s => {
-        const total = (s.kv_cache_used_bytes ?? 0) + (s.kv_cache_free_bytes ?? 0);
-        return total > 0 && (s.kv_cache_used_bytes / total) > 0.95;
+        return typeof s.kv_cache_usage === 'number' && s.kv_cache_usage > 0.95;
       });
       if (allOverloaded && stats.length > 0) result.push(uid);
     }
@@ -169,8 +190,8 @@ export function InferenceView() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <MetricCard label={t('inference.totalRequests')} value={gw.requests_total.toLocaleString()} icon={Globe} />
-        <MetricCard label={t('inference.inFlight')} value={gw.requests_inflight.toLocaleString()} icon={Gauge} />
+        <MetricCard label={t('inference.totalRequests')} value={access.requests_total.toLocaleString()} icon={Globe} />
+        <MetricCard label={t('inference.inFlight')} value={access.requests_inflight.toLocaleString()} icon={Gauge} />
         <MetricCard label={t('inference.activeEndpoints')} value={String(overview?.endpoints.length || 0)} icon={Zap} />
         <MetricCard label={t('inference.successRate')} value={successRate === "—" ? "—" : `${successRate}%`} icon={TrendingUp} color={Number(successRate) < 95 ? "text-warning" : "text-success"} />
       </div>
@@ -184,9 +205,9 @@ export function InferenceView() {
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={[
-                { name: "2xx", count: gw.responses_2xx, fill: "oklch(68% 0.22 150)" },
-                { name: "4xx", count: gw.responses_4xx, fill: "oklch(82% 0.16 80)" },
-                { name: "5xx", count: gw.responses_5xx, fill: "oklch(60% 0.2 25)" },
+                { name: "2xx", count: access.responses_2xx, fill: "oklch(68% 0.22 150)" },
+                { name: "4xx", count: access.responses_4xx, fill: "oklch(82% 0.16 80)" },
+                { name: "5xx", count: access.responses_5xx, fill: "oklch(60% 0.2 25)" },
               ]}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="oklch(30% 0.05 260 / 0.2)" />
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "oklch(75% 0.02 260)" }} />
@@ -203,13 +224,14 @@ export function InferenceView() {
             <ShieldCheck className="h-4 w-4 text-muted-foreground" />
             <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{t('inference.authEvents')}</h3>
           </div>
+          {access.auth ? (
           <div className="h-64">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={[
-                { name: "MISSING", count: gw.auth_missing },
-                { name: "INVALID", count: gw.auth_invalid },
-                { name: "FORBIDDEN", count: gw.auth_forbidden },
-                { name: "LIMITED", count: gw.auth_rate_limited },
+                { name: "MISSING", count: access.auth.missing },
+                { name: "INVALID", count: access.auth.invalid },
+                { name: "FORBIDDEN", count: access.auth.forbidden },
+                { name: "LIMITED", count: access.auth.rate_limited },
               ]}>
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="oklch(30% 0.05 260 / 0.2)" />
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 9, fill: "oklch(75% 0.02 260)" }} />
@@ -219,6 +241,11 @@ export function InferenceView() {
               </BarChart>
             </ResponsiveContainer>
           </div>
+          ) : (
+            <div className="h-64 flex items-center justify-center text-xs font-mono text-muted-foreground">
+              n/a — Gateway auth metrics not in this scrape ({access.data_source})
+            </div>
+          )}
         </div>
       </div>
 
@@ -276,9 +303,9 @@ export function InferenceView() {
              <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground px-2">{t('inference.engineStats')}</h3>
              <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
                 {engineStats.map((s) => {
-                  const kvTotal = (s.kv_cache_used_bytes ?? 0) + (s.kv_cache_free_bytes ?? 0);
-                  const kvPct = kvTotal > 0 ? Math.round(((s.kv_cache_used_bytes ?? 0) / kvTotal) * 100) : 0;
-                  const isOverloaded = kvPct > 95;
+                  const hasKv = typeof s.kv_cache_usage === 'number';
+                  const kvPct = hasKv ? Math.round(s.kv_cache_usage! * 100) : null;
+                  const isOverloaded = kvPct != null && kvPct > 95;
                   return (
                     <div key={`${s.model_uid}-${s.replica_id}`} className="bg-card/40 backdrop-blur-xl border border-border p-5 rounded-xl rim-light space-y-5">
                       <div className="flex items-center justify-between">
@@ -288,9 +315,11 @@ export function InferenceView() {
                       <div className="space-y-2.5">
                         <div className="flex items-center justify-between text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
                           <span>KV CACHE</span>
-                          <span className={cn("font-mono", isOverloaded ? "text-destructive" : "text-primary")}>{kvPct}%</span>
+                          <span className={cn("font-mono", isOverloaded ? "text-destructive" : hasKv ? "text-primary" : "text-muted-foreground")}>
+                            {kvPct != null ? `${kvPct}%` : 'n/a'}
+                          </span>
                         </div>
-                        <Progress value={kvPct} className="h-1.5 bg-white/5" indicatorClassName={isOverloaded ? "bg-destructive" : "bg-primary"} />
+                        <Progress value={kvPct ?? 0} className="h-1.5 bg-white/5" indicatorClassName={isOverloaded ? "bg-destructive" : "bg-primary"} />
                       </div>
                       <div className="grid grid-cols-2 gap-4 pt-1">
                           <div className="flex flex-col">

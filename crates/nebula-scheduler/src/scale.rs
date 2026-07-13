@@ -59,8 +59,7 @@ mod tests {
             pending_requests: pending,
             prefix_cache_hit_rate: None,
             prompt_cache_hit_rate: None,
-            kv_cache_used_bytes: None,
-            kv_cache_free_bytes: None,
+            kv_cache_usage: None,
         }
     }
 

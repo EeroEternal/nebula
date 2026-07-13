@@ -8,7 +8,9 @@ use tokio::sync::Mutex;
 use nebula_common::{EndpointInfo, EndpointStatus, NodeStatus};
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
-use crate::docker_api::{EngineMetricSnapshot, NodeMetricsSnapshot, SharedNodeMetrics};
+use crate::docker_api::{
+    EngineMetricSnapshot, NodeMetricsSnapshot, ScrapeOutcomeRecord, SharedNodeMetrics,
+};
 use crate::engine::{Engine, EngineHandle, EngineProcess};
 use crate::gpu::read_gpu_statuses;
 use crate::reconcile::{mark_request_failed, replica_key, ReplicaKey, RunningModel};
@@ -140,6 +142,22 @@ pub async fn register_stats(
     Ok(())
 }
 
+pub async fn register_capability(
+    store: &EtcdMetaStore,
+    cap: &nebula_common::ReplicaCapability,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
+) -> anyhow::Result<()> {
+    let key = format!("/capabilities/{}/{}", cap.model_uid, cap.replica_id);
+    let bytes = serde_json::to_vec(cap)?;
+    if let Some(lease_id) = lease_id {
+        let _ = store.put_with_lease(&key, bytes, lease_id).await?;
+    } else {
+        let _ = store.put(&key, bytes, Some(ttl_ms)).await?;
+    }
+    Ok(())
+}
+
 pub async fn delete_endpoint(
     store: &EtcdMetaStore,
     model_uid: &str,
@@ -156,6 +174,16 @@ pub async fn delete_stats(
     replica_id: u32,
 ) -> anyhow::Result<()> {
     let key = format!("/stats/{}/{}", model_uid, replica_id);
+    let _ = store.delete(&key).await?;
+    Ok(())
+}
+
+pub async fn delete_capability(
+    store: &EtcdMetaStore,
+    model_uid: &str,
+    replica_id: u32,
+) -> anyhow::Result<()> {
+    let key = format!("/capabilities/{}/{}", model_uid, replica_id);
     let _ = store.delete(&key).await?;
     Ok(())
 }
@@ -185,6 +213,7 @@ pub async fn heartbeat_loop(
     loop {
         let mut metric_points: Vec<xtrace_client::MetricPoint> = Vec::new();
         let mut engine_snapshots: Vec<EngineMetricSnapshot> = Vec::new();
+        let mut scrape_outcomes: Vec<ScrapeOutcomeRecord> = Vec::new();
         let gpus = read_gpu_statuses().await;
 
         // Collect GPU metrics for xtrace
@@ -227,11 +256,17 @@ pub async fn heartbeat_loop(
         }
 
         let gpus_for_metrics = gpus.clone();
+        let platform = std::env::var("NEBULA_NODE_PLATFORM")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(nebula_common::DEFAULT_NODE_PLATFORM.to_string()));
         let status = NodeStatus {
             node_id: node_id.clone(),
             last_heartbeat_ms: now_ms(),
             gpus,
             api_addr: Some(format!("http://0.0.0.0:{}", api_port)),
+            platform,
         };
 
         let bytes = match serde_json::to_vec(&status) {
@@ -259,6 +294,17 @@ pub async fn heartbeat_loop(
             }
         } else {
             tracing::debug!("skipping endpoint refresh: endpoint state lock busy");
+        }
+
+        // Refresh capability snapshots alongside endpoints.
+        if let Ok(running_guard) = running.try_lock() {
+            for rm in running_guard.values() {
+                if let Some(cap) = rm.capability.as_ref() {
+                    if let Err(e) = register_capability(&store, cap, ttl_ms, lease_id).await {
+                        tracing::warn!(error=%e, "failed to refresh capability");
+                    }
+                }
+            }
         }
 
         // C2: snapshot under try_lock; health/scrape outside so reconcile is not blocked.
@@ -332,76 +378,73 @@ pub async fn heartbeat_loop(
                     }
                 }
 
-                if let Some(stats) = target
+                match target
                     .engine
                     .scrape_stats(&http, &probe, &target.model_uid, target.replica_id)
                     .await
                 {
-                    if xtrace.is_some() {
-                        let ts = Utc::now();
-                        let labels = HashMap::from([
-                            ("node_id".to_string(), node_id.clone()),
-                            ("model_uid".to_string(), target.model_uid.clone()),
-                            ("replica_id".to_string(), target.replica_id.to_string()),
-                        ]);
-                        metric_points.push(xtrace_client::MetricPoint {
-                            name: "pending_requests".to_string(),
-                            labels: labels.clone(),
-                            value: stats.pending_requests as f64,
-                            timestamp: ts,
+                    Ok(stats) => {
+                        scrape_outcomes.push(ScrapeOutcomeRecord {
+                            model_uid: target.model_uid.clone(),
+                            replica_id: target.replica_id,
+                            engine_type: target.engine.engine_type().to_string(),
+                            result: "success".to_string(),
                         });
-                        if let (Some(used), Some(free)) =
-                            (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes)
-                        {
-                            let total = used + free;
-                            let usage = if total > 0 {
-                                used as f64 / total as f64
-                            } else {
-                                0.0
-                            };
+                        if xtrace.is_some() {
+                            let ts = Utc::now();
+                            let labels = HashMap::from([
+                                ("node_id".to_string(), node_id.clone()),
+                                ("model_uid".to_string(), target.model_uid.clone()),
+                                ("replica_id".to_string(), target.replica_id.to_string()),
+                            ]);
                             metric_points.push(xtrace_client::MetricPoint {
-                                name: "kv_cache_usage".to_string(),
+                                name: "pending_requests".to_string(),
                                 labels: labels.clone(),
-                                value: usage,
+                                value: stats.pending_requests as f64,
                                 timestamp: ts,
                             });
-                        }
-                        if let Some(rate) = stats.prefix_cache_hit_rate {
-                            metric_points.push(xtrace_client::MetricPoint {
-                                name: "prefix_cache_hit_rate".to_string(),
-                                labels,
-                                value: rate,
-                                timestamp: ts,
-                            });
-                        }
-                    }
-
-                    let kv_usage = match (stats.kv_cache_used_bytes, stats.kv_cache_free_bytes) {
-                        (Some(used), Some(free)) => {
-                            let total = used + free;
-                            if total > 0 {
-                                Some(used as f64 / total as f64)
-                            } else {
-                                None
+                            if let Some(usage) = stats.kv_cache_usage {
+                                metric_points.push(xtrace_client::MetricPoint {
+                                    name: "kv_cache_usage".to_string(),
+                                    labels: labels.clone(),
+                                    value: usage,
+                                    timestamp: ts,
+                                });
+                            }
+                            if let Some(rate) = stats.prefix_cache_hit_rate {
+                                metric_points.push(xtrace_client::MetricPoint {
+                                    name: "prefix_cache_hit_rate".to_string(),
+                                    labels,
+                                    value: rate,
+                                    timestamp: ts,
+                                });
                             }
                         }
-                        _ => None,
-                    };
-                    engine_snapshots.push(EngineMetricSnapshot {
-                        model_uid: target.model_uid.clone(),
-                        replica_id: target.replica_id,
-                        pending_requests: stats.pending_requests,
-                        kv_cache_usage: kv_usage,
-                        prefix_cache_hit_rate: stats.prefix_cache_hit_rate,
-                    });
 
-                    if let Err(e) = register_stats(&store, &stats, ttl_ms, lease_id).await {
-                        tracing::warn!(
-                            model_uid=%target.model_uid,
-                            replica_id=target.replica_id,
-                            error=%e,
-                            "failed to write /stats/ to etcd"
-                        );
+                        engine_snapshots.push(EngineMetricSnapshot {
+                            model_uid: target.model_uid.clone(),
+                            replica_id: target.replica_id,
+                            pending_requests: stats.pending_requests,
+                            kv_cache_usage: stats.kv_cache_usage,
+                            prefix_cache_hit_rate: stats.prefix_cache_hit_rate,
+                        });
+
+                        if let Err(e) = register_stats(&store, &stats, ttl_ms, lease_id).await {
+                            tracing::warn!(
+                                model_uid=%target.model_uid,
+                                replica_id=target.replica_id,
+                                error=%e,
+                                "failed to write /stats/ to etcd"
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        scrape_outcomes.push(ScrapeOutcomeRecord {
+                            model_uid: target.model_uid.clone(),
+                            replica_id: target.replica_id,
+                            engine_type: target.engine.engine_type().to_string(),
+                            result: err.as_str().to_string(),
+                        });
                     }
                 }
                 continue;
@@ -503,6 +546,7 @@ pub async fn heartbeat_loop(
             *snap = NodeMetricsSnapshot {
                 gpus: gpus_for_metrics,
                 engines: engine_snapshots,
+                scrapes: scrape_outcomes,
             };
         }
 

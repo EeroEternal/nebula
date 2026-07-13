@@ -1,0 +1,9 @@
+# HELP sglang:num_requests_waiting Number of requests waiting.
+# TYPE sglang:num_requests_waiting gauge
+sglang:num_requests_waiting{model="m"} 3.0
+# HELP sglang:num_requests_running Number of requests running.
+# TYPE sglang:num_requests_running gauge
+sglang:num_requests_running{model="m"} 2.0
+# HELP sglang:token_usage Token / KV usage ratio.
+# TYPE sglang:token_usage gauge
+sglang:token_usage{model="m"} 0.55

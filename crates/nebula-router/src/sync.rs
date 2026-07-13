@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 
-use nebula_common::{EndpointInfo, EndpointStats, PlacementPlan};
+use nebula_common::{CellIngress, EndpointInfo, EndpointStats, PlacementPlan};
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 pub async fn endpoints_sync_loop(
@@ -166,6 +166,57 @@ pub async fn stats_sync_loop(
         }
 
         tracing::warn!("stats watch stream ended, full resync");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Watch `/cells/{model_uid}/{cell_id}` — whole Serving Cell ingress (not worker endpoints).
+pub async fn cells_sync_loop(
+    store: EtcdMetaStore,
+    router: Arc<nebula_router::Router>,
+) -> anyhow::Result<()> {
+    loop {
+        let (items, snap_rev) = match store.list_prefix_snapshot("/cells/").await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error=%e, "failed to list cells, will retry");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        let mut snapshot: Vec<CellIngress> = Vec::new();
+        for (_k, v, _rev) in items {
+            if let Ok(cell) = serde_json::from_slice::<CellIngress>(&v) {
+                snapshot.push(cell);
+            }
+        }
+        router.replace_all_cells(snapshot);
+
+        let mut stream = match store.watch_prefix("/cells/", Some(snap_rev)).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error=%e, "failed to watch cells, will resync");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        while let Some(ev) = stream.next().await {
+            if let Some(v) = ev.value {
+                if let Ok(cell) = serde_json::from_slice::<CellIngress>(&v) {
+                    router.upsert_cell(cell);
+                }
+            } else {
+                // /cells/{model_uid}/{cell_id}
+                let parts: Vec<&str> = ev.key.split('/').collect();
+                if parts.len() >= 4 {
+                    router.remove_cell(parts[2], parts[3]);
+                }
+            }
+        }
+
+        tracing::warn!("cells watch stream ended, full resync");
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }

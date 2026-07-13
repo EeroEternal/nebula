@@ -59,17 +59,17 @@ Nebula UI
 - `pending_requests`
 - `prefix_cache_hit_rate`
 - `prompt_cache_hit_rate`
-- `kv_cache_used_bytes`
-- `kv_cache_free_bytes`
+- `kv_cache_usage`（`[0.0, 1.0]`；已替换误导性的 `kv_cache_*_bytes`）
 
 实际映射情况：
 
 | 类别 | vLLM | SGLang |
 |------|------|--------|
 | waiting / running | 已采集并合并为 pending | 已采集并合并为 pending |
-| KV/cache 使用率 | 已采集 | 已采集 |
-| prefix cache 命中率 | 已采集部分版本方言 | 尚未映射 |
+| KV/cache 使用率 | 已采集 → `kv_cache_usage` | 已采集 → `kv_cache_usage` |
+| prefix cache 命中率 | 已采集部分版本方言 | 尚未映射（`null`，非 0） |
 | prompt cache 命中率 | 契约预留，未实现 | 契约预留，未实现 |
+| scrape 健康 | Node `nebula_node_engine_scrape_result` | 同左 |
 | TTFT / TPOT / token / 吞吐 | 未从引擎 scrape 统一 | 未从引擎 scrape 统一 |
 | 引擎原始指标 | 未系统保留 | 未系统保留 |
 
@@ -128,12 +128,12 @@ L3 用于解释指标变化，不作为 Nebula 接管原生 Cell 的依据。
 
 目标：先保证“采得到、看得懂、不会误导”。
 
-- 为 vLLM / SGLang 建立按版本记录的指标样本 fixture 和能力矩阵。
-- 为引擎 scrape 增加成功、失败、超时、解析失败、数据陈旧指标。
-- 明确 KV 当前使用比例转换为虚拟 used/free 值的语义，避免被误认为真实字节。
-- 校验 OTLP endpoint 配置，确保 Gateway → Router → Engine 的 `traceparent` 连续传播。
-- 清理或标注不再使用的 xtrace / Scheduler 遗留指标。
-- 修正 BFF 指标名称、label 和实际 Router/Gateway 数据源不一致的问题。
+- 为 vLLM / SGLang 建立按版本记录的指标样本 fixture 和能力矩阵。 ✅
+- 为引擎 scrape 增加成功、失败、超时、解析失败、数据陈旧指标。 ✅
+- 明确 KV 当前使用比例转换为虚拟 used/free 值的语义，避免被误认为真实字节。 ✅（已改为 `kv_cache_usage`）
+- 校验 OTLP endpoint 配置，确保 Gateway → Router → Engine 的 `traceparent` 连续传播。 ✅
+- 清理或标注不再使用的 xtrace / Scheduler 遗留指标。 ✅（已删除死 `*_xtrace_*`）
+- 修正 BFF 指标名称、label 和实际 Router/Gateway 数据源不一致的问题。 ✅（`upstream_5xx` + `data_source`）
 
 验收：
 

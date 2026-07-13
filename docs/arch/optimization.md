@@ -4,7 +4,7 @@
 
 ## 当前进展（一句话）
 
-M1 / N1 HA 主体 / N2 已完成。可观测双写与 Loki 路径（O1–O7）已落地；**剩余工程勾选：O8 SLO/告警草案**，以及按需 N3/N4。生产 etcd 三节点暂缓。
+M1 / N1 HA 主体 / N2 已完成。可观测 O1–O8 已落地。**产品对齐 P0–P6 主线代码 ✅**（Serving Cell、兼容矩阵、SLO、Benchmark/Canary、多租户配额与成本）。真机 Gateway e2e / 多引擎 benchmark / 多租户压测暂缓。剩余：按需 N3–N4 / P7。生产 etcd 三节点暂缓。
 
 ## 优先级总表
 
@@ -12,7 +12,14 @@ M1 / N1 HA 主体 / N2 已完成。可观测双写与 Loki 路径（O1–O7）�
 |------|----|------|------|------|
 | **N2** | Q1–Q4 | 工程质量 | ✅ | BFF 去重、HTTP client、observe、CI |
 | **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd 暂缓 |
-| **N4-Obs** | O1–O10 | 可观测 | ✅ O1–O7 / ⏳ O8 | 双写+Loki 已通；SLO runbook 待补 |
+| **N4-Obs** | O1–O10 | 可观测 | ✅ O1–O8 / ⏸ O9–O10 | SLO runbook + 告警样例已落；O9 按需 |
+| **Product P0** | P0 | 契约与观测可信度 | ✅ Batch 1–2 | 见 [`../dev/product_plan.md`](../dev/product_plan.md) |
+| **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 | 含能力 etcd 持久化、版本支持表、Cell 重试边界 |
+| **Product P2** | P2 | Serving Cell 只读接入 | ✅ Batch 1–2 / ⏸ e2e | 真机 Gateway e2e 暂缓 |
+| **Product P3** | P3 | 镜像平台 / 加速器台账 | ✅ Batch 1–2 | 兼容矩阵 + platforms 放置 + 库存 API/控制台；历史画像 ⏸ |
+| **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 | ModelSlo CRUD/评估 + 诊断时间线；真机 burn ⏸ |
+| **Product P5** | P5 | Benchmark / 推荐 / Canary | ✅ Batch 1 / ⏸ e2e | schema + scripts + BFF + 控制台；真机双引擎 ⏸ |
+| **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ⏸ 压测 | Tenant + Gateway 准入 + 用量成本；真机压测 ⏸ |
 | **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP；EngineShim |
 | **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能 |
 
@@ -23,10 +30,132 @@ M1 / N1 HA 主体 / N2 已完成。可观测双写与 Loki 路径（O1–O7）�
 ## 下一阶段顺序
 
 ```
-① O8（收尾）           SLO / 告警阈值写入 runbook
-② N3 / 产品 N4（有需求再开）
-③ 生产 etcd 三节点（暂缓）
+① Product P0（观测可信度 + 契约）   ✅ Batch 1–2
+② O8（收尾）                       ✅ SLO / 告警 runbook
+③ Product P1（Engine Capability / Adapter） ✅ Batch 1–2
+④ Product P2 Serving Cell               ✅ Batch 1–2（真机 e2e ⏸）
+⑤ Product P1 Batch 3 + P3 Batch 1–2 + P4 Batch 1 ✅
+⑥ Product P5 Benchmark / 推荐 / Canary   ✅ Batch 1（真机 e2e ⏸）
+⑦ Product P6 多租户 / 配额 / 成本         ✅ Batch 1（压测 ⏸）
+⑧ N3–N4 / P7（有需求再开）
+⑨ 生产 etcd 三节点（暂缓）
 ```
+
+### Product P6 Batch 1 勾选
+
+| 项 | 状态 |
+|----|------|
+| Tenant / Quota / Usage / Pricing 契约 + etcd | ✅ |
+| Auth `token:role[:tenant_id]`；关闭多租户兼容单 token | ✅ |
+| Gateway 准入 + ExecutionContext 传播；稳定拒绝码 | ✅ |
+| 低基数 `tenant_denied_total{reason=}`；审计含 tenant/deny | ✅ |
+| BFF + 控制台租户用量/成本视图 | ✅ |
+| 真机多租户隔离压测 | ⏸ |
+
+### Product P5 Batch 1 勾选
+
+| 项 | 状态 |
+|----|------|
+| `BenchmarkRun` / `PerformanceProfile` / recommend / canary 契约 | ✅ |
+| `scripts/benchmark` workload + runner（dry-run / ingest） | ✅ |
+| BFF `/benchmarks/*` + `/canaries/*`；不足数据不默引擎 | ✅ |
+| 控制台 governance：runs / recommend / canary | ✅ |
+| 真机双模型 × vLLM/SGLang 重复执行 | ⏸ |
+
+### Product P4 Batch 1 勾选
+
+| 项 | 状态 |
+|----|------|
+| `ModelSlo` 契约 + etcd `/slos/{model_uid}` CRUD | ✅ |
+| `GET .../evaluate`：Router scrape 对比目标；低流量 `insufficient_data`（不假绿） | ✅ |
+| abort/Drain 排除错误预算语义写入评估结果 | ✅ |
+| Cell 违约建议仅 capacity/config，无 worker 写操作 | ✅ |
+| `DiagnosticEvent` 聚合 deployment/placement/cell/slo | ✅ |
+| 控制台 `/governance`：矩阵 / 库存 / SLO / 时间线 | ✅ |
+| 真机流量 burn / Prometheus 告警实触发 | ⏸ |
+
+### Product P3 Batch 2 勾选
+
+| 项 | 状态 |
+|----|------|
+| `CompatibilityRule` + etcd `/compat/` + 默认种子（含 Ascend deny） | ✅ |
+| `ModelDeployment.image_id` / `image_override_reason` / `compat_rule_ids` | ✅ |
+| 启动前兼容校验；Scheduler 结构化 `platform_incompatible` 拒绝 | ✅ |
+| `GET /inventory/hardware`；节点页展示 platform/name/driver/cuda | ✅ |
+| GPU 历史利用率画像库 | ⏸ |
+
+### Product P1 Batch 3 / P3 Batch 1 勾选
+
+| 项 | 状态 |
+|----|------|
+| 运行时 capability 写入 etcd `/capabilities/`，BFF/模型详情展示 | ✅ |
+| Adapter `EngineVersionSupport` 静态表 + `validate_engine_version` | ✅ |
+| Cell Ingress：Router 不重试、不记 endpoint circuit（避免二次放大） | ✅ |
+| `NodeStatus.platform` + `GpuStatus` name/driver/cuda；`NEBULA_NODE_PLATFORM` | ✅ |
+| Scheduler：`EngineImage.platforms` 参与候选过滤与可解释拒绝 | ✅ |
+| 真实 SGLang Gateway / vLLM Router e2e | ⏸ 等真机环境 |
+
+### Product P2 Batch 2 勾选
+
+| 项 | 状态 |
+|----|------|
+| BFF `GET/POST .../cells/.../observe`：健康探针 + Ingress `/metrics` allowlist 解析 | ✅ |
+| 缺字段显示为 null/`n/a`；`data_source: cell_ingress`；不写 `/stats/` | ✅ |
+| 刷新 `status`/`last_checked_ms` 到 etcd（Router 可感知 Unhealthy） | ✅ |
+| 控制台 `/cells`：列表、注册、取消注册、观测面板；内部拓扑不可见 | ✅ |
+| 真实 SGLang Gateway / vLLM Router e2e | ⏸ 等真机 |
+
+### Product P2 Batch 1 勾选
+
+| 项 | 状态 |
+|----|------|
+| etcd `/cells/{model_uid}/{cell_id}` + `CellIngress` 契约（无 worker 写字段） | ✅ |
+| BFF `POST/GET/DELETE /api/v2/cells`；OpenAI `/v1/models` 探针；与 Nebula Running 互斥 | ✅ |
+| DELETE 只删 etcd 声明，不停外部 Cell；响应 `internal_topology: not_visible` | ✅ |
+| Router watch `/cells/`；Ready Cell 整入口选路，不选 Cell 内 worker | ✅ |
+| Node 不 watch `/cells/`（外部生命周期由引擎 serving 栈管理） | ✅（按设计忽略） |
+| Ingress `/metrics` 采集与控制台 Cell 视图 | ✅ Batch 2 |
+
+### Product P1 Batch 1 勾选
+
+| 项 | 状态 |
+|----|------|
+| 未知 `engine_type` 显式报错（Node `create_engine` 不再回退 vLLM） | ✅ |
+| `Engine` trait：`capabilities` / `validate_config` | ✅ |
+| vLLM / SGLang 静态 `EngineCapability` 表（`SupportLevel`） | ✅ |
+| BFF create/update/start/template 部署前校验 engine+config | ✅ |
+
+### Product P1 Batch 2 勾选
+
+| 项 | 状态 |
+|----|------|
+| Scheduler / common：按引擎方言生成 Placement `extra_args` | ✅ |
+| 运行时 capability 探测（`/v1/models` + `/metrics`，失败不阻塞 Ready） | ✅ |
+| 能力结果持久化到 etcd / 控制台展示 | ✅ |
+| Adapter 版本支持范围矩阵与 e2e fixture | ✅（静态表 + 单测；真机 e2e ⏸） |
+
+### Product P0 Batch 1 勾选
+
+| 项 | 状态 |
+|----|------|
+| `EndpointStats.kv_cache_usage` 替换伪字节字段 | ✅ |
+| scrape success/fail/timeout/parse 指标 | ✅ |
+| vLLM / SGLang metrics fixture + 解析测试 | ✅ |
+| `EngineCapability` / `ServingTopology` / `CellIngress` 契约草案 | ✅ |
+| BFF latency `data_source: router` 标明 | ✅ |
+| UI 缺失 KV 显示 n/a（不用 0） | ✅ |
+
+### Product P0 Batch 2 勾选
+
+| 项 | 状态 |
+|----|------|
+| Trace inject/extract 往返单测（同 trace_id 跨 Gateway→Router→Engine hop） | ✅ |
+| `normalize_otlp_endpoint`：`OBSERVE_URL` 基址自动补 `/api/public/otel` | ✅ |
+| BFF reliability `kind=upstream_5xx` 对齐 Router 导出 | ✅ |
+| BFF gateway/* 响应统一 `data_source: "router"` | ✅ |
+| 删除 Router/Scheduler 死指标 `*_xtrace_*` | ✅ |
+| Inference 页优先 Router 指标；auth 缺失显示 n/a | ✅ |
+| `remote-degradation-check.sh` 改为校验活指标 / 死指标缺席 | ✅ |
 
 ---
 
@@ -60,7 +189,7 @@ M1 / N1 HA 主体 / N2 已完成。可观测双写与 Loki 路径（O1–O7）�
 | **O5** | OTLP + W3C 传播 | ✅ | `TraceContextPropagator`；Router inject |
 | **O6** | JSON 日志（Loki 路径） | ✅ | `NEBULA_LOG_FORMAT=json` |
 | **O7** | Loki 采集文档 + 示例 | ✅ | [`../dev/loki.md`](../dev/loki.md)、`deploy/observe/` |
-| **O8** | SLO / 告警草案 | ⏳ **当前收尾** | observability §5.3 → runbook |
+| **O8** | SLO / 告警草案 | ✅ | [`../dev/slo_alerts.md`](../dev/slo_alerts.md)、`deploy/observe/prometheus-alerts.yml` |
 | **O9** | 双写缺口审计 | ⏳ 持续 | Scheduler 等按需补；低基数 |
 | **O10** | xtrace 深度需求 | ⏸ 上游 | 见 observability §9 |
 
@@ -137,8 +266,9 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 | 文档 | 用途 |
 |------|------|
 | [`architecture.md`](./architecture.md) | 架构现状 |
-| 本文 | **排期真源**（剩余 O8 / 按需 N3–N4） |
+| 本文 | **排期真源**（按需 O9 / N3–N4；Product P1） |
 | [`../dev/observability.md`](../dev/observability.md) | 可观测设计权威（含上游 O10） |
+| [`../dev/slo_alerts.md`](../dev/slo_alerts.md) | SLO / 告警 runbook（O8） |
 | [`../dev/loki.md`](../dev/loki.md) | Loki 采集路径 |
 | [`../dev/ha/`](../dev/ha/) | HA 报告与 runbook |
 | [`../dev/details/stats.md`](../dev/details/stats.md) | etcd `/stats/` 控制面契约 |

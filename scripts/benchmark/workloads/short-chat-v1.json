@@ -1,0 +1,9 @@
+{
+  "id": "short-chat-v1",
+  "class": "short_chat",
+  "prompt": "Say hello in one short sentence.",
+  "max_tokens": 64,
+  "concurrency": 1,
+  "request_count": 20,
+  "notes": "Default short chat workload"
+}

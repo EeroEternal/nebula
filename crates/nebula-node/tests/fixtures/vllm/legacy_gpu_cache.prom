@@ -1,0 +1,12 @@
+# HELP vllm:num_requests_waiting Number of requests waiting.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model="m"} 4.0
+# HELP vllm:num_requests_running Number of requests running.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model="m"} 0.0
+# HELP vllm:gpu_cache_usage_perc GPU KV cache usage (legacy name).
+# TYPE vllm:gpu_cache_usage_perc gauge
+vllm:gpu_cache_usage_perc{engine="0"} 0.30
+# HELP vllm:gpu_prefix_cache_hit_rate Prefix cache hit rate (legacy gauge).
+# TYPE vllm:gpu_prefix_cache_hit_rate gauge
+vllm:gpu_prefix_cache_hit_rate{engine="0"} 0.75

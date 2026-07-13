@@ -12,6 +12,8 @@ use axum::{
 };
 use tokio::sync::Mutex;
 
+use crate::admission::rate_limit_key;
+
 // ── Role ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,15 @@ impl Role {
 pub struct AuthContext {
     pub principal: String,
     pub role: Role,
+    /// Bound tenant from token mapping (`token:role:tenant_id`). None in legacy single-token mode.
+    pub tenant_id: Option<String>,
+}
+
+/// Token → role (+ optional tenant) binding.
+#[derive(Debug, Clone)]
+pub struct TokenBinding {
+    pub role: Role,
+    pub tenant_id: Option<String>,
 }
 
 // ── AuthConfig (was AuthState in gateway) ───────────────────────────
@@ -45,7 +56,10 @@ pub struct AuthContext {
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     pub enabled: bool,
-    pub tokens: Arc<HashMap<String, Role>>,
+    /// When false (default), tenant quotas beyond global RPS are not required;
+    /// token:role still works. When true, tenant-aware admission is expected.
+    pub multi_tenant: bool,
+    pub tokens: Arc<HashMap<String, TokenBinding>>,
     pub rate_limits: Arc<Mutex<HashMap<String, RateWindow>>>,
     pub limit_per_minute: u64,
 }
@@ -76,11 +90,17 @@ fn env_flag_enabled(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Parse `NEBULA_AUTH_TOKENS`.
+///
+/// Formats (comma-separated):
+/// - `token:role` — legacy single-token mode (`tenant_id = None`)
+/// - `token:role:tenant_id` — binds the token to a tenant
 pub fn parse_auth_from_env() -> AuthConfig {
     let tokens_raw = std::env::var("NEBULA_AUTH_TOKENS").ok();
     let disabled_for_dev =
         env_flag_enabled("NEBULA_AUTH_DISABLED") || env_flag_enabled("NEBULA_DEV_AUTH_DISABLED");
     let enabled = !disabled_for_dev;
+    let multi_tenant = env_flag_enabled("NEBULA_MULTI_TENANT");
 
     let mut tokens = HashMap::new();
     if let Some(raw) = tokens_raw {
@@ -89,9 +109,13 @@ pub fn parse_auth_from_env() -> AuthConfig {
             if trimmed.is_empty() {
                 continue;
             }
-            let Some((token, role_raw)) = trimmed.split_once(':') else {
-                tracing::warn!(entry=%trimmed, "invalid NEBULA_AUTH_TOKENS entry, expected token:role");
+            let Some((token, rest)) = trimmed.split_once(':') else {
+                tracing::warn!(entry=%trimmed, "invalid NEBULA_AUTH_TOKENS entry, expected token:role[:tenant_id]");
                 continue;
+            };
+            let (role_raw, tenant_id) = match rest.split_once(':') {
+                Some((role, tenant)) if !tenant.is_empty() => (role, Some(tenant.to_string())),
+                _ => (rest, None),
             };
             let role = match role_raw.to_ascii_lowercase().as_str() {
                 "admin" => Role::Admin,
@@ -102,7 +126,13 @@ pub fn parse_auth_from_env() -> AuthConfig {
                     continue;
                 }
             };
-            tokens.insert(token.to_string(), role);
+            tokens.insert(
+                token.to_string(),
+                TokenBinding {
+                    role,
+                    tenant_id,
+                },
+            );
         }
     }
 
@@ -124,6 +154,7 @@ pub fn parse_auth_from_env() -> AuthConfig {
     } else {
         tracing::info!(
             auth_mode = "enabled",
+            multi_tenant,
             token_count = tokens.len(),
             "auth enabled"
         );
@@ -131,6 +162,7 @@ pub fn parse_auth_from_env() -> AuthConfig {
 
     AuthConfig {
         enabled,
+        multi_tenant,
         tokens: Arc::new(tokens),
         rate_limits: Arc::new(Mutex::new(HashMap::new())),
         limit_per_minute,
@@ -155,6 +187,7 @@ where
         let ctx = AuthContext {
             principal: "guest".into(),
             role: Role::Admin,
+            tenant_id: None,
         };
         req.extensions_mut().insert(ctx);
         return Ok(next.run(req).await);
@@ -166,13 +199,14 @@ where
         return Ok(unauthorized("missing token"));
     };
 
-    let Some(role) = auth.tokens.get(&token).copied() else {
+    let Some(binding) = auth.tokens.get(&token).cloned() else {
         return Ok(forbidden("invalid token"));
     };
 
     if auth.limit_per_minute > 0 {
+        let key = rate_limit_key(binding.tenant_id.as_deref(), &token);
         let mut guard = auth.rate_limits.lock().await;
-        let entry = guard.entry(token.clone()).or_insert(RateWindow {
+        let entry = guard.entry(key).or_insert(RateWindow {
             window_start: Instant::now(),
             count: 0,
         });
@@ -182,14 +216,18 @@ where
             entry.count = 0;
         }
         if entry.count >= auth.limit_per_minute {
-            return Ok(too_many_requests());
+            return Ok(quota_denied(
+                "tenant_rps_exceeded",
+                "rate limited",
+            ));
         }
         entry.count += 1;
     }
 
     let ctx = AuthContext {
         principal: token,
-        role,
+        role: binding.role,
+        tenant_id: binding.tenant_id,
     };
     req.extensions_mut().insert(ctx);
 
@@ -227,7 +265,7 @@ pub fn require_role(ctx: &AuthContext, required: Role) -> Option<Response> {
 pub fn unauthorized(msg: &str) -> Response {
     (
         axum::http::StatusCode::UNAUTHORIZED,
-        Json(serde_json::json!({"error": {"message": msg}})),
+        Json(serde_json::json!({"error": {"message": msg, "code": "unauthorized"}})),
     )
         .into_response()
 }
@@ -235,15 +273,44 @@ pub fn unauthorized(msg: &str) -> Response {
 pub fn forbidden(msg: &str) -> Response {
     (
         axum::http::StatusCode::FORBIDDEN,
-        Json(serde_json::json!({"error": {"message": msg}})),
+        Json(serde_json::json!({"error": {"message": msg, "code": "forbidden"}})),
     )
         .into_response()
 }
 
 pub fn too_many_requests() -> Response {
+    quota_denied("tenant_rps_exceeded", "rate limited")
+}
+
+pub fn quota_denied(code: &str, message: &str) -> Response {
     (
         axum::http::StatusCode::TOO_MANY_REQUESTS,
-        Json(serde_json::json!({"error": {"message": "rate limited"}})),
+        Json(serde_json::json!({
+            "error": {
+                "message": message,
+                "code": code,
+                "type": "tenant_quota"
+            }
+        })),
+    )
+        .into_response()
+}
+
+pub fn tenant_denied(code: &str, message: &str) -> Response {
+    let status = if code == "tenant_model_denied" || code == "tenant_disabled" {
+        axum::http::StatusCode::FORBIDDEN
+    } else {
+        axum::http::StatusCode::TOO_MANY_REQUESTS
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "error": {
+                "message": message,
+                "code": code,
+                "type": "tenant_quota"
+            }
+        })),
     )
         .into_response()
 }
@@ -263,6 +330,7 @@ mod tests {
         std::env::remove_var("NEBULA_AUTH_DISABLED");
         std::env::remove_var("NEBULA_DEV_AUTH_DISABLED");
         std::env::remove_var("NEBULA_AUTH_RATE_LIMIT_PER_MINUTE");
+        std::env::remove_var("NEBULA_MULTI_TENANT");
     }
 
     #[test]
@@ -273,6 +341,7 @@ mod tests {
         let auth = parse_auth_from_env();
 
         assert!(auth.enabled);
+        assert!(!auth.multi_tenant);
         assert!(auth.tokens.is_empty());
     }
 
@@ -296,8 +365,27 @@ mod tests {
         let auth = parse_auth_from_env();
 
         assert!(auth.enabled);
-        assert_eq!(auth.tokens.get("admin-token"), Some(&Role::Admin));
-        assert_eq!(auth.tokens.get("view-token"), Some(&Role::Viewer));
+        assert_eq!(auth.tokens.get("admin-token").map(|b| b.role), Some(Role::Admin));
+        assert_eq!(auth.tokens.get("view-token").map(|b| b.role), Some(Role::Viewer));
+        assert!(auth.tokens.get("admin-token").unwrap().tenant_id.is_none());
+    }
+
+    #[test]
+    fn parses_token_with_tenant_binding() {
+        let _guard = env_lock().lock().unwrap();
+        clear_auth_env();
+        std::env::set_var(
+            "NEBULA_AUTH_TOKENS",
+            "t1-token:operator:acme,legacy:admin",
+        );
+        std::env::set_var("NEBULA_MULTI_TENANT", "1");
+
+        let auth = parse_auth_from_env();
+        assert!(auth.multi_tenant);
+        let b = auth.tokens.get("t1-token").expect("bound");
+        assert_eq!(b.role, Role::Operator);
+        assert_eq!(b.tenant_id.as_deref(), Some("acme"));
+        assert!(auth.tokens.get("legacy").unwrap().tenant_id.is_none());
     }
 
     #[tokio::test]
@@ -308,7 +396,14 @@ mod tests {
 
         let auth = AuthConfig {
             enabled: true,
-            tokens: Arc::new(HashMap::from([("good".into(), Role::Admin)])),
+            multi_tenant: false,
+            tokens: Arc::new(HashMap::from([(
+                "good".into(),
+                TokenBinding {
+                    role: Role::Admin,
+                    tenant_id: None,
+                },
+            )])),
             rate_limits: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             limit_per_minute: 0,
         };
@@ -364,6 +459,7 @@ mod tests {
         let ctx = AuthContext {
             principal: "v".into(),
             role: Role::Viewer,
+            tenant_id: None,
         };
         let resp = require_role(&ctx, Role::Admin).expect("forbidden");
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);

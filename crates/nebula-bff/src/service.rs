@@ -10,9 +10,12 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use nebula_common::{
-    DesiredState, DiskAlert, DownloadPhase, DownloadProgress, EndpointInfo, EndpointStats,
-    ModelCacheEntry, ModelConfig, ModelDeployment, ModelRequest, ModelRequestStatus, ModelSource,
-    ModelSpec, ModelTemplate, NodeDiskStatus, PlacementPlan, TemplateCategory, TemplateSource,
+    parse_cell_ingress_metrics, validate_engine_and_config, CellHealthStatus, CellIngress,
+    CellIngressStats, CellScrapeStatus, DesiredState, DiskAlert, DownloadPhase, DownloadProgress,
+    EndpointInfo, EndpointStats, InternalTopologyVisibility, ModelCacheEntry, ModelConfig,
+    ModelDeployment, ModelRequest, ModelRequestStatus, ModelSource, ModelSpec, ModelTemplate,
+    NodeDiskStatus, PlacementPlan, ServingTopology, ServingTopologyKind, TemplateCategory,
+    TemplateSource,
 };
 use nebula_meta::MetaStore;
 
@@ -150,6 +153,7 @@ pub struct ModelDetailView {
     pub placement: Option<PlacementPlan>,
     pub endpoints: Vec<EndpointInfo>,
     pub stats: Vec<EndpointStats>,
+    pub capabilities: Vec<nebula_common::ReplicaCapability>,
     pub download_progress: Option<DownloadProgressView>,
     pub cache_status: Option<CacheStatusView>,
 }
@@ -207,6 +211,10 @@ pub struct StartModelRequest {
     pub config_overrides: Option<ModelConfig>,
     pub node_id: Option<String>,
     pub gpu_indices: Option<Vec<u32>>,
+    #[serde(default)]
+    pub image_id: Option<String>,
+    #[serde(default)]
+    pub image_override_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -463,6 +471,13 @@ pub async fn put_model_template(
 // Service Implementation
 // ---------------------------------------------------------------------------
 
+fn ensure_engine_config(
+    engine_type: Option<&str>,
+    config: Option<&ModelConfig>,
+) -> Result<String, ServiceError> {
+    validate_engine_and_config(engine_type, config).map_err(ServiceError::BadRequest)
+}
+
 pub async fn create_model(
     store: &dyn MetaStore,
     principal: String,
@@ -486,13 +501,15 @@ pub async fn create_model(
         )));
     }
 
+    let resolved_engine = ensure_engine_config(req.engine_type.as_deref(), req.config.as_ref())?;
+
     let now = now_ms();
     let spec = ModelSpec {
         model_uid: uid.clone(),
         model_name: req.model_name,
         model_source: req.model_source.unwrap_or(ModelSource::HuggingFace),
         model_path: req.model_path,
-        engine_type: req.engine_type,
+        engine_type: Some(resolved_engine),
         docker_image: req.docker_image,
         config: req.config,
         labels: req.labels.unwrap_or_default(),
@@ -513,6 +530,9 @@ pub async fn create_model(
             node_affinity: req.node_id,
             gpu_affinity: req.gpu_indices,
             config_overrides: None,
+            image_id: None,
+            image_override_reason: None,
+            compat_rule_ids: vec![],
             version: 1,
             updated_at_ms: now,
         };
@@ -658,6 +678,14 @@ pub async fn get_model_detail(
         .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
         .collect();
 
+    let capabilities: Vec<nebula_common::ReplicaCapability> = store
+        .list_prefix(&format!("/capabilities/{model_uid}/"))
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
+        .collect();
+
     let download_progress: Vec<DownloadProgress> = store
         .list_prefix(&format!("/download_progress/{model_uid}/"))
         .await
@@ -728,6 +756,7 @@ pub async fn get_model_detail(
         placement,
         endpoints,
         stats,
+        capabilities,
         download_progress: dp_view,
         cache_status,
     })
@@ -761,6 +790,9 @@ pub async fn update_model(
     if let Some(labels) = req.labels {
         spec.labels = labels;
     }
+
+    let resolved = ensure_engine_config(spec.engine_type.as_deref(), spec.config.as_ref())?;
+    spec.engine_type = Some(resolved);
     spec.updated_at_ms = now_ms();
 
     put_model_spec(store, model_uid, &spec).await?;
@@ -822,8 +854,28 @@ pub async fn start_model(
     model_uid: &str,
     req: StartModelRequest,
 ) -> Result<ModelDeployment, ServiceError> {
-    // Verify spec exists
-    get_model_spec(store, model_uid).await?;
+    // Verify spec exists and engine/config are still valid before scheduling.
+    let spec = get_model_spec(store, model_uid).await?;
+    let effective_config = req
+        .config_overrides
+        .as_ref()
+        .or(spec.config.as_ref());
+    ensure_engine_config(spec.engine_type.as_deref(), effective_config)?;
+
+    let image_id = req
+        .image_id
+        .clone()
+        .or_else(|| spec.docker_image.clone());
+    let compat_ids = crate::compat_slo::validate_deploy_compat(
+        store,
+        spec.engine_type.as_deref().unwrap_or("vllm"),
+        None,
+        image_id.as_deref(),
+        spec.docker_image.as_deref(),
+        req.node_id.as_deref(),
+        req.image_override_reason.as_deref(),
+    )
+    .await?;
 
     let now = now_ms();
     let deployment = match get_model_deployment(store, model_uid).await? {
@@ -841,6 +893,15 @@ pub async fn start_model(
             if req.gpu_indices.is_some() {
                 dep.gpu_affinity = req.gpu_indices;
             }
+            if req.image_id.is_some() {
+                dep.image_id = req.image_id;
+            } else if dep.image_id.is_none() {
+                dep.image_id = image_id.clone();
+            }
+            if req.image_override_reason.is_some() {
+                dep.image_override_reason = req.image_override_reason;
+            }
+            dep.compat_rule_ids = compat_ids;
             dep.version += 1;
             dep.updated_at_ms = now;
             dep
@@ -854,6 +915,9 @@ pub async fn start_model(
             node_affinity: req.node_id,
             gpu_affinity: req.gpu_indices,
             config_overrides: req.config_overrides,
+            image_id,
+            image_override_reason: req.image_override_reason,
+            compat_rule_ids: compat_ids,
             version: 1,
             updated_at_ms: now,
         },
@@ -887,6 +951,9 @@ pub async fn stop_model(
             node_affinity: None,
             gpu_affinity: None,
             config_overrides: None,
+            image_id: None,
+            image_override_reason: None,
+            compat_rule_ids: vec![],
             version: 1,
             updated_at_ms: now,
         },
@@ -947,6 +1014,7 @@ pub async fn create_template(
     }
 
     let now = now_ms();
+    let resolved_engine = ensure_engine_config(req.engine_type.as_deref(), req.config.as_ref())?;
     let template = ModelTemplate {
         template_id: tid.clone(),
         name: req.name,
@@ -954,7 +1022,7 @@ pub async fn create_template(
         category: req.category,
         model_name: req.model_name,
         model_source: req.model_source,
-        engine_type: req.engine_type,
+        engine_type: Some(resolved_engine),
         docker_image: req.docker_image,
         config: req.config,
         default_replicas: req.default_replicas.unwrap_or(1),
@@ -1005,6 +1073,8 @@ pub async fn update_template(
     if let Some(lbls) = req.labels {
         template.labels = lbls;
     }
+    let resolved = ensure_engine_config(template.engine_type.as_deref(), template.config.as_ref())?;
+    template.engine_type = Some(resolved);
     template.updated_at_ms = now_ms();
 
     put_model_template(store, id, &template).await?;
@@ -1037,12 +1107,16 @@ pub async fn deploy_template(
     }
 
     let now = now_ms();
+    let resolved_engine = ensure_engine_config(
+        tpl.engine_type.as_deref(),
+        req.config_overrides.as_ref().or(tpl.config.as_ref()),
+    )?;
     let spec = ModelSpec {
         model_uid: uid.clone(),
         model_name: tpl.model_name,
         model_source: tpl.model_source.unwrap_or(ModelSource::HuggingFace),
         model_path: None,
-        engine_type: tpl.engine_type,
+        engine_type: Some(resolved_engine),
         docker_image: tpl.docker_image,
         config: tpl.config,
         labels: tpl.labels,
@@ -1062,6 +1136,9 @@ pub async fn deploy_template(
         node_affinity: req.node_id,
         gpu_affinity: req.gpu_indices,
         config_overrides: req.config_overrides,
+        image_id: None,
+        image_override_reason: None,
+        compat_rule_ids: vec![],
         version: 1,
         updated_at_ms: now,
     };
@@ -1291,6 +1368,9 @@ pub async fn migrate_v1_to_v2(store: &dyn MetaStore) -> Result<MigrationResult, 
             node_affinity: mr.request.node_id.clone(),
             gpu_affinity,
             config_overrides: mr.request.config.clone(),
+            image_id: None,
+            image_override_reason: None,
+            compat_rule_ids: vec![],
             version: 1,
             updated_at_ms: now,
         };
@@ -1374,7 +1454,7 @@ fn metric_line_matches(line: &str, metric: &str) -> bool {
     matches!(line.as_bytes().get(metric.len()), Some(b' ') | Some(b'{'))
 }
 
-fn parse_metric_sum(metrics_text: &str, metric: &str) -> f64 {
+pub(crate) fn parse_metric_sum(metrics_text: &str, metric: &str) -> f64 {
     metrics_text
         .lines()
         .filter(|line| !line.starts_with('#'))
@@ -1404,7 +1484,7 @@ fn extract_label_value(line: &str, label: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn parse_histogram_quantile(metrics_text: &str, metric: &str, quantile: f64) -> f64 {
+pub(crate) fn parse_histogram_quantile(metrics_text: &str, metric: &str, quantile: f64) -> f64 {
     let bucket_metric = format!("{metric}_bucket");
     let mut buckets: Vec<(f64, f64)> = Vec::new();
     let mut total = 0.0;
@@ -1458,7 +1538,7 @@ fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 
-fn normalize_zero(value: f64) -> f64 {
+pub(crate) fn normalize_zero(value: f64) -> f64 {
     if value.abs() < 1e-12 {
         0.0
     } else {
@@ -1469,6 +1549,8 @@ fn normalize_zero(value: f64) -> f64 {
 #[derive(Serialize)]
 pub struct GatewayOverviewResponse {
     pub window: String,
+    /// Prometheus scrape source. Console path stays `/gateway/*` for compatibility.
+    pub data_source: &'static str,
     pub rps: f64,
     pub error_5xx_ratio: f64,
     pub retry_success_ratio: f64,
@@ -1492,6 +1574,7 @@ pub struct GatewayTrafficSeries {
 #[derive(Serialize)]
 pub struct GatewayTrafficResponse {
     pub window: String,
+    pub data_source: &'static str,
     pub series: GatewayTrafficSeries,
 }
 
@@ -1508,12 +1591,14 @@ pub struct GatewayReliabilitySeries {
 #[derive(Serialize)]
 pub struct GatewayReliabilityResponse {
     pub window: String,
+    pub data_source: &'static str,
     pub series: GatewayReliabilitySeries,
 }
 
 #[derive(Serialize)]
 pub struct GatewayProtectionResponse {
     pub window: String,
+    pub data_source: &'static str,
     pub request_too_large_count: u64,
     pub circuit_skipped_count: u64,
     pub circuit_open_count: u64,
@@ -1531,6 +1616,10 @@ pub struct GatewayLatencySeries {
 #[derive(Serialize)]
 pub struct GatewayLatencyResponse {
     pub window: String,
+    /// Prometheus scrape source for these series. Currently Router
+    /// (`nebula_route_*`); the HTTP path remains `/gateway/latency` for
+    /// console compatibility.
+    pub data_source: &'static str,
     pub series: GatewayLatencySeries,
 }
 
@@ -1564,6 +1653,7 @@ pub fn gateway_overview_from_metrics(
 
     Ok(GatewayOverviewResponse {
         window,
+        data_source: "router",
         rps: normalize_zero(requests_total / window_seconds as f64),
         error_5xx_ratio: normalize_zero(error_5xx_ratio),
         retry_success_ratio: normalize_zero(retry_success_ratio),
@@ -1584,6 +1674,7 @@ pub fn gateway_traffic_from_metrics(
 
     Ok(GatewayTrafficResponse {
         window,
+        data_source: "router",
         series: GatewayTrafficSeries {
             requests_total: vec![to_point(normalize_zero(
                 parse_metric_sum(text, "nebula_router_requests_total") / window_seconds as f64,
@@ -1621,6 +1712,7 @@ pub fn gateway_reliability_from_metrics(
 
     Ok(GatewayReliabilityResponse {
         window,
+        data_source: "router",
         series: GatewayReliabilitySeries {
             retry_total: vec![to_point(rate("nebula_router_retry_total", None))],
             retry_success_total: vec![to_point(rate("nebula_router_retry_success_total", None))],
@@ -1634,7 +1726,7 @@ pub fn gateway_reliability_from_metrics(
             ))],
             upstream_error_5xx: vec![to_point(rate(
                 "nebula_router_upstream_error_total",
-                Some(("kind", "5xx")),
+                Some(("kind", "upstream_5xx")),
             ))],
             upstream_error_other: vec![to_point(rate(
                 "nebula_router_upstream_error_total",
@@ -1651,6 +1743,7 @@ pub fn gateway_protection_from_metrics(
     require_window(&window)?;
     Ok(GatewayProtectionResponse {
         window,
+        data_source: "router",
         request_too_large_count: parse_metric_sum(text, "nebula_router_request_too_large_total")
             as u64,
         circuit_skipped_count: parse_metric_sum(text, "nebula_router_route_circuit_skipped_total")
@@ -1659,6 +1752,10 @@ pub fn gateway_protection_from_metrics(
     })
 }
 
+/// Parse Router latency/TTFT histograms from Prometheus text.
+///
+/// HTTP API path remains `/observability/gateway/latency` for console
+/// compatibility; the actual series come from Router (`nebula_route_*`).
 pub fn gateway_latency_from_metrics(
     text: &str,
     window: String,
@@ -1672,6 +1769,7 @@ pub fn gateway_latency_from_metrics(
 
     Ok(GatewayLatencyResponse {
         window,
+        data_source: "router",
         series: GatewayLatencySeries {
             latency_p50_ms: vec![to_point(normalize_zero(
                 parse_histogram_quantile(text, "nebula_route_latency_seconds", 0.50) * 1000.0,
@@ -1689,6 +1787,328 @@ pub fn gateway_latency_from_metrics(
                 parse_histogram_quantile(text, "nebula_route_ttft_seconds", 0.95) * 1000.0,
             ))],
         },
+    })
+}
+
+// ── Native Serving Cell (P2) ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterCellRequest {
+    pub model_uid: String,
+    #[serde(default)]
+    pub cell_id: Option<String>,
+    pub base_url: String,
+    pub topology: ServingTopology,
+    #[serde(default)]
+    pub health_url: Option<String>,
+    #[serde(default)]
+    pub metrics_url: Option<String>,
+    #[serde(default)]
+    pub engine_type: Option<String>,
+    #[serde(default)]
+    pub engine_version: Option<String>,
+    /// Skip OpenAI probe (tests / trusted offline registration only).
+    #[serde(default)]
+    pub skip_probe: bool,
+}
+
+fn cell_key(model_uid: &str, cell_id: &str) -> String {
+    format!("/cells/{model_uid}/{cell_id}")
+}
+
+fn sanitize_cell_for_api(mut cell: CellIngress) -> CellIngress {
+    cell.internal_topology = InternalTopologyVisibility::NotVisible;
+    cell
+}
+
+async fn ensure_no_nebula_managed_running(
+    store: &dyn MetaStore,
+    model_uid: &str,
+) -> Result<(), ServiceError> {
+    if let Some(dep) = get_model_deployment(store, model_uid).await? {
+        if dep.desired_state == DesiredState::Running {
+            return Err(ServiceError::Conflict(format!(
+                "model '{model_uid}' is Nebula-managed (DesiredState::Running); \
+                 stop it before registering an external Serving Cell"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn probe_openai_compatible(
+    http: &reqwest::Client,
+    base_url: &str,
+    health_url: Option<&str>,
+) -> Result<(), ServiceError> {
+    let base = base_url.trim_end_matches('/');
+    if let Some(h) = health_url {
+        let resp = http
+            .get(h)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| ServiceError::BadRequest(format!("cell health probe failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(ServiceError::BadRequest(format!(
+                "cell health probe returned {}",
+                resp.status()
+            )));
+        }
+    }
+    let models_url = format!("{base}/v1/models");
+    let resp = http
+        .get(&models_url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| {
+            ServiceError::BadRequest(format!("OpenAI /v1/models probe failed: {e}"))
+        })?;
+    if !resp.status().is_success() {
+        return Err(ServiceError::BadRequest(format!(
+            "OpenAI /v1/models probe returned {}",
+            resp.status()
+        )));
+    }
+    Ok(())
+}
+
+pub async fn list_cells(store: &dyn MetaStore) -> Result<Vec<CellIngress>, ServiceError> {
+    let entries = store.list_prefix("/cells/").await?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, data, _) in entries {
+        match serde_json::from_slice::<CellIngress>(&data) {
+            Ok(cell) => out.push(sanitize_cell_for_api(cell)),
+            Err(e) => tracing::warn!(%key, error = %e, "skip invalid cell entry"),
+        }
+    }
+    out.sort_by(|a, b| {
+        a.model_uid
+            .cmp(&b.model_uid)
+            .then_with(|| a.cell_id.cmp(&b.cell_id))
+    });
+    Ok(out)
+}
+
+pub async fn get_cell(
+    store: &dyn MetaStore,
+    model_uid: &str,
+    cell_id: &str,
+) -> Result<CellIngress, ServiceError> {
+    match store.get(&cell_key(model_uid, cell_id)).await? {
+        Some((data, _)) => {
+            let cell: CellIngress = serde_json::from_slice(&data)?;
+            Ok(sanitize_cell_for_api(cell))
+        }
+        None => Err(ServiceError::NotFound(format!(
+            "cell {model_uid}/{cell_id} not found"
+        ))),
+    }
+}
+
+pub async fn register_cell(
+    store: &dyn MetaStore,
+    http: &reqwest::Client,
+    req: RegisterCellRequest,
+) -> Result<CellIngress, ServiceError> {
+    let model_uid = req.model_uid.trim().to_string();
+    if model_uid.is_empty() {
+        return Err(ServiceError::BadRequest(
+            "model_uid is required".to_string(),
+        ));
+    }
+    let base_url = req.base_url.trim().to_string();
+    if base_url.is_empty() {
+        return Err(ServiceError::BadRequest("base_url is required".to_string()));
+    }
+    match req.topology.kind {
+        ServingTopologyKind::NativeGateway | ServingTopologyKind::PdDisaggregated => {}
+        ServingTopologyKind::Standalone | ServingTopologyKind::Replicated => {
+            return Err(ServiceError::BadRequest(
+                "Serving Cell requires topology kind native_gateway or pd_disaggregated"
+                    .to_string(),
+            ));
+        }
+    }
+    ensure_no_nebula_managed_running(store, &model_uid).await?;
+
+    let cell_id = req
+        .cell_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let now = now_ms();
+    let mut cell = CellIngress {
+        cell_id: cell_id.clone(),
+        model_uid: model_uid.clone(),
+        base_url: base_url.clone(),
+        health_url: req.health_url.clone(),
+        metrics_url: req.metrics_url.clone(),
+        topology: req.topology,
+        engine_type: req.engine_type,
+        engine_version: req.engine_version,
+        status: CellHealthStatus::Unknown,
+        internal_topology: InternalTopologyVisibility::NotVisible,
+        last_checked_ms: 0,
+        updated_at_ms: now,
+    };
+
+    if !req.skip_probe {
+        let health = cell.resolved_health_url();
+        match probe_openai_compatible(http, &base_url, Some(health.as_str())).await {
+            Ok(()) => {
+                cell.status = CellHealthStatus::Ready;
+                cell.last_checked_ms = now;
+            }
+            Err(e) => {
+                cell.status = CellHealthStatus::Unhealthy;
+                cell.last_checked_ms = now;
+                return Err(e);
+            }
+        }
+    } else {
+        cell.status = CellHealthStatus::Ready;
+        cell.last_checked_ms = now;
+    }
+
+    let val = serde_json::to_vec(&cell)?;
+    store
+        .put(&cell_key(&model_uid, &cell_id), val, None)
+        .await?;
+    Ok(sanitize_cell_for_api(cell))
+}
+
+/// Remove Cell registration from etcd only. Never stops the external process.
+pub async fn deregister_cell(
+    store: &dyn MetaStore,
+    model_uid: &str,
+    cell_id: &str,
+) -> Result<(), ServiceError> {
+    let key = cell_key(model_uid, cell_id);
+    match store.get(&key).await? {
+        Some(_) => {
+            store.delete(&key).await?;
+            Ok(())
+        }
+        None => Err(ServiceError::NotFound(format!(
+            "cell {model_uid}/{cell_id} not found"
+        ))),
+    }
+}
+
+/// Read-only Cell observation: health probe + Ingress `/metrics` scrape.
+/// Persists refreshed `status` / `last_checked_ms` to etcd so Router can prefer Ready cells.
+/// Never writes `/stats/` and never invents worker topology.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CellObservation {
+    pub cell: CellIngress,
+    pub health_ok: bool,
+    pub stats: CellIngressStats,
+    /// Always `not_visible` in Batch 2 — no official worker read API wired.
+    pub internal_topology: InternalTopologyVisibility,
+}
+
+async fn load_raw_cell(
+    store: &dyn MetaStore,
+    model_uid: &str,
+    cell_id: &str,
+) -> Result<CellIngress, ServiceError> {
+    match store.get(&cell_key(model_uid, cell_id)).await? {
+        Some((data, _)) => Ok(serde_json::from_slice(&data)?),
+        None => Err(ServiceError::NotFound(format!(
+            "cell {model_uid}/{cell_id} not found"
+        ))),
+    }
+}
+
+async fn probe_cell_health(http: &reqwest::Client, cell: &CellIngress) -> bool {
+    let url = cell.resolved_health_url();
+    match http
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+async fn scrape_cell_metrics(
+    http: &reqwest::Client,
+    cell: &CellIngress,
+    now: u64,
+) -> CellIngressStats {
+    let metrics_url = cell.resolved_metrics_url();
+    match http
+        .get(&metrics_url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(text) => parse_cell_ingress_metrics(&text, &metrics_url, now),
+            Err(_) => CellIngressStats {
+                scraped_at_ms: now,
+                metrics_url,
+                data_source: "cell_ingress".into(),
+                pending_requests: None,
+                kv_cache_usage: None,
+                prefix_cache_hit_rate: None,
+                scrape_status: CellScrapeStatus::Empty,
+            },
+        },
+        Ok(_) => CellIngressStats {
+            scraped_at_ms: now,
+            metrics_url,
+            data_source: "cell_ingress".into(),
+            pending_requests: None,
+            kv_cache_usage: None,
+            prefix_cache_hit_rate: None,
+            scrape_status: CellScrapeStatus::HttpError,
+        },
+        Err(_) => CellIngressStats {
+            scraped_at_ms: now,
+            metrics_url,
+            data_source: "cell_ingress".into(),
+            pending_requests: None,
+            kv_cache_usage: None,
+            prefix_cache_hit_rate: None,
+            scrape_status: CellScrapeStatus::Unreachable,
+        },
+    }
+}
+
+pub async fn observe_cell(
+    store: &dyn MetaStore,
+    http: &reqwest::Client,
+    model_uid: &str,
+    cell_id: &str,
+) -> Result<CellObservation, ServiceError> {
+    let mut cell = load_raw_cell(store, model_uid, cell_id).await?;
+    let now = now_ms();
+    let health_ok = probe_cell_health(http, &cell).await;
+    let stats = scrape_cell_metrics(http, &cell, now).await;
+
+    cell.status = if health_ok {
+        CellHealthStatus::Ready
+    } else {
+        CellHealthStatus::Unhealthy
+    };
+    cell.last_checked_ms = now;
+    cell.updated_at_ms = now;
+    cell.internal_topology = InternalTopologyVisibility::NotVisible;
+
+    let val = serde_json::to_vec(&cell)?;
+    store
+        .put(&cell_key(model_uid, cell_id), val, None)
+        .await?;
+
+    Ok(CellObservation {
+        cell: sanitize_cell_for_api(cell),
+        health_ok,
+        stats,
+        internal_topology: InternalTopologyVisibility::NotVisible,
     })
 }
 
@@ -1713,6 +2133,27 @@ nebula_router_requests_total{route="embed"} 5
             gateway_overview_from_metrics("", "2m".into()),
             Err(ServiceError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn reliability_reads_upstream_5xx_label() {
+        let text = r#"
+nebula_router_upstream_error_total{kind="upstream_5xx"} 7
+nebula_router_upstream_error_total{kind="5xx"} 99
+nebula_router_upstream_error_total{kind="connect"} 1
+"#;
+        let resp = gateway_reliability_from_metrics(text, "5m".into()).unwrap();
+        assert_eq!(resp.data_source, "router");
+        // 7 / 300s window
+        assert!((resp.series.upstream_error_5xx[0].value - (7.0 / 300.0)).abs() < 1e-9);
+        assert!((resp.series.upstream_error_connect[0].value - (1.0 / 300.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn overview_marks_router_data_source() {
+        let text = "nebula_router_requests_total 100\nnebula_router_responses_5xx 10\n";
+        let resp = gateway_overview_from_metrics(text, "5m".into()).unwrap();
+        assert_eq!(resp.data_source, "router");
     }
 }
 

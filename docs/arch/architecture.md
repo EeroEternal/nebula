@@ -2,7 +2,7 @@
 
 > 权威架构说明（2026-07-12）。排期与勾选见 [`optimization.md`](./optimization.md)；HA 报告见 [`../dev/ha/`](../dev/ha/)；边界见 [`../dev/api_ownership.md`](../dev/api_ownership.md)。
 
-**结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 正确性、N1 接入/调度 HA（真机）、N2 工程质量已完成；生产 etcd 三节点暂缓。剩余工程项以 [`optimization.md`](./optimization.md) 为准（可观测收尾 O8、按需 N3/N4）。
+**结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 正确性、N1 接入/调度 HA（真机）、N2 工程质量已完成；生产 etcd 三节点暂缓。剩余工程项以 [`optimization.md`](./optimization.md) 为准（可观测 O1–O8 ✅；按需 O9/N3/N4；Product P1）。
 
 ---
 
@@ -105,7 +105,7 @@ Node / Scheduler / BFF ⇄ etcd
 | **M2** | 声明式单路径；header 热路径 | ✅；capabilities 按需 |
 | **M3** | affinity + prefix/KV 路由深化 | 策略已有，持续打磨 |
 | **HA** | Scheduler election；接入多副本真机；旁路 etcd 三节点 | ✅ 主体；生产 etcd 三节点 ⏸ |
-| **Obs** | 双写 + JSON/Loki 路径 | ✅ O1–O7；O8 SLO runbook 见 optimization |
+| **Obs** | 双写 + JSON/Loki 路径 | ✅ O1–O8；runbook [`../dev/slo_alerts.md`](../dev/slo_alerts.md) |
 
 HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)。
 
@@ -120,7 +120,7 @@ HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)
 | D3 主体 | 接入多副本 + Phase D 真机演练（生产 etcd 迁移除外） |
 | N2 | BFF 去重、HTTP client、observe、CI |
 
-未尽项（O8、N3、产品 N4、生产 etcd）只在 [`optimization.md`](./optimization.md) 维护，本文不另开排期表。
+未尽项（O9、N3、产品 N4、生产 etcd、Product P1）只在 [`optimization.md`](./optimization.md) 维护，本文不另开排期表。
 
 ---
 

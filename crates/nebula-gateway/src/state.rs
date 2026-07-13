@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use nebula_common::admission::TenantAdmission;
 use nebula_common::DualWriteEmitter;
 use nebula_meta::EtcdMetaStore;
 
@@ -24,6 +25,7 @@ pub struct AppState {
     pub xtrace_url: Option<String>,
     pub xtrace_token: Option<String>,
     pub bff_url: String,
+    pub tenant_admission: TenantAdmission,
 }
 
 impl AsRef<AuthConfig> for AppState {

@@ -107,6 +107,7 @@ async fn main() {
         xtrace_url: args.common.xtrace_url.clone(),
         xtrace_token: args.common.xtrace_token.clone(),
         bff_url: args.bff_url,
+        tenant_admission: nebula_common::TenantAdmission::new(),
     };
 
     let admin_routes = Router::new()

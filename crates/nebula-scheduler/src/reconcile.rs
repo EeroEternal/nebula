@@ -496,12 +496,9 @@ fn compute_desired_replicas(
     let mut kv_count = 0u32;
     let mut kv_usage_sum = 0.0f64;
     for s in stats.iter() {
-        if let (Some(used), Some(free)) = (s.kv_cache_used_bytes, s.kv_cache_free_bytes) {
-            let total = used + free;
-            if total > 0 {
-                kv_usage_sum += used as f64 / total as f64;
-                kv_count += 1;
-            }
+        if let Some(usage) = s.kv_cache_usage {
+            kv_usage_sum += usage;
+            kv_count += 1;
         }
     }
     let avg_kv_usage = if kv_count > 0 {

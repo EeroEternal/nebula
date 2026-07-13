@@ -23,10 +23,21 @@ pub struct EngineMetricSnapshot {
     pub prefix_cache_hit_rate: Option<f64>,
 }
 
+/// Latest engine `/metrics` scrape outcome for Prometheus export.
+#[derive(Debug, Clone)]
+pub struct ScrapeOutcomeRecord {
+    pub model_uid: String,
+    pub replica_id: u32,
+    pub engine_type: String,
+    /// `success` | `unreachable` | `timeout` | `parse_failed`
+    pub result: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NodeMetricsSnapshot {
     pub gpus: Vec<GpuStatus>,
     pub engines: Vec<EngineMetricSnapshot>,
+    pub scrapes: Vec<ScrapeOutcomeRecord>,
 }
 
 pub type SharedNodeMetrics = Arc<Mutex<NodeMetricsSnapshot>>;
@@ -292,6 +303,21 @@ async fn get_metrics(State(metrics): State<SharedNodeMetrics>) -> impl IntoRespo
                     eng.model_uid, eng.replica_id, rate
                 );
             }
+        }
+    }
+
+    if !snap.scrapes.is_empty() {
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_engine_scrape_result Latest engine /metrics scrape outcome (1=current)."
+        );
+        let _ = writeln!(out, "# TYPE nebula_node_engine_scrape_result gauge");
+        for s in &snap.scrapes {
+            let _ = writeln!(
+                out,
+                "nebula_node_engine_scrape_result{{model_uid=\"{}\",replica_id=\"{}\",engine_type=\"{}\",result=\"{}\"}} 1",
+                s.model_uid, s.replica_id, s.engine_type, s.result
+            );
         }
     }
 

@@ -177,21 +177,49 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                         </TableHeader>
                         <TableBody>
                             {detail.endpoints.map((ep) => (
-                                <TableRow key={`${ep.replica_id}-${ep.endpoint_kind}`}>
-                                    <TableCell className="text-sm font-medium">#{ep.replica_id}</TableCell>
-                                    <TableCell className="text-sm">{ep.node_id}</TableCell>
-                                    <TableCell className="text-sm">{ep.endpoint_kind}</TableCell>
-                                    <TableCell>
-                                        <Badge variant={ep.status?.toLowerCase().includes("ready") ? "success" : "muted"} className="text-[10px]">
-                                            {ep.status}
-                                        </Badge>
-                                    </TableCell>
-                                    <TableCell className="text-xs font-mono text-muted-foreground truncate max-w-[200px]">{ep.base_url ?? "—"}</TableCell>
+                                <TableRow key={`${ep.model_uid}-${ep.replica_id}`}>
+                                    <TableCell className="font-mono text-xs">{ep.replica_id}</TableCell>
+                                    <TableCell className="font-mono text-xs">{ep.node_id}</TableCell>
+                                    <TableCell className="text-xs">{ep.endpoint_kind}</TableCell>
+                                    <TableCell><Badge variant="outline" className="text-[10px]">{ep.status}</Badge></TableCell>
+                                    <TableCell className="font-mono text-[10px] text-muted-foreground truncate max-w-[240px]">{ep.base_url || "—"}</TableCell>
                                 </TableRow>
                             ))}
                         </TableBody>
                     </Table>
                 </Section>
+            )}
+
+            {(detail.capabilities?.length ?? 0) > 0 && (
+                <Section title={t('modelDetail.capabilities')} icon={<HardDrive className="h-4 w-4" />}>
+                    <div className="space-y-3">
+                        {detail.capabilities.map((rc) => (
+                            <div key={rc.replica_id} className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border border-border/40 rounded-xl p-3">
+                                <div>
+                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Replica</p>
+                                    <p className="font-mono font-bold">{rc.replica_id}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Source</p>
+                                    <p className="font-mono">{rc.capability.source}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Engine</p>
+                                    <p className="font-mono">{rc.capability.engine_type}{rc.capability.engine_version ? ` @ ${rc.capability.engine_version}` : ""}</p>
+                                </div>
+                                <div>
+                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Obs</p>
+                                    <p className="font-mono text-xs">
+                                        kv={rc.capability.observability?.kv_cache_usage ?? "n/a"} ·
+                                        pending={rc.capability.observability?.pending_requests ?? "n/a"}
+                                    </p>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </Section>
+            )}
+
             )}
 
             {/* Cache status */}

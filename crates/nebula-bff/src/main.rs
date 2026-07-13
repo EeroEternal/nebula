@@ -1,10 +1,13 @@
 mod args;
 mod auth;
 mod auth_handlers;
+mod benchmark_svc;
+mod compat_slo;
 mod handlers;
 mod handlers_v2;
 mod service;
 mod state;
+mod tenant_svc;
 
 use std::sync::Arc;
 
@@ -152,6 +155,83 @@ async fn main() -> anyhow::Result<()> {
         .route("/cache/summary", get(handlers_v2::cache_summary))
         .route("/alerts", get(handlers_v2::list_alerts))
         .route("/migrate", post(handlers_v2::migrate_v1_to_v2))
+        .route(
+            "/cells",
+            get(handlers_v2::list_cells).post(handlers_v2::register_cell),
+        )
+        .route(
+            "/cells/:model_uid/:cell_id",
+            get(handlers_v2::get_cell).delete(handlers_v2::deregister_cell),
+        )
+        .route(
+            "/cells/:model_uid/:cell_id/observe",
+            get(handlers_v2::observe_cell).post(handlers_v2::observe_cell),
+        )
+        .route(
+            "/compat",
+            get(handlers_v2::list_compat_rules).put(handlers_v2::put_compat_rule),
+        )
+        .route("/compat/seed", post(handlers_v2::seed_compat_rules))
+        .route("/compat/:id", delete(handlers_v2::delete_compat_rule))
+        .route("/inventory/hardware", get(handlers_v2::hardware_inventory))
+        .route("/slos", get(handlers_v2::list_slos))
+        .route(
+            "/slos/:model_uid",
+            get(handlers_v2::get_slo)
+                .put(handlers_v2::upsert_slo)
+                .delete(handlers_v2::delete_slo),
+        )
+        .route(
+            "/slos/:model_uid/evaluate",
+            get(handlers_v2::evaluate_slo),
+        )
+        .route("/diagnostics/events", get(handlers_v2::list_diagnostics))
+        .route("/benchmarks/workloads", get(handlers_v2::list_workloads))
+        .route(
+            "/benchmarks/runs",
+            get(handlers_v2::list_benchmark_runs).post(handlers_v2::ingest_benchmark_run),
+        )
+        .route("/benchmarks/runs/:run_id", get(handlers_v2::get_benchmark_run))
+        .route("/benchmarks/profiles", get(handlers_v2::list_benchmark_profiles))
+        .route("/benchmarks/recommend", post(handlers_v2::recommend_engines))
+        .route(
+            "/canaries",
+            get(handlers_v2::list_canaries).post(handlers_v2::create_canary),
+        )
+        .route(
+            "/canaries/:canary_id/evaluate",
+            post(handlers_v2::evaluate_canary),
+        )
+        .route(
+            "/canaries/:canary_id/promote",
+            post(handlers_v2::promote_canary),
+        )
+        .route(
+            "/canaries/:canary_id/rollback",
+            post(handlers_v2::rollback_canary),
+        )
+        .route(
+            "/tenants",
+            get(handlers_v2::list_tenants).put(handlers_v2::upsert_tenant),
+        )
+        .route(
+            "/tenants/:tenant_id",
+            get(handlers_v2::get_tenant).delete(handlers_v2::delete_tenant),
+        )
+        .route(
+            "/tenants/:tenant_id/usage",
+            get(handlers_v2::list_tenant_usage).post(handlers_v2::ingest_usage),
+        )
+        .route(
+            "/tenants/:tenant_id/cost",
+            get(handlers_v2::tenant_cost_summary),
+        )
+        .route(
+            "/pricing",
+            get(handlers_v2::list_pricing).put(handlers_v2::upsert_pricing),
+        )
+        .route("/pricing/:price_id", delete(handlers_v2::delete_pricing))
+        .route("/usage", post(handlers_v2::ingest_usage))
         .layer(middleware::from_fn_with_state(
             st.clone(),
             db_auth_middleware,

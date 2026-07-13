@@ -23,6 +23,12 @@ pub struct Metrics {
     pub auth_invalid: AtomicU64,
     pub auth_forbidden: AtomicU64,
     pub auth_rate_limited: AtomicU64,
+    /// Low-cardinality tenant denials by reason (never label by tenant_id).
+    pub tenant_denied_rps: AtomicU64,
+    pub tenant_denied_concurrency: AtomicU64,
+    pub tenant_denied_model: AtomicU64,
+    pub tenant_denied_token_budget: AtomicU64,
+    pub tenant_denied_disabled: AtomicU64,
     pub request_too_large_total: AtomicU64,
     pub upstream_error_connect_total: AtomicU64,
     pub upstream_error_timeout_total: AtomicU64,
@@ -32,6 +38,31 @@ pub struct Metrics {
 }
 
 impl Metrics {
+    pub fn record_tenant_deny(&self, code: &str) {
+        match code {
+            "tenant_rps_exceeded" => {
+                self.tenant_denied_rps.fetch_add(1, Ordering::Relaxed);
+                self.auth_rate_limited.fetch_add(1, Ordering::Relaxed);
+            }
+            "tenant_concurrency_exceeded" => {
+                self.tenant_denied_concurrency
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "tenant_model_denied" => {
+                self.tenant_denied_model.fetch_add(1, Ordering::Relaxed);
+            }
+            "tenant_token_budget_exceeded" => {
+                self.tenant_denied_token_budget
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "tenant_disabled" => {
+                self.tenant_denied_disabled
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
     pub fn record_upstream_error(&self, kind: &str) {
         match kind {
             "connect" => {
@@ -106,6 +137,30 @@ pub fn render_metrics(metrics: &Metrics) -> String {
          # TYPE nebula_gateway_auth_rate_limited counter\n\
          nebula_gateway_auth_rate_limited {}\n",
         metrics.auth_rate_limited.load(Ordering::Relaxed),
+    ));
+    body.push_str(
+        "# HELP nebula_gateway_tenant_denied_total Tenant quota denials by reason (no tenant_id label).\n\
+         # TYPE nebula_gateway_tenant_denied_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_tenant_denied_total{{reason=\"rps\"}} {}\n",
+        metrics.tenant_denied_rps.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_tenant_denied_total{{reason=\"concurrency\"}} {}\n",
+        metrics.tenant_denied_concurrency.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_tenant_denied_total{{reason=\"model\"}} {}\n",
+        metrics.tenant_denied_model.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_tenant_denied_total{{reason=\"token_budget\"}} {}\n",
+        metrics.tenant_denied_token_budget.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_tenant_denied_total{{reason=\"disabled\"}} {}\n",
+        metrics.tenant_denied_disabled.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_gateway_request_too_large_total Requests rejected due to max body size.\n\

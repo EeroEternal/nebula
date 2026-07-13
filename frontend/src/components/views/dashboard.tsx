@@ -177,10 +177,10 @@ export function DashboardView() {
             }
 
             const es = statsMap.get(`${ep.model_uid}-${ep.replica_id}`)
-            const kvUsed = es?.kv_cache_used_bytes ?? 0
-            const kvFree = es?.kv_cache_free_bytes ?? 0
-            const kvTotal = kvUsed + kvFree
-            const kvPct = kvTotal > 0 ? Math.round((kvUsed / kvTotal) * 100) : -1
+            const kvPct =
+                typeof es?.kv_cache_usage === "number"
+                    ? Math.round(es.kv_cache_usage * 100)
+                    : -1
 
             return {
                 key: `${ep.model_uid}-${ep.replica_id}`,

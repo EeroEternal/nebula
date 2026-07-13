@@ -54,14 +54,14 @@ pub struct LeastKvCache;
 impl RoutingStrategy for LeastKvCache {
     fn select(&self, candidates: &[Candidate]) -> Option<usize> {
         let mut best_idx: Option<usize> = None;
-        let mut best_kv = u64::MAX;
+        let mut best_kv = f64::MAX;
         let mut has_kv_data = false;
 
         for (i, c) in candidates.iter().enumerate() {
-            if let Some(used) = c.stats.and_then(|s| s.kv_cache_used_bytes) {
+            if let Some(usage) = c.stats.and_then(|s| s.kv_cache_usage) {
                 has_kv_data = true;
-                if used < best_kv {
-                    best_kv = used;
+                if usage < best_kv {
+                    best_kv = usage;
                     best_idx = Some(i);
                 }
             }
@@ -155,7 +155,7 @@ mod tests {
         model: &str,
         replica: u32,
         pending: u64,
-        kv_used: Option<u64>,
+        kv_usage: Option<f64>,
         prefix_hit: Option<f64>,
     ) -> EndpointStats {
         EndpointStats {
@@ -165,8 +165,7 @@ mod tests {
             pending_requests: pending,
             prefix_cache_hit_rate: prefix_hit,
             prompt_cache_hit_rate: None,
-            kv_cache_used_bytes: kv_used,
-            kv_cache_free_bytes: None,
+            kv_cache_usage: kv_usage,
         }
     }
 
@@ -195,8 +194,8 @@ mod tests {
     fn test_least_kv_cache() {
         let ep0 = make_ep("m", 0);
         let ep1 = make_ep("m", 1);
-        let s0 = make_stats("m", 0, 1, Some(8000), None);
-        let s1 = make_stats("m", 1, 10, Some(2000), None);
+        let s0 = make_stats("m", 0, 1, Some(0.8), None);
+        let s1 = make_stats("m", 1, 10, Some(0.2), None);
 
         let candidates = vec![
             Candidate {

@@ -30,19 +30,8 @@ pub async fn healthz() -> impl IntoResponse {
 }
 
 pub fn build_execution_context(headers: &HeaderMap) -> ExecutionContext {
-    let session_id = headers
-        .get("x-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    ExecutionContext {
-        request_id: format!("req_{}", uuid::Uuid::new_v4()),
-        session_id,
-        tenant_id: None,
-        priority: None,
-        deadline_ms: None,
-        budget_tokens: None,
-    }
+    // Prefer Gateway-injected tenant; clients cannot spoof past auth binding.
+    nebula_common::build_execution_context(headers, None, None)
 }
 
 fn to_reqwest_headers(headers: &HeaderMap) -> ReqwestHeaderMap {
@@ -226,11 +215,15 @@ pub async fn proxy_chat_completions(
 
         match builder.send().await {
             Ok(resp) => {
+                let is_cell = ep.is_cell_ingress();
                 if resp.status().is_server_error() {
-                    st.router
-                        .record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                    if !is_cell {
+                        st.router
+                            .record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                    }
                     st.metrics.record_upstream_error("upstream_5xx");
-                    if attempt + 1 < max_attempts {
+                    // Cell Ingress owns its own retry/circuit — Nebula must not amplify.
+                    if !is_cell && attempt + 1 < max_attempts {
                         attempt += 1;
                         excluded_endpoint = Some((ep.model_uid.clone(), ep.replica_id));
                         st.metrics
@@ -246,18 +239,23 @@ pub async fn proxy_chat_completions(
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                st.router
-                    .record_endpoint_success(&ep.model_uid, ep.replica_id);
+                if !is_cell {
+                    st.router
+                        .record_endpoint_success(&ep.model_uid, ep.replica_id);
+                }
 
                 break (ep, resp);
             }
             Err(e) => {
-                st.router
-                    .record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                let is_cell = ep.is_cell_ingress();
+                if !is_cell {
+                    st.router
+                        .record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                }
                 let kind = classify_reqwest_error(&e);
                 st.metrics.record_upstream_error(kind);
-                tracing::error!(error=%e, retry_kind=%kind, attempt, "router upstream request failed");
-                if attempt + 1 < max_attempts {
+                tracing::error!(error=%e, retry_kind=%kind, attempt, is_cell, "router upstream request failed");
+                if !is_cell && attempt + 1 < max_attempts {
                     attempt += 1;
                     excluded_endpoint = Some((ep.model_uid.clone(), ep.replica_id));
                     st.metrics
