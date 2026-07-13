@@ -1,10 +1,10 @@
 # Nebula 下一步优化计划
 
-> 更新：2026-07-12。已完成项摘要见 [`architecture.md`](./architecture.md)；可观测设计见 [`../dev/observability.md`](../dev/observability.md)。
+> 更新：2026-07-13（**v1.3.0**）。已完成项摘要见 [`architecture.md`](./architecture.md)；产品阶段见 [`../dev/product_plan.md`](../dev/product_plan.md)；Release Notes 见 [`../manual/release_notes_v1.3.0.md`](../manual/release_notes_v1.3.0.md)。
 
 ## 当前进展（一句话）
 
-M1 / N1 HA 主体 / N2 已完成。可观测 O1–O8 已落地。**产品对齐 P0–P6 主线代码 ✅**（Serving Cell、兼容矩阵、SLO、Benchmark/Canary、多租户配额与成本）。真机 Gateway e2e / 多引擎 benchmark / 多租户压测暂缓。剩余：按需 N3–N4 / P7。生产 etcd 三节点暂缓。
+M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.3.0** 发布。真机 Gateway e2e、多引擎 benchmark、多租户压测暂缓。剩余：按需 N3–N4 / P7。生产 etcd 三节点暂缓。
 
 ## 优先级总表
 
@@ -30,15 +30,10 @@ M1 / N1 HA 主体 / N2 已完成。可观测 O1–O8 已落地。**产品对齐 
 ## 下一阶段顺序
 
 ```
-① Product P0（观测可信度 + 契约）   ✅ Batch 1–2
-② O8（收尾）                       ✅ SLO / 告警 runbook
-③ Product P1（Engine Capability / Adapter） ✅ Batch 1–2
-④ Product P2 Serving Cell               ✅ Batch 1–2（真机 e2e ⏸）
-⑤ Product P1 Batch 3 + P3 Batch 1–2 + P4 Batch 1 ✅
-⑥ Product P5 Benchmark / 推荐 / Canary   ✅ Batch 1（真机 e2e ⏸）
-⑦ Product P6 多租户 / 配额 / 成本         ✅ Batch 1（压测 ⏸）
+①–⑦ Product P0–P6 Batch 1          ✅ 已随 v1.3.0 发布
 ⑧ N3–N4 / P7（有需求再开）
 ⑨ 生产 etcd 三节点（暂缓）
+⑩ 真机 e2e / 多引擎 benchmark / 多租户压测（环境就绪后）
 ```
 
 ### Product P6 Batch 1 勾选

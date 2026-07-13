@@ -1,10 +1,8 @@
-#  
-
 # 产品定位对齐开发与优化计划
 
-> 状态：规划基线（2026-07-12）
+> 状态：**v1.3.0 Batch 1 已发布**（2026-07-13）；真机 e2e / 压测项仍暂缓。
 >
-> 本文把 `[../product/positioning.md](../product/positioning.md)` 的产品定位转化为工程阶段、交付物和验收门槛。架构与执行状态仍分别以 `[../arch/architecture.md](../arch/architecture.md)` 和 `[../arch/optimization.md](../arch/optimization.md)` 为准。
+> 本文把 [`../product/positioning.md`](../product/positioning.md) 的产品定位转化为工程阶段、交付物和验收门槛。架构与执行状态分别以 [`../arch/architecture.md`](../arch/architecture.md) 和 [`../arch/optimization.md`](../arch/optimization.md) 为准。Release Notes：[`../manual/release_notes_v1.3.0.md`](../manual/release_notes_v1.3.0.md)。
 
 ## 1. 目标
 
@@ -37,9 +35,9 @@ Nebula 的优化目标不是替代 vLLM、SGLang 或其原生 Gateway，而是�
 | 普通副本生命周期       | 已实现  | vLLM / SGLang 本地或 Docker 启停、健康、自愈、Drain                                          |
 | 普通副本路由         | 已实现  | least-pending、KV、prefix 策略及熔断、重试、过载保护                                            |
 | 普通副本弹性         | 已实现  | 基于 pending / KV 阈值扩缩                                                             |
-| Engine Adapter | 部分实现 | 启停/健康/scrape + 校验/静态表/运行时探测 + 方言 CLI + `/capabilities/` 持久化 + 版本支持表；缺完整兼容矩阵 CRUD |
+| Engine Adapter | 部分实现 | 启停/健康/scrape + 校验/静态表/运行时探测 + 方言 CLI + `/capabilities/` + 版本支持；完整镜像矩阵持续演进 |
 | Serving Cell   | 部分实现 | Batch 1–2 + Cell 不重试边界；真机 Gateway e2e 暂缓                                         |
-| 引擎可观测          | 部分实现 | `kv_cache_usage` 语义已纠正；scrape 健康指标与 metrics fixture 已落地；统一 SLI 未闭环               |
+| 引擎可观测          | 部分实现 | `kv_cache_usage`、scrape 健康、fixture、ModelSlo 评估已落；真机 burn 暂缓               |
 | 镜像管理           | 部分实现 | 注册/预拉/GC + platforms 放置 + 兼容矩阵 CRUD；缺历史画像                                        |
 | 加速器台账          | 部分实现 | name/driver/cuda/platform + 库存 API/控制台；缺历史利用率库                                   |
 | SLO / 成本治理     | 部分实现 | ModelSlo + 评估/诊断 + 租户用量/定价成本归因；真机 burn ⏸                                   |
@@ -49,7 +47,7 @@ Nebula 的优化目标不是替代 vLLM、SGLang 或其原生 Gateway，而是�
 | EngineShim     | 预留   | `GrpcShim` 类型存在，生产路径未实现                                                          |
 
 
-产品文档中的“能力方向”不能表述为“当前已具备”。每项能力只有通过本文验收门槛后，才能更新为已实现。
+产品文档中的「能力方向」不能表述为「当前已具备」。每项能力只有通过本文验收门槛后，才能更新为已实现。v1.3.0 将 P0–P6 的 Batch 1 工程交付标为完成，未勾选的真机验收项保持暂缓。
 
 ## 4. 总体演进顺序
 
@@ -65,7 +63,7 @@ P4      ─→ P6 多租户与成本治理
 P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 ```
 
-阶段编号表达依赖顺序，不代表所有工作必须串行。每个阶段都必须能够独立交付客户价值，并保持已有推理路径兼容。
+阶段编号表达依赖顺序。P0–P6 Batch 1 已随 v1.3.0 发布；P7 与真机验收按需开启。
 
 ## 5. P0：契约、边界和观测可信度
 

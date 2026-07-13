@@ -1,7 +1,7 @@
 # Nebula 产品定位
 
 > 产品视角说明：Nebula 是什么、解决谁的什么问题、相对推理引擎自身 serving 栈的边界与附加价值。  
-> 工程架构见 [`../arch/architecture.md`](../arch/architecture.md)；排期见 [`../arch/optimization.md`](../arch/optimization.md)。
+> 工程架构见 [`../arch/architecture.md`](../arch/architecture.md)；排期见 [`../arch/optimization.md`](../arch/optimization.md)；当前发布 [`../manual/release_notes_v1.3.0.md`](../manual/release_notes_v1.3.0.md)（P0–P6 Batch 1）。
 
 **一句话：** Nebula 是**本地 / 专有化推理机房**的集群操作系统——帮客户在多样加速器、多样引擎、多样模型之上，稳定地「部署、调度、治理、增强」推理服务；算得快交给引擎，管得好交给 Nebula。
 

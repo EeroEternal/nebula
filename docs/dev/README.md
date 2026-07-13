@@ -6,7 +6,7 @@
 
 - [开发环境设置](./setup.md)
 - [部署指南（用户向）](../manual/deployment.md)
-- [产品定位对齐开发与优化计划](./product_plan.md)
+- [产品定位对齐开发与优化计划](./product_plan.md)（P0–P6 Batch 1 @ v1.3.0）
 - [API Ownership](./api_ownership.md)
 - [Deployments 迁移](./migrate_deployments.md)
 - [Engine `/stats/` 契约](./details/stats.md)

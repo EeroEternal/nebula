@@ -1,0 +1,35 @@
+# Nebula v1.3.0
+
+发布日期：2026-07-13。产品定位对齐主线 **P0–P6 Batch 1**。
+
+完整变更见根目录 [`CHANGELOG.md`](../../CHANGELOG.md)。GitHub Release：https://github.com/EeroEternal/nebula/releases/tag/v1.3.0
+
+## 一句话
+
+在声明式控制面与可观测基线上，补齐 Serving Cell、兼容/SLO 治理、Benchmark/推荐/Canary，以及可选多租户配额与成本归因。真机 GPU e2e、多引擎重复 benchmark、多租户压测仍暂缓。
+
+## 主要能力
+
+| 阶段 | 内容 |
+|------|------|
+| P0 | 观测可信度：`kv_cache_usage`、scrape 健康、O8 SLO/告警样例 |
+| P1 | Engine Capability：静态表、方言 CLI、`/capabilities/` 持久化、版本支持 |
+| P2 | Serving Cell 只读接入：etcd `/cells/`、Router 整入口、控制台 `/cells` |
+| P3 | 兼容矩阵与硬件台账：platform/GPU 身份、`/compat/`、库存 API、`/governance` |
+| P4 | Model SLO 与诊断时间线：低流量不假绿 |
+| P5 | Benchmark / 推荐 / Canary：`scripts/benchmark/`、证据链、不足数据不默引擎 |
+| P6 | 多租户：`token:role[:tenant_id]`、`NEBULA_MULTI_TENANT`、用量/定价/成本 |
+
+## 升级注意
+
+- Workspace 版本：`1.3.0`。
+- 鉴权：`NEBULA_AUTH_TOKENS` 仍支持 `token:role`；可选 `token:role:tenant_id`。默认不开启多租户准入。
+- 开启多租户时设置 `NEBULA_MULTI_TENANT=1`，并在 etcd `/tenants/{id}` 写入配额（控制台治理页可维护）。
+- 真机 Gateway / 双引擎 benchmark / 多租户压测未纳入本版本验收。
+
+## 相关文档
+
+- 产品计划：[`../dev/product_plan.md`](../dev/product_plan.md)
+- 排期勾选：[`../arch/optimization.md`](../arch/optimization.md)
+- 架构：[`../arch/architecture.md`](../arch/architecture.md)
+- 部署：[`./deployment.md`](./deployment.md)

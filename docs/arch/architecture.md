@@ -1,8 +1,8 @@
 # Nebula 架构
 
-> 权威架构说明（2026-07-12）。排期与勾选见 [`optimization.md`](./optimization.md)；HA 报告见 [`../dev/ha/`](../dev/ha/)；边界见 [`../dev/api_ownership.md`](../dev/api_ownership.md)。
+> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。排期与勾选见 [`optimization.md`](./optimization.md)；产品阶段见 [`../dev/product_plan.md`](../dev/product_plan.md)；HA 报告见 [`../dev/ha/`](../dev/ha/)；边界见 [`../dev/api_ownership.md`](../dev/api_ownership.md)。
 
-**结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 正确性、N1 接入/调度 HA（真机）、N2 工程质量已完成；生产 etcd 三节点暂缓。剩余工程项以 [`optimization.md`](./optimization.md) 为准（可观测 O1–O8 ✅；按需 O9/N3/N4；Product P1）。
+**结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 / N1 HA 主体 / N2 / 可观测 O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 v1.3.0 落地。真机 Gateway e2e、多引擎 benchmark、多租户压测与生产 etcd 三节点暂缓。剩余按需项（N3/N4/P7）以 [`optimization.md`](./optimization.md) 为准。
 
 ---
 
@@ -15,10 +15,11 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 ### 设计原则
 
 - 控制面 / 执行面分离；声明式 + Reconcile；watch + periodic full reconcile 兜底。
-- 引擎零侵入；当前能力面以 Passthrough 为主，capability / EngineShim 按需。
-- 可观测优先：abort/drain 有独立 metrics，不计 5xx 成功率分母。
+- 引擎零侵入；默认 Passthrough；Capability / 兼容矩阵治理选型；EngineShim 按门禁启用。
+- 可观测优先：abort/drain 有独立 metrics，不计 5xx 成功率分母；低流量 SLO 不假绿。
 - etcd 是唯一权威；本地缓存可丢可重建；对账是「etcd vs runtime」清孤儿，不是双权威同步。
-- Gateway = 协议/鉴权/审计；Router = 选路+代理；BFF = 控制台；Scheduler 只写期望、不碰 Postgres。
+- Gateway = 协议/鉴权/审计/租户准入；Router = 选路+代理；BFF = 控制台；Scheduler 只写期望、不碰 Postgres。
+- 原生 Serving Cell 只读接入（整入口），不管理 Cell 内部 worker。
 
 ### 相对 PowerLLM：学什么 / 不学什么
 
@@ -31,18 +32,18 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 
 | 组件 | 职责 |
 |------|------|
-| **Gateway** | OpenAI 兼容 HTTP/SSE；鉴权、规范化、错误映射；abort；注入 `x-nebula-model` |
-| **Router** | endpoint 选择 + 代理；plan_version / stats / 熔断过载 |
-| **Scheduler** | PlacementPlan CAS；只认 `/deployments/`；leader election + fencing |
+| **Gateway** | OpenAI 兼容 HTTP/SSE；鉴权、租户准入、规范化、错误映射；abort；注入 `x-nebula-model` / ExecutionContext |
+| **Router** | endpoint / Cell 入口选择 + 代理；plan_version / stats / 熔断过载；Cell 不重试放大 |
+| **Scheduler** | PlacementPlan CAS；只认 `/deployments/`；兼容/平台过滤；leader election + fencing |
 | **MetaStore (etcd)** | 权威元数据（watch / lease / CAS） |
-| **Node** | watch placement → 启停引擎 → 注册 endpoint/stats；心跳与自愈 |
-| **Engine** | vLLM / SGLang 等原生 HTTP；生产优先 Docker |
-| **BFF** | 控制台 API、session、声明式模型管理 |
+| **Node** | watch placement → 启停引擎 → 注册 endpoint/stats/capabilities；心跳与自愈 |
+| **Engine / Cell** | 普通副本：vLLM / SGLang 原生 HTTP；Cell：原生 Gateway 整入口只读接入 |
+| **BFF** | 控制台 API：模型、Cell、治理、Benchmark、租户/成本 |
 
 默认路径：**Engine-Passthrough**（Gateway → Router → 引擎原生 HTTP）。EngineShim gRPC 为可选增强。
 
 ```
-Client → Gateway → Router → Engine
+Client → Gateway → Router → Engine / Cell Ingress
                 ↗
 Node / Scheduler / BFF ⇄ etcd
 ```
@@ -55,25 +56,34 @@ Node / Scheduler / BFF ⇄ etcd
 
 | Key | 类型 | 说明 |
 |-----|------|------|
-| `/nodes/{node_id}/status` | `NodeStatus` | 心跳（lease） |
+| `/nodes/{node_id}/status` | `NodeStatus` | 心跳（lease）；含 platform / GPU 身份 |
 | `/models/{model_uid}/spec` | `ModelSpec` | 规格 |
 | `/deployments/{model_uid}` | `ModelDeployment` | 声明式期望（唯一写入口） |
 | `/placements/{model_uid}` | `PlacementPlan` | 逻辑单调 `version` + `updated_at_ms` |
 | `/endpoints/{model_uid}/{replica_id}` | `EndpointInfo` | 须带 `plan_version` |
-| `/stats/{model_uid}/{replica_id}` | `EndpointStats` | Node 写、Router watch、Scheduler list；xtrace 只做历史 |
+| `/stats/{model_uid}/{replica_id}` | `EndpointStats` | Node 写、Router watch、Scheduler list；仅实时控制字段 |
+| `/capabilities/{model_uid}/{replica_id}` | `EngineCapability` | 运行时能力快照 |
+| `/cells/{model_uid}/{cell_id}` | `CellIngress` | Serving Cell 整入口；Nebula 不写内部 worker |
+| `/compat/{id}` | `CompatibilityRule` | 镜像/平台兼容规则 |
+| `/slos/{model_uid}` | `ModelSlo` | 模型 SLO 目标 |
+| `/benchmarks/runs|profiles/…` | Benchmark | 性能画像与 run |
+| `/canaries/{id}` | `CanaryRelease` | 灰度与回滚状态 |
+| `/tenants/{id}` | `Tenant` | 租户与配额 |
+| `/pricing/{id}` | `CostPriceConfig` | 单位 token 定价 |
+| `/usage/{tenant_id}/{window}` | `UsageWindow` | 用量与拒绝归因窗口 |
 | `/model_requests/` | 遗留 | 仅失败回写等；新路径不写 |
 
-约束：placement 全路径 CAS；Router 每模型 `plan_version`；watch 用快照 revision，compact/重连后全量校正（endpoints / placements / stats）。
+约束：placement 全路径 CAS；Router 每模型 `plan_version`；watch 用快照 revision，compact/重连后全量校正（endpoints / placements / stats / cells）。Prometheus **禁止**高基数 `tenant_id` label。
 
 ---
 
 ## 4. 调度与节点
 
-**扩缩容：** `healthy > desired` 截断 assignment；`<` 增加；`==` 不改（除非 stale）。缩容优先低 pending。
+**扩缩容：** `healthy > desired` 截断 assignment；`<` 增加；`==` 不改（除非 stale）。缩容优先低 pending。平台 / 兼容规则参与候选过滤与可解释拒绝。
 
-**Node：** `(model_uid, replica_id)` 集合差量 reconcile；`periodic_full_reconcile` 推进 Drain；lease 复用；锁外 download/start/health/scrape；恢复预算 + 进程组/Docker restart。
+**Node：** `(model_uid, replica_id)` 集合差量 reconcile；`periodic_full_reconcile` 推进 Drain；lease 复用；锁外 download/start/health/scrape；恢复预算 + 进程组/Docker restart。不 watch `/cells/`（Cell 无 Nebula 侧 worker reconcile）。
 
-**热路径：** Gateway peek model → `x-nebula-model`；Router header 优先 + 字节级 model 改写。
+**热路径：** Gateway peek model → `x-nebula-model`；注入 ExecutionContext；Router header 优先 + 字节级 model 改写。
 
 ---
 
@@ -83,16 +93,17 @@ Node / Scheduler / BFF ⇄ etcd
 |------|------|
 | `/v1/chat/completions`、`/v1/responses` | ✅ |
 | `/v1/embeddings` / `rerank`、`/v1/models` | ✅ |
+| BFF `/api/v2/cells|compat|slos|benchmarks|canaries|tenants|pricing` | ✅ |
 
 控制台写路径走 BFF；Gateway `/v1/admin/*` 写接口不扩新双实现（见 api_ownership）。
 
 可观测三平面（设计见 [`../dev/observability.md`](../dev/observability.md)）：
 
 - **Trace / LLM 语义：** OTLP → xtrace（`init_tracing` + W3C `traceparent`）
-- **时序：** Prometheus `/metrics`；热路径与 xtrace **双写**（`DualWriteEmitter`）
+- **时序：** Prometheus `/metrics`；热路径与 xtrace **双写**（`DualWriteEmitter`）；租户拒绝仅 `reason=` 低基数标签
 - **日志：** `NEBULA_LOG_FORMAT=json` → stdout → Promtail/Vector → Loki（[`../dev/loki.md`](../dev/loki.md)）
 
-鉴权分离：推理 token、BFF session、`OBSERVE_TOKEN`。abort/drain 指标不计入 5xx 错误预算。
+鉴权分离：推理 token（可绑定 tenant）、BFF session、`OBSERVE_TOKEN`。abort/drain 指标不计入 5xx 错误预算。
 
 ---
 
@@ -102,12 +113,13 @@ Node / Scheduler / BFF ⇄ etcd
 |------|------|------|
 | **M0** | 单机 etcd + gateway/router/node + 引擎 streaming | ✅ |
 | **M1** | 多机调度：多副本 + 缩容/Drain + watch + 自愈 + `/stats/` | ✅ |
-| **M2** | 声明式单路径；header 热路径 | ✅；capabilities 按需 |
+| **M2** | 声明式单路径；header 热路径 | ✅ |
 | **M3** | affinity + prefix/KV 路由深化 | 策略已有，持续打磨 |
 | **HA** | Scheduler election；接入多副本真机；旁路 etcd 三节点 | ✅ 主体；生产 etcd 三节点 ⏸ |
-| **Obs** | 双写 + JSON/Loki 路径 | ✅ O1–O8；runbook [`../dev/slo_alerts.md`](../dev/slo_alerts.md) |
+| **Obs** | 双写 + JSON/Loki + O8 runbook | ✅ O1–O8；[`../dev/slo_alerts.md`](../dev/slo_alerts.md) |
+| **Product P0–P6** | Cell / 兼容 / SLO / Benchmark / 多租户 Batch 1 | ✅ v1.3.0；真机 e2e/压测 ⏸ |
 
-HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)。
+HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)。Release Notes：[`../manual/release_notes_v1.3.0.md`](../manual/release_notes_v1.3.0.md)。
 
 ---
 
@@ -119,11 +131,12 @@ HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)
 | D1/D2 | Scheduler HA、Drain 闭环 |
 | D3 主体 | 接入多副本 + Phase D 真机演练（生产 etcd 迁移除外） |
 | N2 | BFF 去重、HTTP client、observe、CI |
+| P0–P6 Batch 1 | 产品对齐主线（v1.3.0） |
 
-未尽项（O9、N3、产品 N4、生产 etcd、Product P1）只在 [`optimization.md`](./optimization.md) 维护，本文不另开排期表。
+未尽项（真机 e2e、O9、N3、N4、P7、生产 etcd）只在 [`optimization.md`](./optimization.md) 维护，本文不另开排期表。
 
 ---
 
 ## 8. 总评
 
-Nebula 用 etcd + 引擎原生 HTTP 重新分解了 actor 式进程管理问题，架构主轴无需再改。正确性与接入/调度 HA 行为已有真机报告；工程债 N2 已收。生产继续单节点 etcd 即可。具体「下一步做什么」以 [`optimization.md`](./optimization.md) 为唯一排期源，避免在本文重复过时结论。
+Nebula 用 etcd + 引擎原生 HTTP 重新分解了 actor 式进程管理问题，架构主轴无需再改。正确性与接入/调度 HA 行为已有真机报告；产品对齐 Batch 1 已发布。生产继续单节点 etcd 即可。具体「下一步做什么」以 [`optimization.md`](./optimization.md) 为唯一排期源。

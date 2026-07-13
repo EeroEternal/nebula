@@ -1,61 +1,38 @@
 # nebula
 
-Nebula 是 deepinfer 架构落地的 Rust 控制面（Gateway / Router / Scheduler / Node），默认 **Engine-Passthrough**：Gateway → Router → 引擎原生 HTTP（vLLM / SGLang），权威状态在 etcd。
+Nebula 是本地 / 专有化推理环境的跨引擎控制面（Gateway / Router / Scheduler / Node / BFF）：默认 **Engine-Passthrough**（Gateway → Router → vLLM / SGLang 原生 HTTP），权威状态在 etcd。当前发布 **v1.3.0**（产品对齐 P0–P6 Batch 1）。
 
 ## 快速开始
 
-**克隆项目（推荐使用浅克隆）：**
+**克隆：**
 
 ```bash
-git clone --depth 1 https://github.com/lipish/nebula.git
+git clone --depth 1 https://github.com/EeroEternal/nebula.git
 ```
 
-**文档索引：** [docs/README.md](docs/README.md)（`manual/` 部署手册 · `dev/` 开发文档 · `arch/` 架构）。
+**文档索引：** [docs/README.md](docs/README.md)（`product/` 定位 · `manual/` 部署与 Release Notes · `dev/` 开发 · `arch/` 架构）。
 
-**安装依赖：** 参阅 [开发环境设置指南](docs/dev/setup.md) 安装所需的外部依赖（etcd、protoc 等）。
+**安装依赖：** [开发环境设置](docs/dev/setup.md)（etcd、protoc、Rust ≥ 1.85 等）。
 
-**部署与鉴权建议：** 参阅 [部署指南](docs/manual/deployment.md)。其中 BFF 访问 xtrace 推荐：
-- 开发环境：`OBSERVE_AUTH_MODE=internal`
-- 生产环境：`OBSERVE_AUTH_MODE=service` + `OBSERVE_TOKEN=<internal-service-token>`
+**一键本地栈：** 复制 `deploy/nebula.env.example` → `deploy/nebula.env`，设置 `START_BFF=1`、`OBSERVE_AUTH_MODE=internal`，构建后执行 `./bin/nebula-up.sh`。常用端口：Gateway `8081`、Router `18081`、BFF `18090`、前端 `5173`。
+
+**鉴权：** 推理面 `NEBULA_AUTH_TOKENS=dev-token:admin`（或 `token:role:tenant_id`）+ `Authorization: Bearer …`；开发可 `NEBULA_AUTH_DISABLED=1`。多租户准入可选 `NEBULA_MULTI_TENANT=1`。详见 [部署指南](docs/manual/deployment.md) 与 [v1.3.0 Release Notes](docs/manual/release_notes_v1.3.0.md)。
 
 ## 项目结构
 
-- `crates/nebula-common`：共享类型与热路径 JSON helpers（PlacementPlan、EndpointInfo、`x-nebula-model` 等）
-- `crates/nebula-meta`：MetaStore（etcd + 内存实现，election / lease / CAS）
-- `crates/nebula-router`：endpoint 选择与代理（plan_version、策略、熔断）
-- `crates/nebula-gateway`：对外 OpenAI 兼容 HTTP（含 `/v1/responses` SSE）
-- `crates/nebula-node`：watch placements → 启停引擎 → 注册 endpoints
-- `crates/nebula-scheduler`：声明式 `/deployments/` → PlacementPlan（CAS）
-- `crates/nebula-cli`：运维 CLI（load / scale / chat 等）
+- `crates/nebula-common`：共享契约（Placement、Endpoint、Capability、Compat、SLO、Benchmark、Tenant、ExecutionContext 等）
+- `crates/nebula-meta`：MetaStore（etcd + 内存；election / lease / CAS）
+- `crates/nebula-gateway`：OpenAI 兼容 HTTP；鉴权、审计、租户准入、透传 Router
+- `crates/nebula-router`：选路与代理（plan_version、策略、熔断；Cell 整入口）
+- `crates/nebula-scheduler`：`/deployments/` → PlacementPlan（CAS）；兼容/平台过滤
+- `crates/nebula-node`：watch placement → 启停引擎 → 注册 endpoints / capabilities
+- `crates/nebula-bff`：控制台 API（模型、Cell、治理、Benchmark、租户）
+- `crates/nebula-cli`：运维 CLI
+- `frontend/`：控制台（含 `/cells`、`/governance`）
+- `scripts/benchmark/`：标准 workload 与 runner
 
-## 本地验证（MVP）
+## 能力概览（v1.3.0）
 
-启动 Gateway：
+声明式副本生命周期与路由；Serving Cell 只读接入；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。真机 GPU e2e 与多租户压测暂缓，见 [optimization.md](docs/arch/optimization.md)。
 
-```bash
-cargo run -p nebula-gateway
-```
-
-Non-stream：
-
-```bash
-curl -sS http://127.0.0.1:8080/v1/responses \
-  -H 'content-type: application/json' \
-  -d '{"model":"stub","input":"hello"}'
-```
-
-Stream（SSE）：
-
-```bash
-curl -N http://127.0.0.1:8080/v1/responses \
-  -H 'content-type: application/json' \
-  -d '{"model":"stub","input":"hello","stream":true}'
-```
-
-预期：
-
-- 每条为 `data: {"type": ... }` 的 JSON 事件（用 `type` 识别事件）。
-- Responses streaming **不使用** `event:` 行。
-- Responses streaming **不使用** `data: [DONE]` 哨兵。
-
-全量单测：`cargo test --workspace`。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)；下一步计划见 [docs/arch/optimization.md](docs/arch/optimization.md)。
+全量单测：`cargo test --workspace`。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)。

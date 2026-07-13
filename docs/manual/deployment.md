@@ -125,14 +125,17 @@ curl http://127.0.0.1:8081/metrics
 
 #### Control API 鉴权（可选）
 
-为 `/v1/admin/*` 开启鉴权时，设置以下环境变量：
+为 `/v1/admin/*` 与推理 API 开启鉴权时，设置以下环境变量：
 
 ```bash
-# token:role 以逗号分隔，role 为 admin/operator/viewer
-export NEBULA_AUTH_TOKENS="devtoken:admin,viewtoken:viewer"
+# token:role 或以 token:role:tenant_id 绑定租户，逗号分隔；role 为 admin/operator/viewer
+export NEBULA_AUTH_TOKENS="devtoken:admin,viewtoken:viewer,acme-token:operator:acme"
 
-# 可选：每分钟每 token 的请求上限
+# 可选：每分钟每 token（或每租户）的请求上限
 export NEBULA_AUTH_RATE_LIMIT_PER_MINUTE=120
+
+# 可选：开启多租户配额准入（读 etcd /tenants/）；关闭时保持单 token 兼容
+# export NEBULA_MULTI_TENANT=1
 ```
 
 请求时携带 token：
@@ -140,6 +143,7 @@ export NEBULA_AUTH_RATE_LIMIT_PER_MINUTE=120
 ```bash
 curl -H "Authorization: Bearer devtoken" \
   http://127.0.0.1:8081/v1/admin/cluster/status
+```
 
 查看网关日志（tail 200 行）：
 
@@ -148,13 +152,7 @@ curl -H "Authorization: Bearer devtoken" \
   "http://127.0.0.1:8081/v1/admin/logs?lines=200"
 ```
 
-访问 Web Console（MVP）：
-
-```bash
-open http://127.0.0.1:8081/v1/admin/ui
-```
-```
-```
+控制台前端默认走 BFF（`:18090` / `npm run dev` → `:5173`），治理页可维护租户、兼容矩阵、SLO 与 Benchmark。
 
 ## 5. BFF 与 xtrace 鉴权模式（安装部署建议）
 
