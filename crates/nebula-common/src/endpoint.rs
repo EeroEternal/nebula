@@ -35,13 +35,6 @@ pub struct EndpointInfo {
     pub base_url: Option<String>,
 }
 
-impl EndpointInfo {
-    /// Synthetic Serving Cell ingress endpoints use `node_id = "cell:{cell_id}"`.
-    pub fn is_cell_ingress(&self) -> bool {
-        self.node_id.starts_with("cell:")
-    }
-}
-
 /// Real-time control-plane stats for a replica.
 ///
 /// `None` on optional metric fields means the value is unavailable

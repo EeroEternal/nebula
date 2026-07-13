@@ -1,7 +1,7 @@
 # Nebula 部署指南
 
 > **给谁看：** 实施工程师按下面步骤安装；产品/运维只需知道「装好后用控制台 `:5173`、API 走网关 `:8081`」。  
-> 网关与监控说明：[`gateway.md`](./gateway.md)、[`observability.md`](./observability.md)。多副本：[`ha.md`](./ha.md)。
+> 各模块说明（网关、监控、多副本等）：[`module.md`](./module.md)。
 
 ## 0. 装完以后怎么用
 
@@ -406,4 +406,4 @@ OBSERVE_TOKEN=<API_BEARER_TOKEN>
 NEBULA_ENV_FILE=/path/to/nebula.env ./bin/nebula-up.sh
 ```
 
-远端部署可参考 [`ha.md`](./ha.md) 与 [`../dev/setup.md`](../dev/setup.md)。
+远端部署可参考 [`module.md`](./module.md)「高可用」与 [`../dev/setup.md`](../dev/setup.md)。

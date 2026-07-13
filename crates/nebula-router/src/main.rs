@@ -18,7 +18,7 @@ use crate::args::Args;
 use crate::handlers::{healthz, proxy_chat_completions};
 use crate::metrics::{metrics_handler, track_requests};
 use crate::state::AppState;
-use crate::sync::{cells_sync_loop, endpoints_sync_loop, placement_sync_loop, stats_sync_loop};
+use crate::sync::{endpoints_sync_loop, placement_sync_loop, stats_sync_loop};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -63,14 +63,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         if let Err(e) = stats_sync_loop(store_for_stats, router_for_stats).await {
             tracing::error!(error=%e, "stats sync loop exited");
-        }
-    });
-
-    let router_for_cells = router.clone();
-    let store_for_cells = store.clone();
-    tokio::spawn(async move {
-        if let Err(e) = cells_sync_loop(store_for_cells, router_for_cells).await {
-            tracing::error!(error=%e, "cells sync loop exited");
         }
     });
 

@@ -6,7 +6,6 @@ pub mod endpoint;
 pub mod engine_args;
 pub mod engine_image;
 pub mod execution_context;
-pub mod ingress_metrics;
 pub mod json_model;
 pub mod model_cache;
 pub mod model_deployment;
@@ -23,8 +22,7 @@ pub use capability::{
     parse_version_tuple, resolve_engine_type, static_capability, static_capability_sglang,
     static_capability_vllm, static_version_support, validate_engine_and_config,
     validate_engine_type, validate_engine_version, validate_model_config, CapabilitySource,
-    CellHealthStatus, CellIngress, EngineCapability, EngineVersionSupport,
-    InternalTopologyVisibility, ObservabilityCapability, ReplicaCapability, ServingTopology,
+    EngineCapability, EngineVersionSupport, ObservabilityCapability, ReplicaCapability,
     ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
 };
 pub use cluster::ClusterStatus;
@@ -35,9 +33,6 @@ pub use compat::{
 pub use endpoint::{EndpointInfo, EndpointKind, EndpointStats, EndpointStatus};
 pub use engine_args::{build_engine_extra_args, build_engine_extra_args_lenient};
 pub use engine_image::{EngineImage, ImagePullStatus, NodeImageStatus, VersionPolicy};
-pub use ingress_metrics::{
-    parse_cell_ingress_metrics, CellIngressStats, CellScrapeStatus,
-};
 pub use execution_context::{
     build_execution_context, inject_execution_context, ExecutionContext, HEADER_BUDGET_TOKENS,
     HEADER_DEADLINE_MS, HEADER_PRIORITY, HEADER_REQUEST_ID, HEADER_SESSION_ID, HEADER_TENANT_ID,

@@ -62,7 +62,7 @@ pub struct SloMetricSample {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<f64>,
-    /// `router` | `gateway` | `engine` | `node` | `cell_ingress`
+    /// `router` | `gateway` | `engine` | `node`
     pub data_source: String,
     pub unit: String,
 }
@@ -87,7 +87,7 @@ pub struct SloEvaluation {
 pub struct SloSuggestion {
     pub kind: String,
     pub message: String,
-    /// `replica` suggestions may imply scale; `cell` must be capacity/config only.
+    /// Scale / observe suggestions target ordinary replicas.
     pub target: String,
 }
 
@@ -95,15 +95,13 @@ pub struct SloSuggestion {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiagnosticEvent {
     pub ts_ms: u64,
-    /// `deployment` | `placement` | `audit` | `cell` | `scrape` | `slo`
+    /// `deployment` | `placement` | `audit` | `scrape` | `slo`
     pub kind: String,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_uid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_source: Option<String>,
 }
@@ -117,7 +115,6 @@ pub fn evaluate_slo(
     latency_p95_ms: Option<f64>,
     request_rate: Option<f64>,
     now_ms: u64,
-    is_cell: bool,
 ) -> SloEvaluation {
     let mut samples = vec![
         SloMetricSample {
@@ -160,7 +157,7 @@ pub fn evaluate_slo(
                 kind: "observe".into(),
                 message: "insufficient traffic to evaluate SLO; wait for request_rate >= 0.1"
                     .into(),
-                target: if is_cell { "cell" } else { "replica" }.into(),
+                target: "replica".into(),
             }],
             evaluated_at_ms: now_ms,
             abort_excluded: slo.exclude_abort_from_error_budget,
@@ -218,20 +215,11 @@ pub fn evaluate_slo(
 
     let mut suggestions = Vec::new();
     if status == SloComplianceStatus::Breaching {
-        if is_cell {
-            suggestions.push(SloSuggestion {
-                kind: "capacity".into(),
-                message: "Serving Cell breach: review ingress capacity/config; do not scale P/D workers via Nebula"
-                    .into(),
-                target: "cell".into(),
-            });
-        } else {
-            suggestions.push(SloSuggestion {
-                kind: "scale".into(),
-                message: "Consider increasing replicas or checking unhealthy endpoints".into(),
-                target: "replica".into(),
-            });
-        }
+        suggestions.push(SloSuggestion {
+            kind: "scale".into(),
+            message: "Consider increasing replicas or checking unhealthy endpoints".into(),
+            target: "replica".into(),
+        });
     }
 
     SloEvaluation {
@@ -269,22 +257,15 @@ mod tests {
 
     #[test]
     fn low_traffic_is_insufficient() {
-        let ev = evaluate_slo(&slo(), Some(1.0), Some(100.0), Some(1000.0), Some(0.01), 1, false);
+        let ev = evaluate_slo(&slo(), Some(1.0), Some(100.0), Some(1000.0), Some(0.01), 1);
         assert_eq!(ev.status, SloComplianceStatus::InsufficientData);
     }
 
     #[test]
     fn breach_availability() {
-        let ev = evaluate_slo(&slo(), Some(0.90), Some(100.0), Some(1000.0), Some(5.0), 1, false);
+        let ev = evaluate_slo(&slo(), Some(0.90), Some(100.0), Some(1000.0), Some(5.0), 1);
         assert_eq!(ev.status, SloComplianceStatus::Breaching);
         assert!(!ev.breaches.is_empty());
         assert_eq!(ev.suggestions[0].target, "replica");
-    }
-
-    #[test]
-    fn cell_suggestions_are_capacity_only() {
-        let ev = evaluate_slo(&slo(), Some(0.90), Some(100.0), Some(1000.0), Some(5.0), 1, true);
-        assert_eq!(ev.suggestions[0].target, "cell");
-        assert_eq!(ev.suggestions[0].kind, "capacity");
     }
 }

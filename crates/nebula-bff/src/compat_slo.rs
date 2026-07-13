@@ -342,7 +342,6 @@ pub async fn delete_slo(store: &dyn MetaStore, model_uid: &str) -> Result<(), Se
 pub fn evaluate_slo_from_router_metrics(
     slo: &ModelSlo,
     metrics_text: &str,
-    is_cell: bool,
 ) -> SloEvaluation {
     use crate::service::{normalize_zero, parse_histogram_quantile, parse_metric_sum};
     let window_secs = match slo.window.as_str() {
@@ -390,7 +389,6 @@ pub fn evaluate_slo_from_router_metrics(
         latency,
         request_rate,
         now_ms(),
-        is_cell,
     )
 }
 
@@ -424,7 +422,6 @@ pub async fn list_diagnostic_events(
             ),
             model_uid: Some(dep.model_uid),
             node_id: dep.node_affinity,
-            cell_id: None,
             data_source: Some("etcd".into()),
         });
         let _ = key;
@@ -451,33 +448,7 @@ pub async fn list_diagnostic_events(
             ),
             model_uid: Some(plan.model_uid),
             node_id: plan.assignments.first().map(|a| a.node_id.clone()),
-            cell_id: None,
             data_source: Some("etcd".into()),
-        });
-    }
-
-    // Cells
-    let cells = store.list_prefix("/cells/").await?;
-    for (_, v, _) in cells {
-        let Ok(cell) = serde_json::from_slice::<nebula_common::CellIngress>(&v) else {
-            continue;
-        };
-        if let Some(uid) = model_uid {
-            if cell.model_uid != uid {
-                continue;
-            }
-        }
-        events.push(DiagnosticEvent {
-            ts_ms: cell.updated_at_ms.max(cell.last_checked_ms),
-            kind: "cell".into(),
-            summary: format!(
-                "cell {} status={:?} topology={:?}",
-                cell.cell_id, cell.status, cell.topology.kind
-            ),
-            model_uid: Some(cell.model_uid),
-            node_id: None,
-            cell_id: Some(cell.cell_id),
-            data_source: Some("cell_ingress".into()),
         });
     }
 
@@ -501,7 +472,6 @@ pub async fn list_diagnostic_events(
             ),
             model_uid: Some(slo.model_uid),
             node_id: None,
-            cell_id: None,
             data_source: Some("etcd".into()),
         });
     }

@@ -23,16 +23,16 @@ git clone --depth 1 https://github.com/EeroEternal/nebula.git
 - `crates/nebula-common`：共享契约（Placement、Endpoint、Capability、Compat、SLO、Benchmark、Tenant、ExecutionContext 等）
 - `crates/nebula-meta`：MetaStore（etcd + 内存；election / lease / CAS）
 - `crates/nebula-gateway`：OpenAI 兼容 HTTP；鉴权、审计、租户准入、透传 Router
-- `crates/nebula-router`：选路与代理（plan_version、策略、熔断；Cell 整入口）
+- `crates/nebula-router`：选路与代理（plan_version、策略、熔断）
 - `crates/nebula-scheduler`：`/deployments/` → PlacementPlan（CAS）；兼容/平台过滤
 - `crates/nebula-node`：watch placement → 启停引擎 → 注册 endpoints / capabilities
-- `crates/nebula-bff`：控制台 API（模型、Cell、治理、Benchmark、租户）
+- `crates/nebula-bff`：控制台 API（模型、治理、Benchmark、租户）
 - `crates/nebula-cli`：运维 CLI
-- `frontend/`：控制台（含 `/cells`、`/governance`）
+- `frontend/`：控制台（含 `/governance`）
 - `scripts/benchmark/`：标准 workload 与 runner
 
 ## 能力概览（v1.3.0）
 
-声明式副本生命周期与路由；Serving Cell 只读接入；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。真机 GPU e2e 与多租户压测暂缓，见 [roadmap.md](docs/arch/roadmap.md)。
+声明式副本生命周期与路由；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。Serving Cell（CellIngress）已下线。真机 GPU e2e 与多租户压测暂缓，见 [roadmap.md](docs/arch/roadmap.md)。
 
 全量单测：`cargo test --workspace`。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)。

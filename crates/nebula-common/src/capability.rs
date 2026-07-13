@@ -1,8 +1,7 @@
-//! Engine capability and Serving Cell contracts (plan P0/P1).
+//! Engine capability contracts.
 //!
-//! These types define ownership boundaries. Native gateway / PD topologies are
-//! recorded as ingress + capabilities only — Nebula must not invent P/D worker
-//! assignment or write operations against them.
+//! These types define which engine features and topologies Nebula can manage
+//! as ordinary replicas (standalone / replicated).
 
 use serde::{Deserialize, Serialize};
 
@@ -32,121 +31,6 @@ pub enum ServingTopologyKind {
     Standalone,
     /// Homogeneous Nebula-managed replicas; Nebula Router selects among them.
     Replicated,
-    /// External engine-native gateway (vLLM Router, SGLang Model Gateway, …)
-    /// registered as a whole Cell Ingress. Nebula does not manage workers.
-    NativeGateway,
-    /// Prefill/Decode disaggregation owned by the engine serving stack.
-    /// Nebula records capabilities and ingress only — no worker assignment.
-    PdDisaggregated,
-}
-
-/// Declared serving topology for a model / cell.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ServingTopology {
-    pub kind: ServingTopologyKind,
-    /// Human-readable engine serving stack identity, e.g. "sglang-model-gateway".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_stack: Option<String>,
-    /// Engine-reported capability notes (read-only; not a control surface).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
-}
-
-/// Whole-cell ingress for a native or Nebula-managed serving entry.
-///
-/// For `native_gateway` / `pd_disaggregated`, this is the only address Nebula
-/// routes to. There are intentionally no Prefill/Decode worker lists or
-/// scale/write fields here.
-///
-/// etcd key: `/cells/{model_uid}/{cell_id}`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CellIngress {
-    pub cell_id: String,
-    pub model_uid: String,
-    /// OpenAI-compatible base URL of the cell ingress.
-    pub base_url: String,
-    pub topology: ServingTopology,
-    /// Optional read-only health URL; defaults to `{base_url}/health` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_url: Option<String>,
-    /// Optional read-only metrics URL; defaults to `{base_url}/metrics` when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metrics_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub engine_version: Option<String>,
-
-    /// Ingress-level health from Nebula's last probe (not worker pool size).
-    #[serde(default)]
-    pub status: CellHealthStatus,
-
-    /// Always `not_visible` unless a stable official worker read API is wired later.
-    #[serde(default)]
-    pub internal_topology: InternalTopologyVisibility,
-
-    #[serde(default)]
-    pub last_checked_ms: u64,
-    #[serde(default)]
-    pub updated_at_ms: u64,
-}
-
-/// Health of the Cell Ingress as a whole (never invents worker counts).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CellHealthStatus {
-    Ready,
-    Unhealthy,
-    #[default]
-    Unknown,
-}
-
-/// Visibility of native Cell internal topology to Nebula.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum InternalTopologyVisibility {
-    /// Default: Nebula must not invent Prefill/Decode/worker counts.
-    #[default]
-    NotVisible,
-    /// Reserved for a future official read-only worker API.
-    VisibleReadonly,
-}
-
-impl CellIngress {
-    pub fn resolved_health_url(&self) -> String {
-        self.health_url
-            .clone()
-            .unwrap_or_else(|| format!("{}/health", self.base_url.trim_end_matches('/')))
-    }
-
-    pub fn resolved_metrics_url(&self) -> String {
-        self.metrics_url
-            .clone()
-            .unwrap_or_else(|| format!("{}/metrics", self.base_url.trim_end_matches('/')))
-    }
-
-    /// Convert to a synthetic route endpoint so Router can proxy without worker selection.
-    /// `replica_id` is always 0; `node_id` is `cell:{cell_id}`.
-    pub fn as_route_endpoint(&self) -> crate::endpoint::EndpointInfo {
-        use crate::endpoint::{EndpointInfo, EndpointKind, EndpointStatus};
-        let status = match self.status {
-            CellHealthStatus::Ready => EndpointStatus::Ready,
-            CellHealthStatus::Unhealthy => EndpointStatus::Unhealthy,
-            CellHealthStatus::Unknown => EndpointStatus::Starting,
-        };
-        EndpointInfo {
-            model_uid: self.model_uid.clone(),
-            replica_id: 0,
-            plan_version: 0,
-            node_id: format!("cell:{}", self.cell_id),
-            endpoint_kind: EndpointKind::NativeHttp,
-            api_flavor: "openai".to_string(),
-            status,
-            last_heartbeat_ms: self.last_checked_ms,
-            grpc_target: None,
-            base_url: Some(self.base_url.trim_end_matches('/').to_string()),
-        }
-    }
 }
 
 /// Persisted per-replica capability snapshot (etcd `/capabilities/{model_uid}/{replica_id}`).
@@ -376,8 +260,6 @@ pub fn static_capability_vllm() -> EngineCapability {
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
-            ServingTopologyKind::NativeGateway,
-            ServingTopologyKind::PdDisaggregated,
         ],
         observability: ObservabilityCapability {
             pending_requests: SupportLevel::Supported,
@@ -387,9 +269,7 @@ pub fn static_capability_vllm() -> EngineCapability {
             ttft: SupportLevel::Unknown,
             tpot: SupportLevel::Unknown,
         },
-        notes: Some(
-            "Ordinary Nebula-managed replicas; native vLLM Router is Cell Ingress only".into(),
-        ),
+        notes: Some("Ordinary Nebula-managed vLLM replicas".into()),
     }
 }
 
@@ -408,8 +288,6 @@ pub fn static_capability_sglang() -> EngineCapability {
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
-            ServingTopologyKind::NativeGateway,
-            ServingTopologyKind::PdDisaggregated,
         ],
         observability: ObservabilityCapability {
             pending_requests: SupportLevel::Supported,
@@ -419,9 +297,7 @@ pub fn static_capability_sglang() -> EngineCapability {
             ttft: SupportLevel::Unknown,
             tpot: SupportLevel::Unknown,
         },
-        notes: Some(
-            "Ordinary Nebula-managed replicas; SGLang Model Gateway is Cell Ingress only".into(),
-        ),
+        notes: Some("Ordinary Nebula-managed SGLang replicas".into()),
     }
 }
 
@@ -489,37 +365,6 @@ pub fn validate_engine_and_config(
 mod tests {
     use super::*;
     use crate::model_request::ModelConfig;
-
-    #[test]
-    fn native_gateway_ingress_has_no_worker_fields() {
-        let ingress = CellIngress {
-            cell_id: "cell-1".into(),
-            model_uid: "m".into(),
-            base_url: "http://127.0.0.1:30000".into(),
-            topology: ServingTopology {
-                kind: ServingTopologyKind::NativeGateway,
-                native_stack: Some("sglang-model-gateway".into()),
-                notes: None,
-            },
-            health_url: None,
-            metrics_url: None,
-            engine_type: Some("sglang".into()),
-            engine_version: Some("0.4.0".into()),
-            status: CellHealthStatus::Unknown,
-            internal_topology: InternalTopologyVisibility::NotVisible,
-            last_checked_ms: 0,
-            updated_at_ms: 0,
-        };
-        let v = serde_json::to_value(&ingress).unwrap();
-        assert!(v.get("workers").is_none());
-        assert!(v.get("prefill").is_none());
-        assert!(v.get("decode").is_none());
-        assert_eq!(v["topology"]["kind"].as_str(), Some("native_gateway"));
-        assert_eq!(v["internal_topology"].as_str(), Some("not_visible"));
-        let ep = ingress.as_route_endpoint();
-        assert_eq!(ep.replica_id, 0);
-        assert_eq!(ep.node_id, "cell:cell-1");
-    }
 
     #[test]
     fn support_level_roundtrip() {

@@ -102,8 +102,6 @@ export async function apiDelete<T>(path: string, token?: string): Promise<T> {
 
 import type {
   AuthUser,
-  CellIngress,
-  CellObservation,
   CompatibilityRule,
   CreateUserPayload,
   DiagnosticEvent,
@@ -128,7 +126,6 @@ import type {
   ModelTemplate,
   DiskAlert,
   LoginResponse,
-  RegisterCellPayload,
   SloEvaluation,
   UpdateUserPayload,
   UserSettings,
@@ -214,21 +211,6 @@ export const v2 = {
 
   gatewayLatency: (window: string, token?: string) =>
     apiGetWithParams<GatewayLatency>('/v2/observability/gateway/latency', { window }, token),
-
-  listCells: (token?: string) =>
-    apiGet<CellIngress[]>('/v2/cells', token),
-
-  getCell: (modelUid: string, cellId: string, token?: string) =>
-    apiGet<CellIngress>(`/v2/cells/${modelUid}/${cellId}`, token),
-
-  registerCell: (body: RegisterCellPayload, token?: string) =>
-    apiPost<CellIngress, RegisterCellPayload>('/v2/cells', body, token),
-
-  deregisterCell: (modelUid: string, cellId: string, token?: string) =>
-    apiDelete<unknown>(`/v2/cells/${modelUid}/${cellId}`, token),
-
-  observeCell: (modelUid: string, cellId: string, token?: string) =>
-    apiGet<CellObservation>(`/v2/cells/${modelUid}/${cellId}/observe`, token),
 
   listCompatRules: (token?: string) =>
     apiGet<CompatibilityRule[]>('/v2/compat', token),

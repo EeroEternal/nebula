@@ -367,69 +367,6 @@ pub async fn gateway_latency(
 }
 
 // ---------------------------------------------------------------------------
-// Native Serving Cell (P2)
-// ---------------------------------------------------------------------------
-
-pub async fn list_cells(
-    State(st): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-) -> Result<impl IntoResponse, ServiceError> {
-    if let Some(resp) = require_role(&ctx, Role::Viewer) {
-        return Ok(resp);
-    }
-    let cells = service::list_cells(&*st.store).await?;
-    Ok((StatusCode::OK, Json(cells)).into_response())
-}
-
-pub async fn get_cell(
-    State(st): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-    Path((model_uid, cell_id)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ServiceError> {
-    if let Some(resp) = require_role(&ctx, Role::Viewer) {
-        return Ok(resp);
-    }
-    let cell = service::get_cell(&*st.store, &model_uid, &cell_id).await?;
-    Ok((StatusCode::OK, Json(cell)).into_response())
-}
-
-pub async fn register_cell(
-    State(st): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-    Json(req): Json<service::RegisterCellRequest>,
-) -> Result<impl IntoResponse, ServiceError> {
-    if let Some(resp) = require_role(&ctx, Role::Operator) {
-        return Ok(resp);
-    }
-    let cell = service::register_cell(&*st.store, &st.http, req).await?;
-    Ok((StatusCode::CREATED, Json(cell)).into_response())
-}
-
-pub async fn deregister_cell(
-    State(st): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-    Path((model_uid, cell_id)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ServiceError> {
-    if let Some(resp) = require_role(&ctx, Role::Operator) {
-        return Ok(resp);
-    }
-    service::deregister_cell(&*st.store, &model_uid, &cell_id).await?;
-    Ok((StatusCode::NO_CONTENT, Json(json!({}))).into_response())
-}
-
-pub async fn observe_cell(
-    State(st): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-    Path((model_uid, cell_id)): Path<(String, String)>,
-) -> Result<impl IntoResponse, ServiceError> {
-    if let Some(resp) = require_role(&ctx, Role::Viewer) {
-        return Ok(resp);
-    }
-    let obs = service::observe_cell(&*st.store, &st.http, &model_uid, &cell_id).await?;
-    Ok((StatusCode::OK, Json(obs)).into_response())
-}
-
-// ---------------------------------------------------------------------------
 // P3 Compat / Inventory + P4 SLO / Diagnostics
 // ---------------------------------------------------------------------------
 
@@ -551,16 +488,10 @@ pub async fn evaluate_slo(
     let slo = crate::compat_slo::get_slo(&*st.store, &model_uid)
         .await?
         .ok_or_else(|| ServiceError::NotFound(format!("slo for {model_uid} not found")))?;
-    let is_cell = !service::list_cells(&*st.store)
-        .await?
-        .into_iter()
-        .filter(|c| c.model_uid == model_uid)
-        .collect::<Vec<_>>()
-        .is_empty();
     let text = service::fetch_router_metrics_text(&st.http, &st.router_url)
         .await
         .unwrap_or_default();
-    let ev = crate::compat_slo::evaluate_slo_from_router_metrics(&slo, &text, is_cell);
+    let ev = crate::compat_slo::evaluate_slo_from_router_metrics(&slo, &text);
     Ok((StatusCode::OK, Json(ev)).into_response())
 }
 

@@ -18,7 +18,6 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 | `/placements/` | Scheduler（CAS） | Node、Router | 持久；`plan_version` |
 | `/endpoints/`、`/stats/`、`/capabilities/` | Node | Router、Scheduler、BFF | **lease** |
 | `/nodes/…/status` | Node | Scheduler、BFF | **lease** |
-| `/cells/` | BFF | Router | 持久声明（整入口；无内部 worker） |
 | `/images/` | BFF（主） | Node watch、Scheduler | 持久镜像注册 |
 | `/image_status/` | Node | BFF | **lease** |
 | `/compat/`、`/slos/`、`/canaries/` | BFF | Scheduler / 发布路径 | 持久治理 |
@@ -51,7 +50,7 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 
 ## D. 不应进
 
-控制台账号/SSO/会话 → Postgres。Trace → xtrace。时序/告警曲线 → Prometheus。日志 → Loki。模型权重/镜像层 → 本地盘/仓库。Cell 内部 worker 拓扑 → Cell 自管。审计全文/token 明文 → 审计与密钥系统。高基数 `tenant_id` → 禁止进 Prometheus label。
+控制台账号/SSO/会话 → Postgres。Trace → xtrace。时序/告警曲线 → Prometheus。日志 → Loki。模型权重/镜像层 → 本地盘/仓库。审计全文/token 明文 → 审计与密钥系统。高基数 `tenant_id` → 禁止进 Prometheus label。
 
 ## 新增 key
 

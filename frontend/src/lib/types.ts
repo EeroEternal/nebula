@@ -387,56 +387,6 @@ export interface UpdateUserPayload {
   password?: string
 }
 
-export interface ServingTopology {
-  kind: string
-  native_stack?: string | null
-  notes?: string | null
-}
-
-export interface CellIngress {
-  cell_id: string
-  model_uid: string
-  base_url: string
-  topology: ServingTopology
-  health_url?: string | null
-  metrics_url?: string | null
-  engine_type?: string | null
-  engine_version?: string | null
-  status: string
-  internal_topology: string
-  last_checked_ms: number
-  updated_at_ms: number
-}
-
-export interface CellIngressStats {
-  scraped_at_ms: number
-  metrics_url: string
-  data_source: string
-  pending_requests?: number | null
-  kv_cache_usage?: number | null
-  prefix_cache_hit_rate?: number | null
-  scrape_status: string
-}
-
-export interface CellObservation {
-  cell: CellIngress
-  health_ok: boolean
-  stats: CellIngressStats
-  internal_topology: string
-}
-
-export interface RegisterCellPayload {
-  model_uid: string
-  cell_id?: string
-  base_url: string
-  topology: ServingTopology
-  health_url?: string
-  metrics_url?: string
-  engine_type?: string
-  engine_version?: string
-  skip_probe?: boolean
-}
-
 export interface CompatibilityRule {
   id: string
   engine_type: string
@@ -508,7 +458,6 @@ export interface DiagnosticEvent {
   summary: string
   model_uid?: string | null
   node_id?: string | null
-  cell_id?: string | null
   data_source?: string | null
 }
 

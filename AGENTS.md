@@ -5,7 +5,7 @@ This document defines rules and conventions for AI agents and developers working
 ## File Organization
 
 - **Documentation:** Keep filenames in the `docs/` directory concise and descriptive. Avoid excessively long names.
-  - `docs/manual/` — 产品与运维：能力说明、部署、Gateway/Router、可观测、SLO、BFF、Catalog、HA
+  - `docs/manual/` — 产品与运维：能力说明、特性、部署、Gateway/Router、可观测、SLO、BFF、Catalog、HA
   - `docs/versions/` — Release Notes（`v1.3.0.md` 等）
   - `docs/dev/` — 工程细节：开发环境、计划、API 边界、etcd 边界、契约、UniGateway
   - `docs/arch/` — architecture and roadmap
@@ -28,7 +28,7 @@ etcd is the **control-plane coordination authority**, not a general database. De
 
 **Must use Node shared lease (or short TTL)** for node-ephemeral keys: `/nodes/…/status`, `/endpoints/`, `/stats/`, `/capabilities/`, `/image_status/`, `/model_cache/`, `/node_disk/`, `/alerts/`. `/download_progress/` uses short TTL. `/model_gc_requests/` must carry a TTL and be deleted after Node handles them.
 
-**Do not put in etcd:** console auth/SSO/sessions (Postgres); traces (xtrace); metric history/alert time series (Prometheus); logs (Loki); model weights / image layers; Cell internal worker topology; audit full text / token secrets; high-cardinality labels such as `tenant_id` on Prometheus metrics.
+**Do not put in etcd:** console auth/SSO/sessions (Postgres); traces (xtrace); metric history/alert time series (Prometheus); logs (Loki); model weights / image layers; audit full text / token secrets; high-cardinality labels such as `tenant_id` on Prometheus metrics.
 
 **Borrowed (allowed for now, do not expand):** `/templates/`, `/pricing/`, `/usage/`, `/benchmarks/`, legacy `/model_requests/` (read-only, no new writes). Prefer Postgres when touching these for history, billing, or growth—without making Scheduler/Node read Postgres.
 

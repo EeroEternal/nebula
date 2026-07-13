@@ -1,6 +1,6 @@
 # Nebula 架构
 
-> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。排期与勾选见 [`roadmap.md`](./roadmap.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；HA 见 [`../manual/ha.md`](../manual/ha.md)、[`report.md`](../dev/ha/report.md)；边界见 [`../dev/ownership.md`](../dev/ownership.md)。
+> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。排期与勾选见 [`roadmap.md`](./roadmap.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；HA 见 [`../manual/module.md`](../manual/module.md)、[`report.md`](../dev/ha/report.md)；边界见 [`../dev/ownership.md`](../dev/ownership.md)。
 
 **结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 / N1 HA 主体 / N2 / 可观测 O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 v1.3.0 落地。真机 Gateway e2e、多引擎 benchmark、多租户压测与生产 etcd 三节点暂缓。剩余按需项（N3/N4/P7）以 [`roadmap.md`](./roadmap.md) 为准。
 
@@ -19,7 +19,6 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 - 可观测优先：abort/drain 有独立 metrics，不计 5xx 成功率分母；低流量 SLO 不假绿。
 - etcd 是唯一权威；本地缓存可丢可重建；对账是「etcd vs runtime」清孤儿，不是双权威同步。
 - Gateway = 协议/鉴权/审计/租户准入；Router = 选路+代理；BFF = 控制台；Scheduler 只写期望、不碰 Postgres。
-- 原生 Serving Cell 只读接入（整入口），不管理 Cell 内部 worker。
 
 ### 相对 PowerLLM：学什么 / 不学什么
 
@@ -33,12 +32,12 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 | 组件 | 职责 |
 |------|------|
 | **Gateway** | OpenAI 兼容 HTTP/SSE；鉴权、租户准入、规范化、错误映射；abort；注入 `x-nebula-model` / ExecutionContext |
-| **Router** | endpoint / Cell 入口选择 + 代理；plan_version / stats / 熔断过载；Cell 不重试放大 |
+| **Router** | endpoint 选择 + 代理；plan_version / stats / 熔断过载 / 重试 |
 | **Scheduler** | PlacementPlan CAS；只认 `/deployments/`；兼容/平台过滤；leader election + fencing |
 | **MetaStore (etcd)** | 权威元数据（watch / lease / CAS） |
 | **Node** | watch placement → 启停引擎 → 注册 endpoint/stats/capabilities；心跳与自愈 |
-| **Engine / Cell** | 普通副本：vLLM / SGLang 原生 HTTP；Cell：原生 Gateway 整入口只读接入 |
-| **BFF** | 控制台 API：模型、Cell、治理、Benchmark、租户/成本 |
+| **Engine** | vLLM / SGLang 等原生 HTTP 推理进程 |
+| **BFF** | 控制台 API：模型、治理、Benchmark、租户/成本 |
 
 默认路径：**Engine-Passthrough**（Gateway → Router → 引擎原生 HTTP）。EngineShim gRPC 为可选增强。
 
@@ -53,7 +52,7 @@ graph TB
     ETCD["etcd"]
     PG["PostgreSQL"]
     XT["xtrace"]
-    Engine["vLLM / SGLang / Cell Ingress"]
+    Engine["vLLM / SGLang"]
 
     Client -->|"inference"| GW
     Client -->|"dashboard"| BFF
@@ -108,7 +107,6 @@ graph BT
 | `/deployments/{model_uid}` | `ModelDeployment` | A | 声明期望（主写：BFF） |
 | `/placements/{model_uid}` | `PlacementPlan` | A | CAS；`plan_version` |
 | `/endpoints/…` `/stats/…` `/capabilities/…` | 运行时 | A | Node 写（lease） |
-| `/cells/{model_uid}/{cell_id}` | `CellIngress` | A | 整入口；无内部 worker |
 | `/images/{id}` | `EngineImage` | A | 镜像注册；Node watch |
 | `/image_status/{node}/{id}` | `NodeImageStatus` | A | Node 写（lease） |
 | `/compat/` `/slos/` `/canaries/` | 治理 | A | 调度/发布 |
@@ -129,7 +127,7 @@ graph BT
 
 **扩缩容：** `healthy > desired` 截断 assignment；`<` 增加；`==` 不改（除非 stale）。缩容优先低 pending。平台 / 兼容规则参与候选过滤与可解释拒绝。
 
-**Node：** `(model_uid, replica_id)` 集合差量 reconcile；`periodic_full_reconcile` 推进 Drain；lease 复用；锁外 download/start/health/scrape；恢复预算 + 进程组/Docker restart。不 watch `/cells/`（Cell 无 Nebula 侧 worker reconcile）。
+**Node：** `(model_uid, replica_id)` 集合差量 reconcile；`periodic_full_reconcile` 推进 Drain；lease 复用；锁外 download/start/health/scrape；恢复预算 + 进程组/Docker restart。
 
 **热路径：** Gateway peek model → `x-nebula-model`；注入 ExecutionContext；Router header 优先 + 字节级 model 改写。
 
@@ -141,15 +139,15 @@ graph BT
 |------|------|
 | `/v1/chat/completions`、`/v1/responses` | ✅ |
 | `/v1/embeddings` / `rerank`、`/v1/models` | ✅ |
-| BFF `/api/v2/cells|compat|slos|benchmarks|canaries|tenants|pricing` | ✅ |
+| BFF `/api/v2/compat|slos|benchmarks|canaries|tenants|pricing` | ✅ |
 
 控制台写路径走 BFF；Gateway `/v1/admin/*` 写接口不扩新双实现（见 [`ownership.md`](../dev/ownership.md)）。
 
-可观测三平面（设计见 [`../manual/observability.md`](../manual/observability.md)）：
+可观测三平面（设计见 [`../manual/module.md`](../manual/module.md)「监控与日志」）：
 
 - **Trace / LLM 语义：** OTLP → xtrace（`init_tracing` + W3C `traceparent`）
 - **时序：** Prometheus `/metrics`；热路径与 xtrace **双写**（`DualWriteEmitter`）；租户拒绝仅 `reason=` 低基数标签
-- **日志：** `NEBULA_LOG_FORMAT=json` → stdout → Promtail/Vector → Loki（[`../manual/loki.md`](../manual/loki.md)）
+- **日志：** `NEBULA_LOG_FORMAT=json` → stdout → Promtail/Vector → Loki（[`../manual/module.md`](../manual/module.md)）
 
 鉴权分离：推理 token（可绑定 tenant）、BFF session、`OBSERVE_TOKEN`。abort/drain 指标不计入 5xx 错误预算。
 
@@ -164,8 +162,8 @@ graph BT
 | **M2** | 声明式单路径；header 热路径 | ✅ |
 | **M3** | affinity + prefix/KV 路由深化 | 策略已有，持续打磨 |
 | **HA** | Scheduler election；接入多副本真机；旁路 etcd 三节点 | ✅ 主体；生产 etcd 三节点 ⏸ |
-| **Obs** | 双写 + JSON/Loki + O8 runbook | ✅ O1–O8；[`../manual/slo.md`](../manual/slo.md) |
-| **Product P0–P6** | Cell / 兼容 / SLO / Benchmark / 多租户 Batch 1 | ✅ v1.3.0；真机 e2e/压测 ⏸ |
+| **Obs** | 双写 + JSON/Loki + O8 runbook | ✅ O1–O8；[`../manual/module.md`](../manual/module.md) |
+| **Product P0–P6** | 兼容 / SLO / Benchmark / 多租户 Batch 1（Serving Cell 已下线） | ✅ v1.3.0；真机 e2e/压测 ⏸ |
 
 HA 真机报告：[`../dev/ha/report.md`](../dev/ha/report.md)。Release Notes：[`../versions/v1.3.0.md`](../versions/v1.3.0.md)。
 

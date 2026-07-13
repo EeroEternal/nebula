@@ -14,8 +14,8 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd 暂缓 |
 | **N4-Obs** | O1–O10 | 可观测 | ✅ O1–O8 / ⏸ O9–O10 | SLO runbook + 告警样例已落；O9 按需 |
 | **Product P0** | P0 | 契约与观测可信度 | ✅ Batch 1–2 | 见 [`../dev/plan.md`](../dev/plan.md) |
-| **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 | 含能力 etcd 持久化、版本支持表、Cell 重试边界 |
-| **Product P2** | P2 | Serving Cell 只读接入 | ✅ Batch 1–2 / ⏸ e2e | 真机 Gateway e2e 暂缓 |
+| **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 | 含能力 etcd 持久化、版本支持表 |
+| **Product P2** | P2 | Serving Cell 只读接入 | ❌ 已移除 | CellIngress / `/cells/` 已下线，不再宣传 |
 | **Product P3** | P3 | 镜像平台 / 加速器台账 | ✅ Batch 1–2 | 兼容矩阵 + platforms 放置 + 库存 API/控制台；历史画像 ⏸ |
 | **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 | ModelSlo CRUD/评估 + 诊断时间线；真机 burn ⏸ |
 | **Product P5** | P5 | Benchmark / 推荐 / Canary | ✅ Batch 1 / ⏸ e2e | schema + scripts + BFF + 控制台；真机双引擎 ⏸ |
@@ -64,8 +64,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | `ModelSlo` 契约 + etcd `/slos/{model_uid}` CRUD | ✅ |
 | `GET .../evaluate`：Router scrape 对比目标；低流量 `insufficient_data`（不假绿） | ✅ |
 | abort/Drain 排除错误预算语义写入评估结果 | ✅ |
-| Cell 违约建议仅 capacity/config，无 worker 写操作 | ✅ |
-| `DiagnosticEvent` 聚合 deployment/placement/cell/slo | ✅ |
+| `DiagnosticEvent` 聚合 deployment/placement/slo | ✅ |
 | 控制台 `/governance`：矩阵 / 库存 / SLO / 时间线 | ✅ |
 | 真机流量 burn / Prometheus 告警实触发 | ⏸ |
 
@@ -85,31 +84,18 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 |----|------|
 | 运行时 capability 写入 etcd `/capabilities/`，BFF/模型详情展示 | ✅ |
 | Adapter `EngineVersionSupport` 静态表 + `validate_engine_version` | ✅ |
-| Cell Ingress：Router 不重试、不记 endpoint circuit（避免二次放大） | ✅ |
 | `NodeStatus.platform` + `GpuStatus` name/driver/cuda；`NEBULA_NODE_PLATFORM` | ✅ |
 | Scheduler：`EngineImage.platforms` 参与候选过滤与可解释拒绝 | ✅ |
 | 真实 SGLang Gateway / vLLM Router e2e | ⏸ 等真机环境 |
 
-### Product P2 Batch 2 勾选
+### Product P2 — Serving Cell（已移除）
+
+Serving Cell（`CellIngress` / etcd `/cells/` / BFF `/api/v2/cells` / Router 整入口选路）已从产品与代码路径下线，下列历史勾选不再作为当前能力宣传。
 
 | 项 | 状态 |
 |----|------|
-| BFF `GET/POST .../cells/.../observe`：健康探针 + Ingress `/metrics` allowlist 解析 | ✅ |
-| 缺字段显示为 null/`n/a`；`data_source: cell_ingress`；不写 `/stats/` | ✅ |
-| 刷新 `status`/`last_checked_ms` 到 etcd（Router 可感知 Unhealthy） | ✅ |
-| 控制台 `/cells`：列表、注册、取消注册、观测面板；内部拓扑不可见 | ✅ |
-| 真实 SGLang Gateway / vLLM Router e2e | ⏸ 等真机 |
-
-### Product P2 Batch 1 勾选
-
-| 项 | 状态 |
-|----|------|
-| etcd `/cells/{model_uid}/{cell_id}` + `CellIngress` 契约（无 worker 写字段） | ✅ |
-| BFF `POST/GET/DELETE /api/v2/cells`；OpenAI `/v1/models` 探针；与 Nebula Running 互斥 | ✅ |
-| DELETE 只删 etcd 声明，不停外部 Cell；响应 `internal_topology: not_visible` | ✅ |
-| Router watch `/cells/`；Ready Cell 整入口选路，不选 Cell 内 worker | ✅ |
-| Node 不 watch `/cells/`（外部生命周期由引擎 serving 栈管理） | ✅（按设计忽略） |
-| Ingress `/metrics` 采集与控制台 Cell 视图 | ✅ Batch 2 |
+| 历史 Batch 1–2 工程交付 | ❌ 已移除 |
+| 真机 SGLang Gateway / vLLM Router e2e | ❌ 不再跟进 |
 
 ### Product P1 Batch 1 勾选
 
@@ -136,7 +122,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | `EndpointStats.kv_cache_usage` 替换伪字节字段 | ✅ |
 | scrape success/fail/timeout/parse 指标 | ✅ |
 | vLLM / SGLang metrics fixture + 解析测试 | ✅ |
-| `EngineCapability` / `ServingTopology` / `CellIngress` 契约草案 | ✅ |
+| `EngineCapability` / `ServingTopologyKind` 契约草案 | ✅ |
 | BFF latency `data_source: router` 标明 | ✅ |
 | UI 缺失 KV 显示 n/a（不用 0） | ✅ |
 
@@ -156,7 +142,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 
 ## N4-Obs — 全链路可观测
 
-设计源：[`../manual/observability.md`](../manual/observability.md)、[`../manual/loki.md`](../manual/loki.md)。
+设计源：[`../manual/module.md`](../manual/module.md)「监控与日志」。
 
 ### 目标架构（已落地）
 
@@ -183,10 +169,10 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **O4** | Node GPU/引擎 → xtrace | ✅ | heartbeat `push_metrics`；etcd `/stats/` 仍为控制面 |
 | **O5** | OTLP + W3C 传播 | ✅ | `TraceContextPropagator`；Router inject |
 | **O6** | JSON 日志（Loki 路径） | ✅ | `NEBULA_LOG_FORMAT=json` |
-| **O7** | Loki 采集文档 + 示例 | ✅ | [`../manual/loki.md`](../manual/loki.md)、`deploy/observe/` |
-| **O8** | SLO / 告警草案 | ✅ | [`../manual/slo.md`](../manual/slo.md)、`deploy/observe/prometheus-alerts.yml` |
+| **O7** | Loki 采集文档 + 示例 | ✅ | [`../manual/module.md`](../manual/module.md)、`deploy/observe/` |
+| **O8** | SLO / 告警草案 | ✅ | [`../manual/module.md`](../manual/module.md)、`deploy/observe/prometheus-alerts.yml` |
 | **O9** | 双写缺口审计 | ⏳ 持续 | Scheduler 等按需补；低基数 |
-| **O10** | xtrace 深度需求 | ⏸ 上游 | 见 observability §9 |
+| **O10** | xtrace 深度需求 | ⏸ 上游 | 见 module 监控与日志 |
 
 ### 环境变量（全链路打开）
 
@@ -262,8 +248,6 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 |------|------|
 | [`architecture.md`](./architecture.md) | 架构现状 |
 | 本文 | **排期真源**（按需 O9 / N3–N4；Product P1） |
-| [`../manual/observability.md`](../manual/observability.md) | 可观测设计权威（含上游 O10） |
-| [`../manual/slo.md`](../manual/slo.md) | SLO / 告警 runbook（O8） |
-| [`../manual/loki.md`](../manual/loki.md) | Loki 采集路径 |
-| [`../manual/ha.md`](../manual/ha.md) / [`report.md`](../dev/ha/report.md) | HA 演练与真机报告 |
+| [`../manual/module.md`](../manual/module.md) | 功能模块（可观测 / SLO / Loki / HA） |
+| [`../dev/ha/report.md`](../dev/ha/report.md) | HA 真机报告 |
 | [`../dev/stats.md`](../dev/stats.md) | etcd `/stats/` 控制面契约 |

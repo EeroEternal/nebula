@@ -165,7 +165,6 @@ pub struct IngestUsageRequest {
     pub denied_disabled: Option<u64>,
     pub model_uid: Option<String>,
     pub engine_type: Option<String>,
-    pub cell_id: Option<String>,
     pub price_id: Option<String>,
     pub window_start_ms: Option<u64>,
 }
@@ -200,7 +199,6 @@ pub async fn ingest_usage(
             cost_estimate: None,
             model_uid: req.model_uid.clone(),
             engine_type: req.engine_type.clone(),
-            cell_id: req.cell_id.clone(),
             updated_at_ms: now,
         },
     };
@@ -217,9 +215,6 @@ pub async fn ingest_usage(
     }
     if req.engine_type.is_some() {
         window.engine_type = req.engine_type;
-    }
-    if req.cell_id.is_some() {
-        window.cell_id = req.cell_id;
     }
 
     // Attach cost estimate when a price row is provided or engine matches a price.

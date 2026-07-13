@@ -156,18 +156,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/alerts", get(handlers_v2::list_alerts))
         .route("/migrate", post(handlers_v2::migrate_v1_to_v2))
         .route(
-            "/cells",
-            get(handlers_v2::list_cells).post(handlers_v2::register_cell),
-        )
-        .route(
-            "/cells/:model_uid/:cell_id",
-            get(handlers_v2::get_cell).delete(handlers_v2::deregister_cell),
-        )
-        .route(
-            "/cells/:model_uid/:cell_id/observe",
-            get(handlers_v2::observe_cell).post(handlers_v2::observe_cell),
-        )
-        .route(
             "/compat",
             get(handlers_v2::list_compat_rules).put(handlers_v2::put_compat_rule),
         )

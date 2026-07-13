@@ -141,8 +141,6 @@ pub struct UsageWindow {
     pub model_uid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_type: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cell_id: Option<String>,
     #[serde(default)]
     pub updated_at_ms: u64,
 }
@@ -337,7 +335,6 @@ mod tests {
             cost_estimate: Some(0.2),
             model_uid: None,
             engine_type: Some("vllm".into()),
-            cell_id: None,
             updated_at_ms: 0,
         };
         let s = summarize_usage("t1", &[w], Some("USD".into()));

@@ -6,14 +6,17 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+### Removed
+- **Serving Cell (CellIngress):** etcd `/cells/`、BFF `/api/v2/cells`、Router Cell 选路与不重试分支、相关契约与控制台能力已下线。
+
 ## [1.3.0] - 2026-07-13
 
-Product-alignment release covering P0–P6 from `docs/dev/plan.md`. Real GPU / native Gateway e2e and multi-tenant load tests remain deferred.
+Product-alignment release covering P0–P6 from `docs/dev/plan.md`. Real GPU e2e and multi-tenant load tests remain deferred. Serving Cell (P2) was later removed; see Unreleased.
 
 ### Added
 - **P0 Observability trust:** `kv_cache_usage` semantics, scrape health metrics/fixtures, Gateway API `data_source: router`, O8 SLO/alert runbook samples.
 - **P1 Engine Capability / Adapter:** capability contracts, static tables, dialect CLI, runtime discovery persisted to etcd `/capabilities/`, engine version support checks.
-- **P2 Serving Cell:** etcd `/cells/` CRUD, BFF observe + OpenAI probe, Router whole-ingress routing without Nebula retry/circuit amplification, console `/cells`.
+- **P2 Serving Cell (later removed):** historically shipped etcd `/cells/` CRUD and Router whole-ingress routing; capability retired — see Unreleased.
 - **P3 Compat / hardware ledger:** `NodeStatus.platform` + GPU identity, `CompatibilityRule` + etcd `/compat/`, placement rejects, inventory API, console governance matrix.
 - **P4 Model SLO / diagnostics:** `ModelSlo` + evaluate (never fake-green on low traffic), `DiagnosticEvent` timeline, console governance SLO panel.
 - **P5 Benchmark / recommend / canary:** `scripts/benchmark/`, etcd profiles/runs, recommend API (insufficient data → no silent default engine), canary promote/rollback, console panels.

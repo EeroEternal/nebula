@@ -15,7 +15,6 @@ const ModelLibraryView = lazy(() => import('@/components/views/model-library').t
 const AuditView = lazy(() => import('@/components/views/audit').then(m => ({ default: m.AuditView })))
 const SettingsView = lazy(() => import('@/components/views/settings').then(m => ({ default: m.SettingsView })))
 const EndpointsView = lazy(() => import('@/components/views/endpoints').then(m => ({ default: m.EndpointsView })))
-const CellsView = lazy(() => import('@/components/views/cells').then(m => ({ default: m.CellsView })))
 const GovernanceView = lazy(() => import('@/components/views/governance').then(m => ({ default: m.GovernanceView })))
 const LoginView = lazy(() => import('@/components/views/login').then(m => ({ default: m.LoginView })))
 
@@ -42,7 +41,6 @@ export const router = createBrowserRouter([
       { path: 'inference', element: <SuspenseWrapper><InferenceView /></SuspenseWrapper> },
       { path: 'inference/gateway', element: <SuspenseWrapper><GatewayView /></SuspenseWrapper> },
       { path: 'endpoints', element: <SuspenseWrapper><EndpointsView /></SuspenseWrapper> },
-      { path: 'cells', element: <SuspenseWrapper><CellsView /></SuspenseWrapper> },
       { path: 'governance', element: <SuspenseWrapper><GovernanceView /></SuspenseWrapper> },
       { path: 'infrastructure/nodes', element: <SuspenseWrapper><NodesView /></SuspenseWrapper> },
       { path: 'infrastructure/images', element: <SuspenseWrapper><ImagesView /></SuspenseWrapper> },

@@ -3,9 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use nebula_common::{
-    CellHealthStatus, CellIngress, EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext,
-};
+use nebula_common::{EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext};
 
 pub mod strategy;
 
@@ -47,8 +45,6 @@ impl std::fmt::Display for RouteError {
 
 pub struct Router {
     endpoints: DashMap<(String, u32), EndpointInfo>,
-    /// Native Serving Cells keyed by (model_uid, cell_id). Prefer whole-ingress routing.
-    cells: DashMap<(String, String), CellIngress>,
     stats: DashMap<(String, u32), EndpointStats>,
     session_affinity: DashMap<String, (String, u32)>,
     strategy: Box<dyn RoutingStrategy>,
@@ -101,7 +97,6 @@ impl Router {
             .unwrap_or(30_000);
         Arc::new(Self {
             endpoints: DashMap::new(),
-            cells: DashMap::new(),
             stats: DashMap::new(),
             session_affinity: DashMap::new(),
             strategy,
@@ -120,41 +115,6 @@ impl Router {
 
     pub fn strategy_name(&self) -> &'static str {
         self.strategy.name()
-    }
-
-    pub fn replace_all_cells(&self, cells: Vec<CellIngress>) {
-        self.cells.clear();
-        for cell in cells {
-            // Ensure resolve_model accepts the cell's model_uid as an identifier.
-            self.model_uids_to_names
-                .insert(cell.model_uid.clone(), cell.model_uid.clone());
-            self.cells
-                .insert((cell.model_uid.clone(), cell.cell_id.clone()), cell);
-        }
-    }
-
-    pub fn upsert_cell(&self, cell: CellIngress) {
-        self.model_uids_to_names
-            .insert(cell.model_uid.clone(), cell.model_uid.clone());
-        self.cells
-            .insert((cell.model_uid.clone(), cell.cell_id.clone()), cell);
-    }
-
-    pub fn remove_cell(&self, model_uid: &str, cell_id: &str) {
-        self.cells
-            .remove(&(model_uid.to_string(), cell_id.to_string()));
-    }
-
-    /// Prefer a Ready Serving Cell ingress for `model_uid`, if any.
-    fn select_ready_cell(&self, model_uid: &str) -> Option<EndpointInfo> {
-        self.cells
-            .iter()
-            .filter(|e| {
-                let c = e.value();
-                c.model_uid == model_uid && c.status == CellHealthStatus::Ready
-            })
-            .map(|e| e.value().as_route_endpoint())
-            .next()
     }
 
     pub fn replace_all_endpoints(&self, infos: Vec<EndpointInfo>) {
@@ -347,22 +307,6 @@ impl Router {
         plan_version: Option<u64>,
         exclude: Option<(&str, u32)>,
     ) -> Result<EndpointInfo, RouteError> {
-        // Native Serving Cell: whole-ingress routing takes precedence over worker selection.
-        // Skip plan_version / least-pending — Nebula must not pick P/D workers inside the Cell.
-        if let Some(ep) = self.select_ready_cell(model_uid) {
-            let excluded = exclude
-                .map(|(m, r)| m == ep.model_uid.as_str() && r == ep.replica_id)
-                .unwrap_or(false);
-            if !excluded {
-                tracing::debug!(
-                    model_uid=%model_uid,
-                    cell_node=%ep.node_id,
-                    "routing to Serving Cell ingress"
-                );
-                return Ok(ep);
-            }
-        }
-
         // Session affinity check
         if let Some(session_id) = ctx.session_id.as_deref() {
             if let Some(aff) = self.session_affinity.get(session_id) {
@@ -623,48 +567,5 @@ mod plan_version_tests {
             router.route_with_plan_version(&ctx, "m1", 1).unwrap_err(),
             RouteError::NoEndpoint
         ));
-    }
-
-    #[test]
-    fn ready_cell_prefers_whole_ingress_over_workers() {
-        use nebula_common::{
-            CellHealthStatus, CellIngress, InternalTopologyVisibility, ServingTopology,
-            ServingTopologyKind,
-        };
-
-        let router = Router::new();
-        router.upsert_endpoint(ready_ep("m1", 0, 1));
-        router.upsert_endpoint(ready_ep("m1", 1, 1));
-        router.upsert_cell(CellIngress {
-            cell_id: "gw-1".into(),
-            model_uid: "m1".into(),
-            base_url: "http://127.0.0.1:30000".into(),
-            topology: ServingTopology {
-                kind: ServingTopologyKind::NativeGateway,
-                native_stack: Some("sglang-model-gateway".into()),
-                notes: None,
-            },
-            health_url: None,
-            metrics_url: None,
-            engine_type: Some("sglang".into()),
-            engine_version: None,
-            status: CellHealthStatus::Ready,
-            internal_topology: InternalTopologyVisibility::NotVisible,
-            last_checked_ms: 1,
-            updated_at_ms: 1,
-        });
-
-        let ctx = ExecutionContext {
-            request_id: "r1".into(),
-            session_id: None,
-            tenant_id: None,
-            priority: None,
-            deadline_ms: None,
-            budget_tokens: None,
-        };
-        let ep = router.route_with_plan_version(&ctx, "m1", 1).unwrap();
-        assert_eq!(ep.node_id, "cell:gw-1");
-        assert_eq!(ep.base_url.as_deref(), Some("http://127.0.0.1:30000"));
-        assert_eq!(ep.replica_id, 0);
     }
 }

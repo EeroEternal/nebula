@@ -9,7 +9,6 @@
 Nebula 的优化目标不是替代 vLLM、SGLang 或其原生 Gateway，而是成为本地 / 专有化推理环境中的跨引擎控制面：
 
 - 统一管理普通引擎副本的部署、放置、生命周期和流量接入
-- 将原生 Serving Cell 作为整体入口发现、接入、观测和治理
 - 管理引擎、版本、镜像、硬件和模型之间的兼容关系
 - 用统一 SLI、变更事件和成本数据支持诊断、SLO 与选型
 - 提供多租户、审计、灰度、回滚和故障处置能力
@@ -18,9 +17,8 @@ Nebula 的优化目标不是替代 vLLM、SGLang 或其原生 Gateway，而是�
 
 ## 2. 不可突破的边界
 
-- 原生 Serving Cell 内部的 worker 生命周期、P/D 比例、KV 协同和请求调度归 vLLM / SGLang serving 栈。
-- Nebula 不创建、删除、注册或扩缩原生 Cell 的 Prefill / Decode worker。
-- 普通副本与原生 Cell 必须分别只有一个状态 owner，不能形成双重 reconcile。
+- Nebula 管理普通引擎副本的生命周期与路由；不接管引擎原生 Gateway / PD 栈内部 worker。
+- 每种部署形态必须只有一个状态 owner，不能形成双重 reconcile。
 - Nebula 不复制引擎原生 cache-aware、PD 或 gRPC tokenizer 路由。
 - Engine-Passthrough 仍是默认数据路径；EngineShim 只有在明确能力缺口出现时启用。
 - `/stats/` 只保存实时控制决策必需字段，不承载历史、原始指标或 worker 清单。
@@ -36,7 +34,7 @@ Nebula 的优化目标不是替代 vLLM、SGLang 或其原生 Gateway，而是�
 | 普通副本路由         | 已实现  | least-pending、KV、prefix 策略及熔断、重试、过载保护                                            |
 | 普通副本弹性         | 已实现  | 基于 pending / KV 阈值扩缩                                                             |
 | Engine Adapter | 部分实现 | 启停/健康/scrape + 校验/静态表/运行时探测 + 方言 CLI + `/capabilities/` + 版本支持；完整镜像矩阵持续演进 |
-| Serving Cell   | 部分实现 | Batch 1–2 + Cell 不重试边界；真机 Gateway e2e 暂缓                                         |
+| Serving Cell   | 已移除  | CellIngress / `/cells/` / 控制台接入已下线                                                     |
 | 引擎可观测          | 部分实现 | `kv_cache_usage`、scrape 健康、fixture、ModelSlo 评估已落；真机 burn 暂缓               |
 | 镜像管理           | 部分实现 | 注册/预拉/GC + platforms 放置 + 兼容矩阵 CRUD；缺历史画像                                        |
 | 加速器台账          | 部分实现 | name/driver/cuda/platform + 库存 API/控制台；缺历史利用率库                                   |
@@ -54,13 +52,14 @@ Nebula 的优化目标不是替代 vLLM、SGLang 或其原生 Gateway，而是�
 ```text
 P0 契约、边界和观测可信度
  ├─→ P1 Engine Capability 与 Adapter 基座
- ├─→ P2 原生 Serving Cell 只读接入
  └─→ P3 镜像兼容矩阵与硬件台账
 
 P0 + P1 ─→ P4 统一 SLI、SLO 与诊断
 P3 + P4 ─→ P5 Benchmark、推荐、灰度与回滚
 P4      ─→ P6 多租户与成本治理
 P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
+
+（P2 Serving Cell 只读接入：已移除，不再演进）
 ```
 
 阶段编号表达依赖顺序。P0–P6 Batch 1 已随 v1.3.0 发布；P7 与真机验收按需开启。
@@ -73,8 +72,7 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 
 ### 交付物
 
-- 定义 `EngineCapability`、`ServingTopology`、`CellIngress` 的 JSON / Rust 契约草案。 ✅（`nebula_common::capability`）
-- `ServingTopology` 至少能识别 `standalone`、`replicated`、`native_gateway` 和 `pd_disaggregated`，但原生拓扑只记录能力和 Ingress。 ✅
+- 定义 `EngineCapability`、`ServingTopologyKind`（`standalone` / `replicated`）的 JSON / Rust 契约。 ✅（`nebula_common::capability`）
 - 为 vLLM / SGLang 建立按版本保存的 `/metrics` fixture 和解析兼容测试。 ✅
 - 为 engine scrape 增加成功、失败、超时、解析失败和 stale 指标。 ✅（Node `nebula_node_engine_scrape_result`；Router stale 既有）
 - 修正 `kv_cache_used_bytes` / `kv_cache_free_bytes` 当前实际为比例刻度而非真实字节的命名或展示语义。 ✅ → `kv_cache_usage`
@@ -86,7 +84,6 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 
 - 上游指标名或格式变化会触发 fixture 测试失败，并指出受影响版本。
 - Prometheus、xtrace、BFF、UI 和文档对统一指标使用相同单位。
-- `native_gateway` 契约没有 P/D worker assignment 或写操作。
 - 引擎不可达、指标不支持和数据陈旧在 API / UI 中可区分。
 - 观测后端故障不影响推理热路径与 etcd 实时控制面。
 
@@ -114,42 +111,9 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 - Adapter 能区分 unsupported 与探测失败。
 - 新增引擎必须通过统一 Adapter 契约测试，而不是在 Scheduler / Router 中增加专用分支。
 
-## 7. P2：原生 Serving Cell 只读接入
+## 7. P2：原生 Serving Cell 只读接入（已移除）
 
-### 目标
-
-让 SGLang Model Gateway、vLLM Router 等原生 serving 入口进入 Nebula 的统一服务视图，同时不接管其内部 worker。
-
-### 交付物
-
-- 新增外部托管 `CellIngress` 的声明、注册、健康检查和删除流程。
-- Router 将 Cell Ingress 视为整体上游，不直接发现或选择 Cell 内 worker。
-- 支持 Ingress 的 OpenAI 兼容性、模型身份和能力校验。
-- 采集 Ingress `/metrics`、健康和官方只读状态。
-- 上游存在稳定只读 API 时，可展示 worker 角色、注册和健康快照；否则明确显示“内部拓扑不可见”。
-- 为 Cell Ingress 定义重试、熔断和超时所有权，避免 Nebula 与原生 Gateway 重复放大请求。
-- 控制台增加 Cell 入口、能力、健康、版本和观测来源视图。
-
-### 验收门槛
-
-- SGLang Model Gateway 和 vLLM Router 至少各完成一次真实 Ingress 接入验证。
-- 推理流量只到达 Cell Ingress，不绕过它直达 P/D worker。
-- Node 不对 External Ingress 执行 stop、restart、register-worker 或 scale-worker。
-- 缺少 worker API 时，系统不推测内部拓扑或以“0 worker”误报。
-- 删除 Nebula 中的接入声明不会删除或停止外部 Serving Cell。
-
-### Batch 1 进度（工程）
-
-
-| 项                                         | 状态                         |
-| ----------------------------------------- | -------------------------- |
-| `CellIngress` / etcd `/cells/`            | ✅                          |
-| BFF 注册 / 列表 / 删除 + OpenAI 探针 + Running 互斥 | ✅                          |
-| Router 整入口优先选路                            | ✅                          |
-| Node 不管理外部 Cell                           | ✅（不 watch `/cells/`）       |
-| Ingress metrics / 控制台视图                   | ✅（`/observe` + `/cells` 页） |
-| 真实 Gateway e2e                            | ⏸ 等真机环境                    |
-
+该阶段曾规划将 SGLang Model Gateway / vLLM Router 等原生入口以整 Cell Ingress 只读接入 Nebula。**Serving Cell（CellIngress / etcd `/cells/` / BFF `/api/v2/cells` / Router 整入口选路）已从产品与代码路径下线**，不再作为交付或演进目标。
 
 ## 8. P3：镜像兼容矩阵与加速器资源平面
 
@@ -193,7 +157,7 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 
 让 Nebula 能跨引擎比较服务表现、定位故障并提供有证据的治理建议。
 
-详细指标实施见 [`../manual/observability.md`](../manual/observability.md) 与 [`stats.md`](stats.md)。
+详细指标实施见 [`../manual/module.md`](../manual/module.md)与 [`stats.md`](stats.md)。
 
 ### 交付物
 
@@ -201,10 +165,10 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 - 指标标明来源：代理测量、引擎指标或 Node 采集，禁止混成同一序列。
 - 原始引擎指标使用 allowlist 和独立命名空间，不进入 etcd `/stats/`。
 - 建立模型级 SLO 对象：TTFT、TPOT、可用性、吞吐和可选预算约束。
-- 完成 SLO / 告警 runbook，明确 abort / 主动 Drain 不计入 5xx 错误预算。 ✅（[`../manual/slo.md`](../manual/slo.md)、O8）
+- 完成 SLO / 告警 runbook，明确 abort / 主动 Drain 不计入 5xx 错误预算。 ✅（[`../manual/module.md`](../manual/module.md)、O8）
 - BFF 聚合 Gateway、Router、Engine、Node 与部署变更事件。
-- 控制台支持按模型、引擎、版本、节点、Cell 和时间窗口下钻。
-- 普通副本可生成扩缩建议；原生 Serving Cell 只生成容量或配置建议。
+- 控制台支持按模型、引擎、版本、节点和时间窗口下钻。
+- 普通副本可生成扩缩建议。
 
 ### 验收门槛
 
@@ -212,7 +176,6 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 - vLLM / SGLang 相同 SLI 使用相同单位，不支持字段显示 unsupported。
 - 故障演练能定位错误起点、影响范围和关联变更。
 - SLO 违约事件包含证据窗口、阈值、数据来源和建议。
-- 任何针对原生 Cell 的建议都不包含 worker 写操作。
 
 ### Batch 进度（工程）
 
@@ -274,7 +237,7 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 - `ExecutionContext` 全链路携带 `tenant_id`、priority、deadline 和预算信息。 ✅（`x-nebula-*` headers；auth tenant 覆盖客户端伪造）
 - 支持租户级 RPS、并发、token 和模型访问配额。 ✅（`TenantQuota` + Gateway `TenantAdmission`）
 - 准入控制在 Gateway / Router 边界执行，不把租户策略推入原生引擎。 ✅（Gateway 边界；引擎透传）
-- 建立租户、模型、引擎版本和 Cell 维度的用量与成本归因。 ✅（`/usage/` + `/pricing/` + cost summary）
+- 建立租户、模型、引擎版本维度的用量与成本归因。 ✅（`/usage/` + `/pricing/` + cost summary）
 - 所有配额、策略、发布和治理动作进入审计日志。 ✅（audit 含 `tenant_id` / `deny_code` tags）
 - 控制台提供租户 SLO、用量、成本和拒绝原因视图。 ✅（`/governance` 租户区；拒绝 breakdown）
 
@@ -315,7 +278,7 @@ TensorRT-LLM、MLX、llama.cpp 或其他引擎只有满足以下条件才进入�
 
 - Passthrough 无法提供明确且高价值的引擎能力
 - 原生 Gateway 无法直接接入或无法满足协议要求
-- Shim 不复制原生 Cell 内路由和 worker 管理
+- Shim 不复制引擎原生 Gateway 内路由和 worker 管理
 - 性能收益或兼容价值有可重复 benchmark 证据
 - 故障时可以回退 Native HTTP Passthrough
 
@@ -339,7 +302,6 @@ TensorRT-LLM、MLX、llama.cpp 或其他引擎只有满足以下条件才进入�
 
 - 引擎配置、外部 Ingress 和镜像来源需要准入校验。
 - 日志、指标和 trace 不记录 prompt、generation、token 或 secret，除非有明确脱敏策略。
-- 外部 Cell 只读凭据与推理凭据分离。
 
 ### 测试
 
@@ -347,7 +309,7 @@ TensorRT-LLM、MLX、llama.cpp 或其他引擎只有满足以下条件才进入�
 - Adapter：fixture、命令生成、健康、失败恢复和真实引擎 smoke test。
 - 控制面：watch、CAS、lease、stale、Drain、回滚和 HA。
 - 数据面：SSE、abort、超时、重试、熔断和大请求。
-- 产品：真实硬件、不同引擎版本、原生 Cell、租户隔离和故障演练。
+- 产品：真实硬件、不同引擎版本、租户隔离和故障演练。
 
 ## 14. 成功指标
 
@@ -369,7 +331,7 @@ TensorRT-LLM、MLX、llama.cpp 或其他引擎只有满足以下条件才进入�
 
 | 风险                       | 控制措施                                         |
 | ------------------------ | -------------------------------------------- |
-| Nebula 越权管理原生 P/D worker | Cell 仅 External Ingress；契约和集成测试禁止 worker 写操作 |
+| Nebula 越权管理引擎原生 P/D worker | 不接入 Serving Cell；控制面只管理普通副本 |
 | 指标版本漂移                   | 按版本 fixture、allowlist、unsupported 三态         |
 | 兼容矩阵只存不消费                | BFF 校验与 Scheduler 过滤必须同时上线                   |
 | SLO 数据不完整却自动治理           | 默认建议模式；数据质量门槛和置信度                            |
@@ -383,7 +345,7 @@ TensorRT-LLM、MLX、llama.cpp 或其他引擎只有满足以下条件才进入�
 
 - 本文是产品定位到工程工作的全面映射，不替代架构设计或迭代任务系统。
 - `[../arch/roadmap.md](../arch/roadmap.md)` 继续记录当前执行批次和状态。
-- [`../manual/observability.md`](../manual/observability.md) / [`stats.md`](stats.md) 负责引擎可观测与 `/stats/` 契约细节。
+- [`../manual/module.md`](../manual/module.md) / [`stats.md`](stats.md) 负责引擎可观测与 `/stats/` 契约细节。
 - 每个阶段启动前应拆成可独立验收的工程项，并指定 owner、依赖和回滚策略。
 - 每个阶段完成后必须更新当前基线、验收证据和产品文档中的能力状态。
 
