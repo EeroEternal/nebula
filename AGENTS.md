@@ -10,6 +10,7 @@ This document defines rules and conventions for AI agents and developers working
   - `docs/dev/` — developer docs, engineering checklists, component designs
   - `docs/arch/` — architecture and optimization plans
   - Index: `docs/README.md`
+  - Do not commit environment-specific runbooks, internal IPs, or secrets under `docs/`.
 - **Scripts & Tests:**
     - All standalone test scripts, debug scripts, and utility scripts must be placed in the `scripts/` directory.
     - Production-ready binaries and service management scripts belong in `bin/`.

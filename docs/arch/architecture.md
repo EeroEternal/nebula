@@ -42,10 +42,55 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 
 默认路径：**Engine-Passthrough**（Gateway → Router → 引擎原生 HTTP）。EngineShim gRPC 为可选增强。
 
+```mermaid
+graph TB
+    Client["Client / Frontend"]
+    GW["Gateway :8081"]
+    BFF["BFF :18090"]
+    Router["Router :18081"]
+    Sched["Scheduler"]
+    Node["Node Agent"]
+    ETCD["etcd"]
+    PG["PostgreSQL"]
+    XT["xtrace"]
+    Engine["vLLM / SGLang / Cell Ingress"]
+
+    Client -->|"inference"| GW
+    Client -->|"dashboard"| BFF
+    GW -->|"proxy"| Router
+    Router -->|"proxy"| Engine
+    BFF -->|"auth"| PG
+    BFF -.->|"meta"| ETCD
+    BFF -->|"observe"| XT
+    Router -.->|"meta"| ETCD
+    Sched -.->|"reconcile"| ETCD
+    Node -.->|"watch"| ETCD
+    Node -->|"manage"| Engine
 ```
-Client → Gateway → Router → Engine / Cell Ingress
-                ↗
-Node / Scheduler / BFF ⇄ etcd
+
+```mermaid
+graph BT
+    common["nebula-common"]
+    meta["nebula-meta"]
+    router["nebula-router"]
+    scheduler["nebula-scheduler"]
+    node["nebula-node"]
+    gateway["nebula-gateway"]
+    bff["nebula-bff"]
+    cli["nebula-cli"]
+
+    meta --> common
+    router --> common
+    router --> meta
+    scheduler --> common
+    scheduler --> meta
+    node --> common
+    node --> meta
+    gateway --> common
+    gateway --> meta
+    bff --> common
+    bff --> meta
+    cli --> common
 ```
 
 生产元数据默认可单节点 etcd；接入面可多副本（见 HA 文档）。三节点 etcd 能力已旁路验证，生产迁移暂缓。
@@ -71,7 +116,7 @@ Node / Scheduler / BFF ⇄ etcd
 | `/tenants/{id}` | `Tenant` | 租户与配额 |
 | `/pricing/{id}` | `CostPriceConfig` | 单位 token 定价 |
 | `/usage/{tenant_id}/{window}` | `UsageWindow` | 用量与拒绝归因窗口 |
-| `/model_requests/` | 遗留 | 仅失败回写等；新路径不写 |
+| `/model_requests/` | 遗留 | 只读兼容；新路径不写。存量可一次性 `nebula-cli admin migrate`（或 BFF `POST /api/v2/migrate`）转为 Spec+Deployment 后删除 |
 
 约束：placement 全路径 CAS；Router 每模型 `plan_version`；watch 用快照 revision，compact/重连后全量校正（endpoints / placements / stats / cells）。Prometheus **禁止**高基数 `tenant_id` label。
 

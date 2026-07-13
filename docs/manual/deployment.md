@@ -394,4 +394,4 @@ OBSERVE_TOKEN=<API_BEARER_TOKEN>
 NEBULA_ENV_FILE=/path/to/nebula.env ./bin/nebula-up.sh
 ```
 
-远端实操 SOP（登录、rsync 部署、重启、测试）见：`docs/memory/remote_login_deploy_test.md`。
+远端部署可参考 [`../dev/ha/runbook-phase-c.md`](../dev/ha/runbook-phase-c.md) 与 [`../dev/setup.md`](../dev/setup.md)。

@@ -1,8 +1,8 @@
-# 引擎可观测开发与优化计划
+# 引擎可观测细节附录
 
-> 状态：开发计划（2026-07-12）
+> 状态：细节附录（2026-07-13）。**排期与验收以** [`product_plan.md`](./product_plan.md) **P0/P4 与** [`../arch/optimization.md`](../arch/optimization.md) **为准**；总体可观测规范见 [`observability.md`](./observability.md)，实时契约见 [`details/stats.md`](./details/stats.md)。
 >
-> 产品边界见 [`../product/positioning.md`](../product/positioning.md)，总体可观测规范见 [`observability.md`](observability.md)，实时数据契约见 [`details/stats.md`](details/stats.md)。
+> 本文保留引擎 scrape / fixture / Cell 只读采集细则，不再作为独立排期真源。
 
 ## 1. 目标与边界
 

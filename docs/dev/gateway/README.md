@@ -2,12 +2,12 @@
 
 边界：[`../api_ownership.md`](../api_ownership.md)。架构：[`../../arch/architecture.md`](../../arch/architecture.md)。排期：[`../../arch/optimization.md`](../../arch/optimization.md)。
 
-Gateway = 外部入口、鉴权、审计、协议适配、abort；**不做**实例选择。Router = 选路、重试、熔断、代理。
+Gateway = 外部入口、鉴权、租户准入、审计、协议适配、abort；**不做**实例选择。Router = 选路、重试、熔断、代理（含 Cell 整入口）。
 
 ## 已落地能力（摘要）
 
-Router：可配置重试与失败 endpoint 排除、请求体上限、熔断、stale stats 过滤、`/metrics`。  
-Gateway：请求体上限、共享鉴权、审计、`x-nebula-model`、`/metrics`、双写 xtrace。
+Router：可配置重试与失败 endpoint 排除、请求体上限、熔断、stale stats 过滤、Cell 不重试放大、`/metrics`。  
+Gateway：请求体上限、共享鉴权（可选 `token:role:tenant_id`）、多租户准入（`NEBULA_MULTI_TENANT`）、审计、`x-nebula-model` / ExecutionContext、`/metrics`、双写 xtrace。
 
 ## 常用环境变量
 
@@ -17,7 +17,9 @@ Gateway：请求体上限、共享鉴权、审计、`x-nebula-model`、`/metrics
 | `NEBULA_ROUTER_RETRY_MAX` | `1` |
 | `NEBULA_ROUTER_RETRY_BACKOFF_MS` | `75` |
 | `NEBULA_GATEWAY_MAX_REQUEST_BODY_BYTES` | `4194304` |
-| `NEBULA_AUTH_TOKENS` | 生产必配；开发免鉴权用 `NEBULA_AUTH_DISABLED=true` |
+| `NEBULA_AUTH_TOKENS` | 生产必配；`token:role` 或 `token:role:tenant_id`；开发免鉴权用 `NEBULA_AUTH_DISABLED=true` |
+| `NEBULA_MULTI_TENANT` | 默认关闭；开启后 Gateway 读 etcd `/tenants/` 做配额准入 |
+| `NEBULA_AUTH_RATE_LIMIT_PER_MINUTE` | `120` |
 
 ## 灰度与回滚
 

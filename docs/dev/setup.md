@@ -8,9 +8,9 @@
 
 ```bash
 # 只克隆最近的提交历史
-git clone --depth 1 https://github.com/lipish/nebula.git
+git clone --depth 1 https://github.com/EeroEternal/nebula.git
 # 或者克隆特定分支
-git clone --depth 1 --branch main https://github.com/lipish/nebula.git
+git clone --depth 1 --branch main https://github.com/EeroEternal/nebula.git
 ```
 
 这将显著减少克隆时间和磁盘空间占用。

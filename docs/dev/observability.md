@@ -6,7 +6,7 @@
 > Loki 采集：[`loki.md`](./loki.md)。
 
 
-本文合并原 `observability_external.md`、`observability_contract.md`、`memory/observability.md`、`gateway/gateway_observability.md`。
+本文合并原分散的可观测说明（外部接入、契约、Gateway 观测等）。
 
 ---
 

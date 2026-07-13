@@ -8,14 +8,13 @@
 - [部署指南（用户向）](../manual/deployment.md)
 - [产品定位对齐开发与优化计划](./product_plan.md)（P0–P6 Batch 1 @ v1.3.0）
 - [API Ownership](./api_ownership.md)
-- [Deployments 迁移](./migrate_deployments.md)
 - [Engine `/stats/` 契约](./details/stats.md)
 
 ## 可观测
 
 - [可观测性设计](./observability.md)
 - [SLO / 告警 Runbook（O8）](./slo_alerts.md)
-- [vLLM / SGLang 引擎可观测开发与优化计划](./engine_observability_plan.md)
+- [引擎可观测细节附录](./engine_observability_plan.md)（排期以 product_plan / optimization 为准）
 - [Loki 日志路径](./loki.md)
 
 ## HA
@@ -33,8 +32,3 @@
 
 - [前端设计规范](./frontend_design_spec.md)
 - [i18n 清单](./i18n_checklist.md)
-
-## 内部笔记
-
-- [Memory](./memory/) — 非正式环境记录
-- [历史架构归档](../arch/history.md)
