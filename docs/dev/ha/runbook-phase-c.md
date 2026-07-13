@@ -1,6 +1,6 @@
 # HA Phase C Runbook — 接入与 etcd 多副本
 
-> 对齐 [`ha_roadmap.md`](./ha_roadmap.md) Phase C/D（N1 主体已完成；生产 etcd 三节点暂缓）。  
+> N1 主体已完成；生产 etcd 三节点暂缓。排期见 [`../../arch/optimization.md`](../../arch/optimization.md)。  
 > Compose 拓扑：仓库根目录 `docker-compose.ha.yml`。
 
 ## 1. 目标拓扑
@@ -68,7 +68,7 @@ docker compose -f docker-compose.ha.yml start etcd3
 ```bash
 # 找出 /healthz=200 的实例后 stop
 docker compose -f docker-compose.ha.yml stop scheduler-a
-# 另一实例应变 leader（< 目标窗口，见 ha_roadmap）
+# 另一实例应变 leader（约 <15s；见真机报告）
 sleep 15
 docker compose -f docker-compose.ha.yml exec scheduler-b wget -q -O- http://127.0.0.1:18082/healthz
 # 可选：复活旧主，确认 fencing（旧主不得写 placement）
@@ -86,9 +86,9 @@ docker compose -f docker-compose.ha.yml start scheduler-a
 - scheduler leader 切换后旧主 fencing 生效  
 - 故障期间成功率 / RTO 可观测  
 
-## 5. 报告模板
+## 5. 报告
 
-见 [`report-template.md`](./report-template.md)。
+演练结果写入或对照 [`report-20260711.md`](./report-20260711.md)；新环境可按同结构自拟报告。
 
 ## 6. 不做
 

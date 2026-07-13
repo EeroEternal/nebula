@@ -193,7 +193,7 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 
 让 Nebula 能跨引擎比较服务表现、定位故障并提供有证据的治理建议。
 
-详细指标实施见 [`engine_observability_plan.md`](engine_observability_plan.md)（细节附录）。
+详细指标实施见 [`observability.md`](observability.md) 与 [`details/stats.md`](details/stats.md)。
 
 ### 交付物
 
@@ -383,7 +383,7 @@ TensorRT-LLM、MLX、llama.cpp 或其他引擎只有满足以下条件才进入�
 
 - 本文是产品定位到工程工作的全面映射，不替代架构设计或迭代任务系统。
 - `[../arch/optimization.md](../arch/optimization.md)` 继续记录当前执行批次和状态。
-- [`engine_observability_plan.md`](engine_observability_plan.md) 作为 P0 / P4 引擎可观测细节附录（排期以本文与 optimization 为准）。
+- [`observability.md`](observability.md) / [`details/stats.md`](details/stats.md) 负责引擎可观测与 `/stats/` 契约细节。
 - 每个阶段启动前应拆成可独立验收的工程项，并指定 owner、依赖和回滚策略。
 - 每个阶段完成后必须更新当前基线、验收证据和产品文档中的能力状态。
 
