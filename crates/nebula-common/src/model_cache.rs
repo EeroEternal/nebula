@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// A cached model on a specific node.
 ///
-/// Stored in etcd under `/model_cache/{node_id}/{model_name_hash}`.
+/// Stored in etcd under `/model_cache/{node_id}/{model_name_hash}` (node lease).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCacheEntry {
     /// Node that holds this cache.
@@ -93,7 +93,7 @@ pub struct DownloadProgress {
 
 /// Disk status for a node's model directory.
 ///
-/// Stored in etcd under `/node_disk/{node_id}`.
+/// Stored in etcd under `/node_disk/{node_id}` (node lease).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeDiskStatus {
     pub node_id: String,
@@ -140,7 +140,7 @@ pub enum AlertType {
 
 /// Disk space alert for a node.
 ///
-/// Stored in etcd under `/alerts/{node_id}/disk_warning` or `/alerts/{node_id}/disk_critical`.
+/// Stored in etcd under `/alerts/{node_id}/disk_warning` or `/alerts/{node_id}/disk_critical` (node lease).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiskAlert {
     pub node_id: String,

@@ -815,7 +815,13 @@ pub async fn delete_model(store: &dyn MetaStore, model_uid: &str) -> Result<usiz
             for (key, _, _) in nodes {
                 if let Some(node_id) = key.strip_prefix("/node_disk/").filter(|id| !id.is_empty()) {
                     let gc_key = format!("/model_gc_requests/{node_id}/{model_uid}");
-                    if store.put(&gc_key, payload.clone(), None).await.is_ok() {
+                    // TTL so orphaned requests do not linger if the node never returns.
+                    const MODEL_GC_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+                    if store
+                        .put(&gc_key, payload.clone(), Some(MODEL_GC_TTL_MS))
+                        .await
+                        .is_ok()
+                    {
                         queued_gc_nodes += 1;
                     }
                 }

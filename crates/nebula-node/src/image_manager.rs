@@ -7,7 +7,7 @@ use tokio::process::Command;
 use nebula_common::{EngineImage, ImagePullStatus, NodeImageStatus, VersionPolicy};
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
-use crate::util::now_ms;
+use crate::util::{now_ms, put_node_ephemeral};
 
 /// Interval between image garbage-collection sweeps.
 const GC_INTERVAL_SECS: u64 = 3600; // 1 hour
@@ -16,7 +16,12 @@ const GC_INTERVAL_SECS: u64 = 3600; // 1 hour
 /// 1. On startup, scan all registered images and pull any that are missing locally.
 /// 2. Watch `/images/` for new/updated registrations and pull as needed.
 /// 3. Periodically clean up local images that are no longer in the registry.
-pub async fn image_manager_loop(store: EtcdMetaStore, node_id: String) {
+pub async fn image_manager_loop(
+    store: EtcdMetaStore,
+    node_id: String,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
+) {
     // Initial scan: pull all registered images that are missing locally
     let mut start_rev: u64 = 0;
     if let Ok(kvs) = store.list_prefix("/images/").await {
@@ -26,7 +31,13 @@ pub async fn image_manager_loop(store: EtcdMetaStore, node_id: String) {
             }
             if let Ok(img) = serde_json::from_slice::<EngineImage>(&val) {
                 if img.pre_pull {
-                    tokio::spawn(pull_if_missing(store.clone(), node_id.clone(), img));
+                    tokio::spawn(pull_if_missing(
+                        store.clone(),
+                        node_id.clone(),
+                        img,
+                        ttl_ms,
+                        lease_id,
+                    ));
                 }
             }
         }
@@ -63,7 +74,13 @@ pub async fn image_manager_loop(store: EtcdMetaStore, node_id: String) {
                     if let Ok(img) = serde_json::from_slice::<EngineImage>(&val) {
                         tracing::info!(image_id=%img.id, image=%img.image, "image registry updated");
                         if img.pre_pull {
-                            tokio::spawn(pull_if_missing(store.clone(), node_id.clone(), img));
+                            tokio::spawn(pull_if_missing(
+                                store.clone(),
+                                node_id.clone(),
+                                img,
+                                ttl_ms,
+                                lease_id,
+                            ));
                         }
                     }
                 }
@@ -81,7 +98,13 @@ pub async fn image_manager_loop(store: EtcdMetaStore, node_id: String) {
 
 /// Pull an image if it is not already present locally.
 /// Reports status to etcd under `/image_status/{node_id}/{image_id}`.
-async fn pull_if_missing(store: EtcdMetaStore, node_id: String, img: EngineImage) {
+async fn pull_if_missing(
+    store: EtcdMetaStore,
+    node_id: String,
+    img: EngineImage,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
+) {
     let image_ref = &img.image;
 
     // For rolling images, always re-pull to get latest digest
@@ -92,17 +115,44 @@ async fn pull_if_missing(store: EtcdMetaStore, node_id: String, img: EngineImage
 
     if !should_pull {
         tracing::debug!(image=%image_ref, "image already present locally, skipping pull");
-        report_status(&store, &node_id, &img, ImagePullStatus::Ready, None).await;
+        report_status(
+            &store,
+            &node_id,
+            &img,
+            ImagePullStatus::Ready,
+            None,
+            ttl_ms,
+            lease_id,
+        )
+        .await;
         return;
     }
 
     tracing::info!(image=%image_ref, policy=?img.version_policy, "pulling image");
-    report_status(&store, &node_id, &img, ImagePullStatus::Pulling, None).await;
+    report_status(
+        &store,
+        &node_id,
+        &img,
+        ImagePullStatus::Pulling,
+        None,
+        ttl_ms,
+        lease_id,
+    )
+    .await;
 
     match docker_pull(image_ref).await {
         Ok(()) => {
             tracing::info!(image=%image_ref, "image pulled successfully");
-            report_status(&store, &node_id, &img, ImagePullStatus::Ready, None).await;
+            report_status(
+                &store,
+                &node_id,
+                &img,
+                ImagePullStatus::Ready,
+                None,
+                ttl_ms,
+                lease_id,
+            )
+            .await;
         }
         Err(e) => {
             tracing::error!(image=%image_ref, error=%e, "failed to pull image");
@@ -112,6 +162,8 @@ async fn pull_if_missing(store: EtcdMetaStore, node_id: String, img: EngineImage
                 &img,
                 ImagePullStatus::Failed,
                 Some(e.to_string()),
+                ttl_ms,
+                lease_id,
             )
             .await;
         }
@@ -144,13 +196,15 @@ async fn docker_pull(image: &str) -> anyhow::Result<()> {
     }
 }
 
-/// Report image pull status to etcd.
+/// Report image pull status to etcd (node-ephemeral, shared lease).
 async fn report_status(
     store: &EtcdMetaStore,
     node_id: &str,
     img: &EngineImage,
     status: ImagePullStatus,
     error: Option<String>,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
 ) {
     let key = format!("/image_status/{}/{}", node_id, img.id);
     let record = NodeImageStatus {
@@ -163,7 +217,7 @@ async fn report_status(
     };
     match serde_json::to_vec(&record) {
         Ok(bytes) => {
-            if let Err(e) = store.put(&key, bytes, None).await {
+            if let Err(e) = put_node_ephemeral(store, &key, bytes, ttl_ms, lease_id).await {
                 tracing::warn!(error=%e, %key, "failed to report image status");
             }
         }

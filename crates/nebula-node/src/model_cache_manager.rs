@@ -14,7 +14,7 @@ use nebula_common::{
 };
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
-use crate::util::now_ms;
+use crate::util::{now_ms, put_node_ephemeral};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -40,10 +40,16 @@ struct ModelGcRequest {
 // ---------------------------------------------------------------------------
 
 /// Background loop that periodically scans the local model directory and
-/// reports cache entries + disk status to etcd.
-pub async fn model_cache_scan_loop(store: EtcdMetaStore, node_id: String, model_dir: String) {
+/// reports cache entries + disk status to etcd (node-ephemeral lease).
+pub async fn model_cache_scan_loop(
+    store: EtcdMetaStore,
+    node_id: String,
+    model_dir: String,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
+) {
     loop {
-        if let Err(e) = scan_and_report(&store, &node_id, &model_dir).await {
+        if let Err(e) = scan_and_report(&store, &node_id, &model_dir, ttl_ms, lease_id).await {
             tracing::warn!(error=%e, "model cache scan failed");
         }
         tokio::time::sleep(CACHE_SCAN_INTERVAL).await;
@@ -55,6 +61,8 @@ async fn scan_and_report(
     store: &EtcdMetaStore,
     node_id: &str,
     model_dir: &str,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
 ) -> anyhow::Result<()> {
     process_gc_requests(store, node_id, model_dir).await;
 
@@ -70,6 +78,8 @@ async fn scan_and_report(
         node_id,
         base,
         ts,
+        ttl_ms,
+        lease_id,
         &mut found_keys,
         &mut total_cache_bytes,
         &mut model_count,
@@ -82,6 +92,8 @@ async fn scan_and_report(
         node_id,
         base,
         ts,
+        ttl_ms,
+        lease_id,
         &mut found_keys,
         &mut total_cache_bytes,
         &mut model_count,
@@ -94,6 +106,8 @@ async fn scan_and_report(
         node_id,
         base,
         ts,
+        ttl_ms,
+        lease_id,
         &mut found_keys,
         &mut total_cache_bytes,
         &mut model_count,
@@ -108,6 +122,8 @@ async fn scan_and_report(
         total_cache_bytes,
         model_count,
         ts,
+        ttl_ms,
+        lease_id,
     )
     .await;
 
@@ -246,6 +262,8 @@ async fn scan_hf_cache(
     node_id: &str,
     base: &Path,
     ts: u64,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
     found_keys: &mut HashSet<String>,
     total_cache_bytes: &mut u64,
     model_count: &mut u32,
@@ -282,6 +300,8 @@ async fn scan_hf_cache(
             count,
             complete,
             ts,
+            ttl_ms,
+            lease_id,
         )
         .await;
         found_keys.insert(key);
@@ -296,6 +316,8 @@ async fn scan_modelscope_cache(
     node_id: &str,
     base: &Path,
     ts: u64,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
     found_keys: &mut HashSet<String>,
     total_cache_bytes: &mut u64,
     model_count: &mut u32,
@@ -337,6 +359,8 @@ async fn scan_modelscope_cache(
                 count,
                 complete,
                 ts,
+                ttl_ms,
+                lease_id,
             )
             .await;
             found_keys.insert(key);
@@ -352,6 +376,8 @@ async fn scan_direct_paths(
     node_id: &str,
     base: &Path,
     ts: u64,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
     found_keys: &mut HashSet<String>,
     total_cache_bytes: &mut u64,
     model_count: &mut u32,
@@ -391,6 +417,8 @@ async fn scan_direct_paths(
             count,
             complete,
             ts,
+            ttl_ms,
+            lease_id,
         )
         .await;
         found_keys.insert(key);
@@ -409,7 +437,7 @@ fn cache_etcd_key(node_id: &str, model_name: &str) -> String {
     format!("/model_cache/{}/{}", node_id, sanitized)
 }
 
-/// Write a ModelCacheEntry to etcd.
+/// Write a ModelCacheEntry to etcd (node-ephemeral lease).
 async fn write_cache_entry(
     store: &EtcdMetaStore,
     key: &str,
@@ -420,6 +448,8 @@ async fn write_cache_entry(
     file_count: u32,
     complete: bool,
     ts: u64,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
 ) {
     let entry = ModelCacheEntry {
         node_id: node_id.to_string(),
@@ -433,7 +463,7 @@ async fn write_cache_entry(
     };
     match serde_json::to_vec(&entry) {
         Ok(bytes) => {
-            if let Err(e) = store.put(key, bytes, None).await {
+            if let Err(e) = put_node_ephemeral(store, key, bytes, ttl_ms, lease_id).await {
                 tracing::warn!(error=%e, %key, "failed to write model cache entry");
             }
         }
@@ -538,6 +568,8 @@ async fn report_disk_status(
     model_cache_bytes: u64,
     model_count: u32,
     ts: u64,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
 ) {
     let (total_bytes, used_bytes, available_bytes) = match get_disk_usage(model_dir).await {
         Some(v) => v,
@@ -568,7 +600,7 @@ async fn report_disk_status(
     let key = format!("/node_disk/{}", node_id);
     match serde_json::to_vec(&status) {
         Ok(bytes) => {
-            if let Err(e) = store.put(&key, bytes, None).await {
+            if let Err(e) = put_node_ephemeral(store, &key, bytes, ttl_ms, lease_id).await {
                 tracing::warn!(error=%e, %key, "failed to write node disk status");
             }
         }
@@ -585,6 +617,8 @@ async fn report_disk_status(
             usage_pct,
             available_bytes,
             ts,
+            ttl_ms,
+            lease_id,
         )
         .await;
     } else if usage_pct > DISK_WARNING_THRESHOLD {
@@ -596,12 +630,14 @@ async fn report_disk_status(
             usage_pct,
             available_bytes,
             ts,
+            ttl_ms,
+            lease_id,
         )
         .await;
     }
 }
 
-/// Emit a disk alert to etcd.
+/// Emit a disk alert to etcd (node-ephemeral lease).
 async fn emit_disk_alert(
     store: &EtcdMetaStore,
     node_id: &str,
@@ -610,6 +646,8 @@ async fn emit_disk_alert(
     usage_pct: f64,
     available_bytes: u64,
     ts: u64,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
 ) {
     let alert_suffix = match alert_type {
         AlertType::DiskWarning => "disk_warning",
@@ -632,7 +670,7 @@ async fn emit_disk_alert(
     };
     match serde_json::to_vec(&alert) {
         Ok(bytes) => {
-            if let Err(e) = store.put(&key, bytes, None).await {
+            if let Err(e) = put_node_ephemeral(store, &key, bytes, ttl_ms, lease_id).await {
                 tracing::warn!(error=%e, %key, "failed to write disk alert");
             }
         }

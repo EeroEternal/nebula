@@ -130,11 +130,11 @@ async fn main() -> anyhow::Result<()> {
 
     let store = EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
 
-    // C3: one shared lease for node status + endpoints, refreshed by keepalive.
+    // C3: one shared lease for node-ephemeral keys (status/endpoints/stats/cache/…).
     let lease_ttl_secs = ((args.heartbeat_ttl_ms as f64 / 1000.0).ceil() as i64).max(10);
     let lease_id = match store.grant_lease(lease_ttl_secs).await {
         Ok(id) => {
-            tracing::info!(lease_id=id, ttl_secs=lease_ttl_secs, "granted etcd lease for status/endpoints");
+            tracing::info!(lease_id=id, ttl_secs=lease_ttl_secs, "granted etcd lease for node-ephemeral keys");
             store.spawn_lease_keepalive(id, lease_ttl_secs);
             Some(id)
         }
@@ -184,6 +184,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(image_manager::image_manager_loop(
         store.clone(),
         args.node_id.clone(),
+        args.heartbeat_ttl_ms,
+        lease_id,
     ));
 
     // Start model cache scanner: periodically scans model_dir and reports to etcd
@@ -191,6 +193,8 @@ async fn main() -> anyhow::Result<()> {
         store.clone(),
         args.node_id.clone(),
         args.vllm_model_dir.clone(),
+        args.heartbeat_ttl_ms,
+        lease_id,
     ));
 
     // Start Node HTTP API server

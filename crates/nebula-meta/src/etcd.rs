@@ -31,7 +31,7 @@ impl EtcdMetaStore {
         secs
     }
 
-    /// Grant a long-lived lease (C3). Prefer one lease for status + endpoints.
+    /// Grant a long-lived lease for all node-ephemeral keys (status, endpoints, cache, …).
     pub async fn grant_lease(&self, ttl_secs: i64) -> Result<i64> {
         let mut cli = self.client.lock().await;
         let lease = cli.lease_grant(ttl_secs.max(1), None).await?;

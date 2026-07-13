@@ -99,28 +99,29 @@ graph BT
 
 ## 3. etcd Keyspace
 
-放置准则（应进 / 借住 / 不进）见 [`../dev/etcd.md`](../dev/etcd.md)。
+放置准则与分类（A 应进 / B 节点附属 / C 借住 / D 禁止）见 [`../dev/etcd.md`](../dev/etcd.md)。
 
-| Key | 类型 | 说明 |
-|-----|------|------|
-| `/nodes/{node_id}/status` | `NodeStatus` | 心跳（lease）；含 platform / GPU 身份 |
-| `/models/{model_uid}/spec` | `ModelSpec` | 规格 |
-| `/deployments/{model_uid}` | `ModelDeployment` | 声明式期望（唯一写入口） |
-| `/placements/{model_uid}` | `PlacementPlan` | 逻辑单调 `version` + `updated_at_ms` |
-| `/endpoints/{model_uid}/{replica_id}` | `EndpointInfo` | 须带 `plan_version` |
-| `/stats/{model_uid}/{replica_id}` | `EndpointStats` | Node 写、Router watch、Scheduler list；仅实时控制字段 |
-| `/capabilities/{model_uid}/{replica_id}` | `EngineCapability` | 运行时能力快照 |
-| `/cells/{model_uid}/{cell_id}` | `CellIngress` | Serving Cell 整入口；Nebula 不写内部 worker |
-| `/compat/{id}` | `CompatibilityRule` | 镜像/平台兼容规则 |
-| `/slos/{model_uid}` | `ModelSlo` | 模型 SLO 目标 |
-| `/benchmarks/runs|profiles/…` | Benchmark | 性能画像与 run |
-| `/canaries/{id}` | `CanaryRelease` | 灰度与回滚状态 |
-| `/tenants/{id}` | `Tenant` | 租户与配额 |
-| `/pricing/{id}` | `CostPriceConfig` | 单位 token 定价 |
-| `/usage/{tenant_id}/{window}` | `UsageWindow` | 用量与拒绝归因窗口 |
-| `/model_requests/` | 遗留 | 只读兼容；新路径不写。存量可一次性 `nebula-cli admin migrate`（或 BFF `POST /api/v2/migrate`）转为 Spec+Deployment 后删除 |
+| Key | 类型 | 类 | 说明 |
+|-----|------|----|------|
+| `/nodes/{node_id}/status` | `NodeStatus` | A | 心跳（lease） |
+| `/models/{model_uid}/spec` | `ModelSpec` | A | 规格 |
+| `/deployments/{model_uid}` | `ModelDeployment` | A | 声明期望（主写：BFF） |
+| `/placements/{model_uid}` | `PlacementPlan` | A | CAS；`plan_version` |
+| `/endpoints/…` `/stats/…` `/capabilities/…` | 运行时 | A | Node 写（lease） |
+| `/cells/{model_uid}/{cell_id}` | `CellIngress` | A | 整入口；无内部 worker |
+| `/images/{id}` | `EngineImage` | A | 镜像注册；Node watch |
+| `/image_status/{node}/{id}` | `NodeImageStatus` | A | Node 写（lease） |
+| `/compat/` `/slos/` `/canaries/` | 治理 | A | 调度/发布 |
+| `/tenants/{id}` | `Tenant` | A | 配额；Gateway 可选读 |
+| `/model_gc_requests/{node}/{uid}` | GC 队列 | A | TTL；Node 处理后删 |
+| `/nebula/election/…` | 选主 | A | lease + fencing |
+| `/model_cache/` `/node_disk/` `/alerts/` | 节点运维 | B | lease |
+| `/download_progress/` | 下载进度 | B | 短 TTL |
+| `/templates/` | 模板 | C | 借住；宜迁 PG |
+| `/pricing/` `/usage/` `/benchmarks/…` | 成本/画像 | C | 借住；宜迁 PG |
+| `/model_requests/` | 遗留 | C | 只读；禁止新写 |
 
-约束：placement 全路径 CAS；Router 每模型 `plan_version`；watch 用快照 revision，compact/重连后全量校正（endpoints / placements / stats / cells）。Prometheus **禁止**高基数 `tenant_id` label。
+约束：placement 全路径 CAS；Router 每模型 `plan_version`；watch 用快照 revision，compact/重连后全量校正。Prometheus **禁止**高基数 `tenant_id` label。
 
 ---
 
