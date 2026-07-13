@@ -10,13 +10,13 @@ Nebula 是本地 / 专有化推理环境的跨引擎控制面（Gateway / Router
 git clone --depth 1 https://github.com/EeroEternal/nebula.git
 ```
 
-**文档索引：** [docs/README.md](docs/README.md)（`product/` 定位 · `manual/` 部署与 Release Notes · `dev/` 开发 · `arch/` 架构）。
+**文档索引：** [docs/README.md](docs/README.md)（`manual/` 产品与运维 · `dev/` 工程 · `arch/` 架构）。
 
 **安装依赖：** [开发环境设置](docs/dev/setup.md)（etcd、protoc、Rust ≥ 1.85 等）。
 
 **一键本地栈：** 复制 `deploy/nebula.env.example` → `deploy/nebula.env`，设置 `START_BFF=1`、`OBSERVE_AUTH_MODE=internal`，构建后执行 `./bin/nebula-up.sh`。常用端口：Gateway `8081`、Router `18081`、BFF `18090`、前端 `5173`。
 
-**鉴权：** 推理面 `NEBULA_AUTH_TOKENS=dev-token:admin`（或 `token:role:tenant_id`）+ `Authorization: Bearer …`；开发可 `NEBULA_AUTH_DISABLED=1`。多租户准入可选 `NEBULA_MULTI_TENANT=1`。详见 [部署指南](docs/manual/deployment.md) 与 [v1.3.0 Release Notes](docs/manual/release_notes_v1.3.0.md)。
+**鉴权：** 推理面 `NEBULA_AUTH_TOKENS=dev-token:admin`（或 `token:role:tenant_id`）+ `Authorization: Bearer …`；开发可 `NEBULA_AUTH_DISABLED=1`。多租户准入可选 `NEBULA_MULTI_TENANT=1`。详见 [部署指南](docs/manual/deployment.md) 与 [v1.3.0 Release Notes](docs/versions/v1.3.0.md)。
 
 ## 项目结构
 
@@ -33,6 +33,6 @@ git clone --depth 1 https://github.com/EeroEternal/nebula.git
 
 ## 能力概览（v1.3.0）
 
-声明式副本生命周期与路由；Serving Cell 只读接入；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。真机 GPU e2e 与多租户压测暂缓，见 [optimization.md](docs/arch/optimization.md)。
+声明式副本生命周期与路由；Serving Cell 只读接入；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。真机 GPU e2e 与多租户压测暂缓，见 [roadmap.md](docs/arch/roadmap.md)。
 
 全量单测：`cargo test --workspace`。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)。

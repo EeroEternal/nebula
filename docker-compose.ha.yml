@@ -13,7 +13,7 @@
 #   18081 → router LB
 #   2379  → etcd client (etcd1)
 #
-# Drill checklist: docs/dev/ha/runbook-phase-c.md
+# Drill checklist: docs/manual/ha.md
 
 version: "3.9"
 

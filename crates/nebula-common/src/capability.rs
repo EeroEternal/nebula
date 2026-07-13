@@ -1,4 +1,4 @@
-//! Engine capability and Serving Cell contracts (product_plan P0/P1).
+//! Engine capability and Serving Cell contracts (plan P0/P1).
 //!
 //! These types define ownership boundaries. Native gateway / PD topologies are
 //! recorded as ingress + capabilities only — Nebula must not invent P/D worker

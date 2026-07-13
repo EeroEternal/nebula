@@ -117,7 +117,7 @@ node:9091 + 生产 etcd:2379 (nebula-etcd 单节点)
 ssh -p 60001 bodesi@61.163.103.118
 bash /data/nebula/scripts/phase_d_ha_drill.sh
 # 报告草稿：/data/nebula/logs/ha-drill/report.md
-# 仓库归档：docs/dev/ha/report-20260711.md
+# 仓库归档：docs/dev/ha/report.md
 ```
 
-相关文档：[`runbook-phase-c.md`](./runbook-phase-c.md)、[`../../arch/optimization.md`](../../arch/optimization.md)。
+相关文档：[`runbook.md`](./runbook.md)、[`../../arch/roadmap.md`](../../arch/roadmap.md)。

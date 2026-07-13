@@ -1,4 +1,4 @@
-//! Runtime capability discovery (product_plan P1).
+//! Runtime capability discovery (plan P1).
 //!
 //! Probes the live engine HTTP surface and merges hints onto the static table.
 //! Discovery failures must not block serving — callers keep the static profile.

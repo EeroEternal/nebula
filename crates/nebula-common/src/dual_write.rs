@@ -1,6 +1,6 @@
 //! Dual-write path: same emit point → local Prometheus counters **and** xtrace batch metrics.
 //!
-//! Per `docs/dev/observability.md`:
+//! Per `docs/manual/observability.md`:
 //! - Prometheus `/metrics` = customer scrape surface
 //! - xtrace = LLM semantic / true quantiles store
 //! - No bridge from xtrace → Prometheus

@@ -1,7 +1,7 @@
 # API Ownership（Gateway / BFF / Router）
 
 > 状态：已落地约定（2026-07-11）  
-> 相关：[`../arch/architecture.md`](../arch/architecture.md)、[`../arch/optimization.md`](../arch/optimization.md)、[`unigateway.md`](./unigateway.md)
+> 相关：[`../arch/architecture.md`](../arch/architecture.md)、[`../arch/roadmap.md`](../arch/roadmap.md)、[`unigateway.md`](./unigateway.md)
 
 每个对外 API 必须有**唯一 owner**。推理热路径保持 `Client → Gateway → Router → Engine`。
 

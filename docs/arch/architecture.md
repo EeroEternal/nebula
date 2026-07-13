@@ -1,8 +1,8 @@
 # Nebula 架构
 
-> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。排期与勾选见 [`optimization.md`](./optimization.md)；产品阶段见 [`../dev/product_plan.md`](../dev/product_plan.md)；HA 报告见 [`../dev/ha/`](../dev/ha/)；边界见 [`../dev/api_ownership.md`](../dev/api_ownership.md)。
+> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。排期与勾选见 [`roadmap.md`](./roadmap.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；HA 见 [`../manual/ha.md`](../manual/ha.md)、[`report.md`](../dev/ha/report.md)；边界见 [`../dev/ownership.md`](../dev/ownership.md)。
 
-**结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 / N1 HA 主体 / N2 / 可观测 O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 v1.3.0 落地。真机 Gateway e2e、多引擎 benchmark、多租户压测与生产 etcd 三节点暂缓。剩余按需项（N3/N4/P7）以 [`optimization.md`](./optimization.md) 为准。
+**结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 / N1 HA 主体 / N2 / 可观测 O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 v1.3.0 落地。真机 Gateway e2e、多引擎 benchmark、多租户压测与生产 etcd 三节点暂缓。剩余按需项（N3/N4/P7）以 [`roadmap.md`](./roadmap.md) 为准。
 
 ---
 
@@ -99,6 +99,8 @@ graph BT
 
 ## 3. etcd Keyspace
 
+放置准则（应进 / 借住 / 不进）见 [`../dev/etcd.md`](../dev/etcd.md)。
+
 | Key | 类型 | 说明 |
 |-----|------|------|
 | `/nodes/{node_id}/status` | `NodeStatus` | 心跳（lease）；含 platform / GPU 身份 |
@@ -140,13 +142,13 @@ graph BT
 | `/v1/embeddings` / `rerank`、`/v1/models` | ✅ |
 | BFF `/api/v2/cells|compat|slos|benchmarks|canaries|tenants|pricing` | ✅ |
 
-控制台写路径走 BFF；Gateway `/v1/admin/*` 写接口不扩新双实现（见 api_ownership）。
+控制台写路径走 BFF；Gateway `/v1/admin/*` 写接口不扩新双实现（见 [`ownership.md`](../dev/ownership.md)）。
 
-可观测三平面（设计见 [`../dev/observability.md`](../dev/observability.md)）：
+可观测三平面（设计见 [`../manual/observability.md`](../manual/observability.md)）：
 
 - **Trace / LLM 语义：** OTLP → xtrace（`init_tracing` + W3C `traceparent`）
 - **时序：** Prometheus `/metrics`；热路径与 xtrace **双写**（`DualWriteEmitter`）；租户拒绝仅 `reason=` 低基数标签
-- **日志：** `NEBULA_LOG_FORMAT=json` → stdout → Promtail/Vector → Loki（[`../dev/loki.md`](../dev/loki.md)）
+- **日志：** `NEBULA_LOG_FORMAT=json` → stdout → Promtail/Vector → Loki（[`../manual/loki.md`](../manual/loki.md)）
 
 鉴权分离：推理 token（可绑定 tenant）、BFF session、`OBSERVE_TOKEN`。abort/drain 指标不计入 5xx 错误预算。
 
@@ -161,10 +163,10 @@ graph BT
 | **M2** | 声明式单路径；header 热路径 | ✅ |
 | **M3** | affinity + prefix/KV 路由深化 | 策略已有，持续打磨 |
 | **HA** | Scheduler election；接入多副本真机；旁路 etcd 三节点 | ✅ 主体；生产 etcd 三节点 ⏸ |
-| **Obs** | 双写 + JSON/Loki + O8 runbook | ✅ O1–O8；[`../dev/slo_alerts.md`](../dev/slo_alerts.md) |
+| **Obs** | 双写 + JSON/Loki + O8 runbook | ✅ O1–O8；[`../manual/slo.md`](../manual/slo.md) |
 | **Product P0–P6** | Cell / 兼容 / SLO / Benchmark / 多租户 Batch 1 | ✅ v1.3.0；真机 e2e/压测 ⏸ |
 
-HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)。Release Notes：[`../manual/release_notes_v1.3.0.md`](../manual/release_notes_v1.3.0.md)。
+HA 真机报告：[`../dev/ha/report.md`](../dev/ha/report.md)。Release Notes：[`../versions/v1.3.0.md`](../versions/v1.3.0.md)。
 
 ---
 
@@ -178,10 +180,10 @@ HA 真机报告：[`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md)
 | N2 | BFF 去重、HTTP client、observe、CI |
 | P0–P6 Batch 1 | 产品对齐主线（v1.3.0） |
 
-未尽项（真机 e2e、O9、N3、N4、P7、生产 etcd）只在 [`optimization.md`](./optimization.md) 维护，本文不另开排期表。
+未尽项（真机 e2e、O9、N3、N4、P7、生产 etcd）只在 [`roadmap.md`](./roadmap.md) 维护，本文不另开排期表。
 
 ---
 
 ## 8. 总评
 
-Nebula 用 etcd + 引擎原生 HTTP 重新分解了 actor 式进程管理问题，架构主轴无需再改。正确性与接入/调度 HA 行为已有真机报告；产品对齐 Batch 1 已发布。生产继续单节点 etcd 即可。具体「下一步做什么」以 [`optimization.md`](./optimization.md) 为唯一排期源。
+Nebula 用 etcd + 引擎原生 HTTP 重新分解了 actor 式进程管理问题，架构主轴无需再改。正确性与接入/调度 HA 行为已有真机报告；产品对齐 Batch 1 已发布。生产继续单节点 etcd 即可。具体「下一步做什么」以 [`roadmap.md`](./roadmap.md) 为唯一排期源。

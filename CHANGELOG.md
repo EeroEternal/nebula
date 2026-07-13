@@ -8,7 +8,7 @@ The format is based on Keep a Changelog.
 
 ## [1.3.0] - 2026-07-13
 
-Product-alignment release covering P0–P6 from `docs/dev/product_plan.md`. Real GPU / native Gateway e2e and multi-tenant load tests remain deferred.
+Product-alignment release covering P0–P6 from `docs/dev/plan.md`. Real GPU / native Gateway e2e and multi-tenant load tests remain deferred.
 
 ### Added
 - **P0 Observability trust:** `kv_cache_usage` semantics, scrape health metrics/fixtures, Gateway API `data_source: router`, O8 SLO/alert runbook samples.

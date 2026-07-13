@@ -1,6 +1,17 @@
 # Nebula 部署指南
 
-> 单机/开发起步见下文。多副本 HA compose 见仓库 `docker-compose.ha.yml` 与 [`../dev/ha/runbook-phase-c.md`](../dev/ha/runbook-phase-c.md)。排期 [`../arch/optimization.md`](../arch/optimization.md)。
+> **给谁看：** 实施工程师按下面步骤安装；产品/运维只需知道「装好后用控制台 `:5173`、API 走网关 `:8081`」。  
+> 网关与监控说明：[`gateway.md`](./gateway.md)、[`observability.md`](./observability.md)。多副本：[`ha.md`](./ha.md)。
+
+## 0. 装完以后怎么用
+
+| 入口 | 地址（默认） | 用途 |
+|------|--------------|------|
+| 控制台 | `http://<主机>:5173` | 部署模型、看监控、管租户 |
+| 推理 API | `http://<主机>:8081` | 业务系统调用大模型（OpenAI 兼容） |
+| 控制台后台 | `http://<主机>:18090` | 一般无需直接访问，由控制台页面调用 |
+
+推荐用 `deploy/nebula.env` + `./bin/nebula-up.sh` 一键启动，见本文第 10 节。
 
 ## 1. 环境要求
 
@@ -95,12 +106,12 @@ curl http://127.0.0.1:10814/v1/models
 ```bash
 curl http://127.0.0.1:18081/healthz
 # 预期：ok
+```
 
 路由指标：
 
 ```bash
 curl http://127.0.0.1:18081/metrics
-```
 ```
 
 ### 4e. Gateway — 对外提供 OpenAI API
@@ -116,6 +127,7 @@ curl http://127.0.0.1:18081/metrics
 ```bash
 curl http://127.0.0.1:8081/healthz
 # 预期：ok
+```
 
 网关指标：
 
@@ -394,4 +406,4 @@ OBSERVE_TOKEN=<API_BEARER_TOKEN>
 NEBULA_ENV_FILE=/path/to/nebula.env ./bin/nebula-up.sh
 ```
 
-远端部署可参考 [`../dev/ha/runbook-phase-c.md`](../dev/ha/runbook-phase-c.md) 与 [`../dev/setup.md`](../dev/setup.md)。
+远端部署可参考 [`ha.md`](./ha.md) 与 [`../dev/setup.md`](../dev/setup.md)。

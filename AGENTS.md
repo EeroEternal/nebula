@@ -5,13 +5,16 @@ This document defines rules and conventions for AI agents and developers working
 ## File Organization
 
 - **Documentation:** Keep filenames in the `docs/` directory concise and descriptive. Avoid excessively long names.
-  - `docs/product/` — product positioning and value proposition
-  - `docs/manual/` — user manuals, install and deployment
-  - `docs/dev/` — developer docs, engineering checklists, component designs
-  - `docs/arch/` — architecture and optimization plans
-  - Index: `docs/README.md`
+  - `docs/manual/` — 产品与运维：能力说明、部署、Gateway/Router、可观测、SLO、BFF、Catalog、HA
+  - `docs/versions/` — Release Notes（`v1.3.0.md` 等）
+  - `docs/dev/` — 工程细节：开发环境、计划、API 边界、契约、UniGateway
+  - `docs/arch/` — architecture and roadmap
+  - Index: `docs/README.md`（唯一索引；子目录不再放 README）
   - Do not commit environment-specific runbooks, internal IPs, or secrets under `docs/`.
   - **Keep docs short:** prefer one screen of facts over essays. State current behavior, boundaries, and links to code; delete completed checklists, speculative plans, and historical analysis once shipped. Prefer renaming `*_integration.md` / `*_plan.md` to the topic name (e.g. `unigateway.md`) when the work is done.
+  - **`manual/` 不写进度：** 不含 P0–P6、roadmap 勾选、Phase/O 编号；只写当前版本能力与运维做法。
+  - **`manual/` 读者可能是非开发岗**（产品、运维）：先写「是什么、能干什么、出问题怎么办」；术语要解释；环境变量、PromQL 等放到「实施参考」小节。
+  - **Short filenames:** use topic names, not suffixes — `plan.md` not `product_plan.md`, `roadmap.md` not `optimization.md`, `slo.md` not `slo_alerts.md`, `versions/v1.3.0.md` not `release_notes_v1.3.0.md`. Ops docs under `manual/`; version notes under `versions/`.
 - **Scripts & Tests:**
     - All standalone test scripts, debug scripts, and utility scripts must be placed in the `scripts/` directory.
     - Production-ready binaries and service management scripts belong in `bin/`.

@@ -1,6 +1,6 @@
 # Nebula 下一步优化计划
 
-> 更新：2026-07-13（**v1.3.0**）。已完成项摘要见 [`architecture.md`](./architecture.md)；产品阶段见 [`../dev/product_plan.md`](../dev/product_plan.md)；Release Notes 见 [`../manual/release_notes_v1.3.0.md`](../manual/release_notes_v1.3.0.md)。
+> 更新：2026-07-13（**v1.3.0**）。已完成项摘要见 [`architecture.md`](./architecture.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；Release Notes 见 [`../versions/v1.3.0.md`](../versions/v1.3.0.md)。
 
 ## 当前进展（一句话）
 
@@ -13,7 +13,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **N2** | Q1–Q4 | 工程质量 | ✅ | BFF 去重、HTTP client、observe、CI |
 | **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd 暂缓 |
 | **N4-Obs** | O1–O10 | 可观测 | ✅ O1–O8 / ⏸ O9–O10 | SLO runbook + 告警样例已落；O9 按需 |
-| **Product P0** | P0 | 契约与观测可信度 | ✅ Batch 1–2 | 见 [`../dev/product_plan.md`](../dev/product_plan.md) |
+| **Product P0** | P0 | 契约与观测可信度 | ✅ Batch 1–2 | 见 [`../dev/plan.md`](../dev/plan.md) |
 | **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 | 含能力 etcd 持久化、版本支持表、Cell 重试边界 |
 | **Product P2** | P2 | Serving Cell 只读接入 | ✅ Batch 1–2 / ⏸ e2e | 真机 Gateway e2e 暂缓 |
 | **Product P3** | P3 | 镜像平台 / 加速器台账 | ✅ Batch 1–2 | 兼容矩阵 + platforms 放置 + 库存 API/控制台；历史画像 ⏸ |
@@ -156,7 +156,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 
 ## N4-Obs — 全链路可观测
 
-设计源：[`../dev/observability.md`](../dev/observability.md)、[`../dev/loki.md`](../dev/loki.md)。
+设计源：[`../manual/observability.md`](../manual/observability.md)、[`../manual/loki.md`](../manual/loki.md)。
 
 ### 目标架构（已落地）
 
@@ -183,8 +183,8 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **O4** | Node GPU/引擎 → xtrace | ✅ | heartbeat `push_metrics`；etcd `/stats/` 仍为控制面 |
 | **O5** | OTLP + W3C 传播 | ✅ | `TraceContextPropagator`；Router inject |
 | **O6** | JSON 日志（Loki 路径） | ✅ | `NEBULA_LOG_FORMAT=json` |
-| **O7** | Loki 采集文档 + 示例 | ✅ | [`../dev/loki.md`](../dev/loki.md)、`deploy/observe/` |
-| **O8** | SLO / 告警草案 | ✅ | [`../dev/slo_alerts.md`](../dev/slo_alerts.md)、`deploy/observe/prometheus-alerts.yml` |
+| **O7** | Loki 采集文档 + 示例 | ✅ | [`../manual/loki.md`](../manual/loki.md)、`deploy/observe/` |
+| **O8** | SLO / 告警草案 | ✅ | [`../manual/slo.md`](../manual/slo.md)、`deploy/observe/prometheus-alerts.yml` |
 | **O9** | 双写缺口审计 | ⏳ 持续 | Scheduler 等按需补；低基数 |
 | **O10** | xtrace 深度需求 | ⏸ 上游 | 见 observability §9 |
 
@@ -219,7 +219,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 |----|------|
 | Scheduler 选主 + fencing 真机 | ✅ |
 | Gateway / Router ×2 + LB 真机 | ✅ |
-| 真机报告 | ✅ [`../dev/ha/report-20260711.md`](../dev/ha/report-20260711.md) |
+| 真机报告 | ✅ [`../dev/ha/report.md`](../dev/ha/report.md) |
 | 生产 etcd 三节点 | ⏸ **暂缓** |
 
 ---
@@ -262,8 +262,8 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 |------|------|
 | [`architecture.md`](./architecture.md) | 架构现状 |
 | 本文 | **排期真源**（按需 O9 / N3–N4；Product P1） |
-| [`../dev/observability.md`](../dev/observability.md) | 可观测设计权威（含上游 O10） |
-| [`../dev/slo_alerts.md`](../dev/slo_alerts.md) | SLO / 告警 runbook（O8） |
-| [`../dev/loki.md`](../dev/loki.md) | Loki 采集路径 |
-| [`../dev/ha/`](../dev/ha/) | HA 报告与 runbook |
-| [`../dev/details/stats.md`](../dev/details/stats.md) | etcd `/stats/` 控制面契约 |
+| [`../manual/observability.md`](../manual/observability.md) | 可观测设计权威（含上游 O10） |
+| [`../manual/slo.md`](../manual/slo.md) | SLO / 告警 runbook（O8） |
+| [`../manual/loki.md`](../manual/loki.md) | Loki 采集路径 |
+| [`../manual/ha.md`](../manual/ha.md) / [`report.md`](../dev/ha/report.md) | HA 演练与真机报告 |
+| [`../dev/stats.md`](../dev/stats.md) | etcd `/stats/` 控制面契约 |

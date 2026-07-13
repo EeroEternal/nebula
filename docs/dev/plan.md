@@ -2,7 +2,7 @@
 
 > 状态：**v1.3.0 Batch 1 已发布**（2026-07-13）；真机 e2e / 压测项仍暂缓。
 >
-> 本文把 [`../product/positioning.md`](../product/positioning.md) 的产品定位转化为工程阶段、交付物和验收门槛。架构与执行状态分别以 [`../arch/architecture.md`](../arch/architecture.md) 和 [`../arch/optimization.md`](../arch/optimization.md) 为准。Release Notes：[`../manual/release_notes_v1.3.0.md`](../manual/release_notes_v1.3.0.md)。
+> 本文把 [`../manual/positioning.md`](../manual/positioning.md) 的产品定位转化为工程阶段、交付物和验收门槛。架构与执行状态分别以 [`../arch/architecture.md`](../arch/architecture.md) 和 [`../arch/roadmap.md`](../arch/roadmap.md) 为准。Release Notes：[`../versions/v1.3.0.md`](../versions/v1.3.0.md)。
 
 ## 1. 目标
 
@@ -193,7 +193,7 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 
 让 Nebula 能跨引擎比较服务表现、定位故障并提供有证据的治理建议。
 
-详细指标实施见 [`observability.md`](observability.md) 与 [`details/stats.md`](details/stats.md)。
+详细指标实施见 [`../manual/observability.md`](../manual/observability.md) 与 [`stats.md`](stats.md)。
 
 ### 交付物
 
@@ -201,7 +201,7 @@ P1 + P3 ─→ P7 扩展引擎；EngineShim 按门禁启用
 - 指标标明来源：代理测量、引擎指标或 Node 采集，禁止混成同一序列。
 - 原始引擎指标使用 allowlist 和独立命名空间，不进入 etcd `/stats/`。
 - 建立模型级 SLO 对象：TTFT、TPOT、可用性、吞吐和可选预算约束。
-- 完成 SLO / 告警 runbook，明确 abort / 主动 Drain 不计入 5xx 错误预算。 ✅（`[slo_alerts.md](slo_alerts.md)`、O8）
+- 完成 SLO / 告警 runbook，明确 abort / 主动 Drain 不计入 5xx 错误预算。 ✅（[`../manual/slo.md`](../manual/slo.md)、O8）
 - BFF 聚合 Gateway、Router、Engine、Node 与部署变更事件。
 - 控制台支持按模型、引擎、版本、节点、Cell 和时间窗口下钻。
 - 普通副本可生成扩缩建议；原生 Serving Cell 只生成容量或配置建议。
@@ -382,8 +382,8 @@ TensorRT-LLM、MLX、llama.cpp 或其他引擎只有满足以下条件才进入�
 ## 16. 执行与文档治理
 
 - 本文是产品定位到工程工作的全面映射，不替代架构设计或迭代任务系统。
-- `[../arch/optimization.md](../arch/optimization.md)` 继续记录当前执行批次和状态。
-- [`observability.md`](observability.md) / [`details/stats.md`](details/stats.md) 负责引擎可观测与 `/stats/` 契约细节。
+- `[../arch/roadmap.md](../arch/roadmap.md)` 继续记录当前执行批次和状态。
+- [`../manual/observability.md`](../manual/observability.md) / [`stats.md`](stats.md) 负责引擎可观测与 `/stats/` 契约细节。
 - 每个阶段启动前应拆成可独立验收的工程项，并指定 owner、依赖和回滚策略。
 - 每个阶段完成后必须更新当前基线、验收证据和产品文档中的能力状态。
 
