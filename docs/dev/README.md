@@ -25,4 +25,4 @@
 - [Gateway / Router](./gateway/)
 - [BFF](./bff/)
 - [模型 Catalog](./model_management/)
-- [UniGateway 边界](./unigateway_integration.md)
+- [UniGateway](./unigateway.md)
