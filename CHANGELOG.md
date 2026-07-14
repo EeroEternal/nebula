@@ -6,12 +6,17 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-14
+
+### Added
+- **Nebula Lite** (`nebula-lite`): single-process local launcher that spawns vLLM or SGLang and proxies OpenAI-compatible HTTP (`/v1/chat/completions`, etc.). No etcd / BFF / Router / Scheduler. See `docs/dev/lite.md`.
+
 ### Removed
 - **Serving Cell (CellIngress):** etcd `/cells/`、BFF `/api/v2/cells`、Router Cell 选路与不重试分支、相关契约与控制台能力已下线。
 
 ## [1.3.0] - 2026-07-13
 
-Product-alignment release covering P0–P6 from `docs/dev/plan.md`. Real GPU e2e and multi-tenant load tests remain deferred. Serving Cell (P2) was later removed; see Unreleased.
+Product-alignment release covering P0–P6 from `docs/dev/plan.md`. Real GPU e2e and multi-tenant load tests remain deferred. Serving Cell (P2) was later removed in v1.4.0.
 
 ### Added
 - **P0 Observability trust:** `kv_cache_usage` semantics, scrape health metrics/fixtures, Gateway API `data_source: router`, O8 SLO/alert runbook samples.
@@ -88,6 +93,7 @@ Product-alignment release covering P0–P6 from `docs/dev/plan.md`. Real GPU e2e
 ### Fixed
 - Fixed Audit Logs Unauthorized behavior by clarifying and enforcing service/internal auth configuration paths.
 
-[Unreleased]: https://github.com/EeroEternal/nebula/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/EeroEternal/nebula/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/EeroEternal/nebula/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/EeroEternal/nebula/compare/v1.2.1...v1.3.0
 [0.2.0]: https://github.com/EeroEternal/nebula/compare/v0.1.1...v0.2.0

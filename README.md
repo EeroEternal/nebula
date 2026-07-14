@@ -1,6 +1,6 @@
 # nebula
 
-Nebula 是本地 / 专有化推理环境的跨引擎控制面（Gateway / Router / Scheduler / Node / BFF）：默认 **Engine-Passthrough**（Gateway → Router → vLLM / SGLang 原生 HTTP），权威状态在 etcd。当前发布 **v1.3.0**（产品对齐 P0–P6 Batch 1）。
+Nebula 是本地 / 专有化推理环境的跨引擎控制面（Gateway / Router / Scheduler / Node / BFF）：默认 **Engine-Passthrough**（Gateway → Router → vLLM / SGLang 原生 HTTP），权威状态在 etcd。当前发布 **v1.4.0**（含单机 Lite）。
 
 ## 快速开始
 
@@ -16,7 +16,7 @@ git clone --depth 1 https://github.com/EeroEternal/nebula.git
 
 **一键本地栈：** 复制 `deploy/nebula.env.example` → `deploy/nebula.env`，设置 `START_BFF=1`、`OBSERVE_AUTH_MODE=internal`，构建后执行 `./bin/nebula-up.sh`。常用端口：Gateway `8081`、Router `18081`、BFF `18090`、前端 `5173`。
 
-**鉴权：** 推理面 `NEBULA_AUTH_TOKENS=dev-token:admin`（或 `token:role:tenant_id`）+ `Authorization: Bearer …`；开发可 `NEBULA_AUTH_DISABLED=1`。多租户准入可选 `NEBULA_MULTI_TENANT=1`。详见 [部署指南](docs/manual/deployment.md) 与 [v1.3.0 Release Notes](docs/versions/v1.3.0.md)。
+**鉴权：** 推理面 `NEBULA_AUTH_TOKENS=dev-token:admin`（或 `token:role:tenant_id`）+ `Authorization: Bearer …`；开发可 `NEBULA_AUTH_DISABLED=1`。多租户准入可选 `NEBULA_MULTI_TENANT=1`。详见 [部署指南](docs/manual/deployment.md) 与 [v1.4.0 Release Notes](docs/versions/v1.4.0.md)。
 
 ## 项目结构
 
@@ -28,11 +28,12 @@ git clone --depth 1 https://github.com/EeroEternal/nebula.git
 - `crates/nebula-node`：watch placement → 启停引擎 → 注册 endpoints / capabilities
 - `crates/nebula-bff`：控制台 API（模型、治理、Benchmark、租户）
 - `crates/nebula-cli`：运维 CLI
+- `crates/nebula-lite`：单机 Lite（自启 vLLM/SGLang + OpenAI 代理，无 etcd）
 - `frontend/`：控制台（含 `/governance`）
 - `scripts/benchmark/`：标准 workload 与 runner
 
-## 能力概览（v1.3.0）
+## 能力概览（v1.4.0）
 
-声明式副本生命周期与路由；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。Serving Cell（CellIngress）已下线。真机 GPU e2e 与多租户压测暂缓，见 [roadmap.md](docs/arch/roadmap.md)。
+声明式副本生命周期与路由；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。单机可用 `nebula-lite` 快速起本地引擎。Serving Cell（CellIngress）已下线。真机 GPU e2e 与多租户压测暂缓，见 [roadmap.md](docs/arch/roadmap.md)。
 
 全量单测：`cargo test --workspace`。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)。

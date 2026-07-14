@@ -1,6 +1,6 @@
 # Nebula 文档索引
 
-当前发布：**[v1.3.0](versions/v1.3.0.md)**。
+当前发布：**[v1.4.0](versions/v1.4.0.md)**。
 
 ## 产品与运维（`manual/`）
 
@@ -16,8 +16,8 @@
 
 | 文档 | 说明 |
 |------|------|
-| [`versions/v1.3.0.md`](versions/v1.3.0.md) | 当前版本更新说明 |
-| [`versions/v1.1.0.md`](versions/v1.1.0.md) / [`v0.2.0.md`](versions/v0.2.0.md) | 历史版本说明 |
+| [`versions/v1.4.0.md`](versions/v1.4.0.md) | 当前版本更新说明 |
+| [`versions/v1.3.0.md`](versions/v1.3.0.md) / [`v1.1.0.md`](versions/v1.1.0.md) / [`v0.2.0.md`](versions/v0.2.0.md) | 历史版本说明 |
 
 ## 架构与工程
 
@@ -29,6 +29,7 @@
 | [`arch/roadmap.md`](arch/roadmap.md) | 排期 |
 | [`dev/plan.md`](dev/plan.md) | 开发计划 |
 | [`dev/setup.md`](dev/setup.md) | 开发环境 |
+| [`dev/lite.md`](dev/lite.md) | Lite 单机：单进程 vLLM/SGLang，无 etcd/BFF |
 | [`dev/ownership.md`](dev/ownership.md) | 接口归属 |
 | [`dev/etcd.md`](dev/etcd.md) | etcd 放什么 / 不放什么 |
 | [`dev/stats.md`](dev/stats.md) | 引擎状态数据格式 |
