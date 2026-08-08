@@ -38,7 +38,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径+压测+轻量 burn+runbook / ⏸ 生产切入 | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node；`phase0_tenant_isolation.sh`；`phase0_slo_burn.sh`；[`../manual/etcd-ha.md`](../manual/etcd-ha.md)。待：维护窗迁生产 keyspace |
 | **Phase 1** | L1 + L3 骨架 | 一致性契约套件；ModelProfile；Selection 推荐+草稿；控制台选型向导 | ✅ 骨架 + L1 契约硬化（含流式 tool_calls）+ Selection 可解释/向导加深 | [`selection.md`](./selection.md)（score/breakdown、`current` 自动填充）；[`../dev/contracts.md`](../dev/contracts.md)（C1–C6 ✅）；`/api/v2/selection/*` + 治理页 preference/platform |
 | **Phase 2** | L2 | HardwarePool、池约束、PD/TP（按需）、故障隔离 | ⏸ 设计 ✅ / 代码有需求再开 | [`pool.md`](./pool.md)；N3 D4/D5；与 K8s 执行面正交 |
-| **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ 建议骨架 ✅ / Selection 联动暂缓 | SLO 按违约原因产出 `observe`/`scale`/`check_endpoints`/`review_load`；半自动落地与成本反哺未做 |
+| **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ 建议✅ / 容量骨架✅ / Selection 联动暂缓 | SLO 可解释建议；`GET /api/v2/capacity` 只读缺口；半自动落地与成本反哺未做 |
 
 旁路（不插入 Phase 主轴）：**K8s/HAMi K0–K1** — 有客户再开；边界见 [`AGENTS.md`](../../AGENTS.md)、[`../dev/k8s.md`](../dev/k8s.md)。
 ### Product P6 Batch 1 勾选

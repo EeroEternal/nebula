@@ -121,6 +121,7 @@ import type {
   GatewayReliability,
   GatewayTraffic,
   HardwareInventory,
+  CapacitySnapshot,
   ManagedUser,
   ModelSlo,
   ModelView,
@@ -228,6 +229,9 @@ export const v2 = {
 
   hardwareInventory: (token?: string) =>
     apiGet<HardwareInventory>('/v2/inventory/hardware', token),
+
+  capacitySnapshot: (token?: string) =>
+    apiGet<CapacitySnapshot>('/v2/capacity', token),
 
   listSlos: (token?: string) =>
     apiGet<ModelSlo[]>('/v2/slos', token),

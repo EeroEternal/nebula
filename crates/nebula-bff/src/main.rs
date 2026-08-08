@@ -163,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/compat/seed", post(handlers_v2::seed_compat_rules))
         .route("/compat/:id", delete(handlers_v2::delete_compat_rule))
         .route("/inventory/hardware", get(handlers_v2::hardware_inventory))
+        .route("/capacity", get(handlers_v2::capacity_snapshot))
         .route("/slos", get(handlers_v2::list_slos))
         .route(
             "/slos/:model_uid",

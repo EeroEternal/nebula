@@ -1,5 +1,6 @@
 pub mod benchmark;
 pub mod capability;
+pub mod capacity;
 pub mod cluster;
 pub mod compat;
 pub mod endpoint;
@@ -52,6 +53,7 @@ pub use node_status::{
     image_platforms_match, resolve_node_platform, GpuStatus, NodeStatus, DEFAULT_NODE_PLATFORM,
 };
 pub use placement::{next_placement_version, PlacementAssignment, PlacementPlan};
+pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
 pub use slo::{
     evaluate_slo, DiagnosticEvent, ModelSlo, SloComplianceStatus, SloEvaluation, SloMetricSample,
     SloSuggestion,

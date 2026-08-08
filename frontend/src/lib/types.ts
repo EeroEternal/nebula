@@ -426,6 +426,24 @@ export interface HardwareInventory {
   }>
 }
 
+export interface CapacitySnapshot {
+  models: Array<{
+    model_uid: string
+    desired_state: string
+    desired_replicas: number
+    ready_replicas: number
+    unhealthy_replicas: number
+    pending_total: number
+    avg_kv_usage?: number | null
+    replica_gap: number
+    hints: string[]
+  }>
+  gpu_total: number
+  gpu_free: number
+  hints: string[]
+  evaluated_at_ms: number
+}
+
 export interface ModelSlo {
   model_uid: string
   availability_target?: number | null

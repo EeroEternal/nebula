@@ -15,6 +15,7 @@ import type {
     DiagnosticEvent,
     HardwareInventory,
     ModelSlo,
+    CapacitySnapshot,
     SelectionResponse,
     SloEvaluation,
     Tenant,
@@ -31,6 +32,7 @@ export function GovernanceView() {
     const { token } = useAuthStore()
     const [rules, setRules] = useState<CompatibilityRule[]>([])
     const [inventory, setInventory] = useState<HardwareInventory | null>(null)
+    const [capacity, setCapacity] = useState<CapacitySnapshot | null>(null)
     const [slos, setSlos] = useState<ModelSlo[]>([])
     const [events, setEvents] = useState<DiagnosticEvent[]>([])
     const [runs, setRuns] = useState<BenchmarkRun[]>([])
@@ -57,9 +59,10 @@ export function GovernanceView() {
     const refresh = async () => {
         setLoading(true)
         try {
-            const [r, inv, s, e, br, c, tn, pr] = await Promise.all([
+            const [r, inv, cap, s, e, br, c, tn, pr] = await Promise.all([
                 v2.listCompatRules(token || ""),
                 v2.hardwareInventory(token || ""),
+                v2.capacitySnapshot(token || ""),
                 v2.listSlos(token || ""),
                 v2.listDiagnostics(undefined, token || ""),
                 v2.listBenchmarkRuns(token || ""),
@@ -69,6 +72,7 @@ export function GovernanceView() {
             ])
             setRules(r)
             setInventory(inv)
+            setCapacity(cap)
             setSlos(s)
             setEvents(e)
             setRuns(br)
@@ -338,6 +342,43 @@ export function GovernanceView() {
                                         GPU{g.index} {g.name || ""} · drv {g.driver_version || "n/a"} · cuda {g.cuda_version || "n/a"}
                                         {g.occupied_by ? ` · busy:${g.occupied_by}` : " · free"}
                                     </p>
+                                ))}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </section>
+
+            <section className="bg-card/40 border border-border rounded-xl p-6 space-y-4">
+                <h3 className="text-xs font-bold font-mono uppercase tracking-widest flex items-center gap-2">
+                    <Gauge className="h-3.5 w-3.5" /> {t("governance.capacity")}
+                </h3>
+                <p className="text-xs text-muted-foreground">{t("governance.capacityHint")}</p>
+                {!capacity || (capacity.models.length === 0 && capacity.gpu_total === 0) ? (
+                    <p className="text-sm text-muted-foreground">{t("governance.capacityEmpty")}</p>
+                ) : (
+                    <div className="space-y-3">
+                        <p className="text-xs font-mono text-muted-foreground">
+                            GPU free={capacity.gpu_free}/{capacity.gpu_total}
+                        </p>
+                        {capacity.hints.map((h) => (
+                            <p key={h} className="text-xs font-mono text-amber-600/90 dark:text-amber-400/90">{h}</p>
+                        ))}
+                        {capacity.models.map((m) => (
+                            <div key={m.model_uid} className="border border-border/40 rounded-lg p-3 space-y-1">
+                                <div className="flex flex-wrap gap-2 items-center text-xs font-mono">
+                                    <span className="font-bold">{m.model_uid}</span>
+                                    <Badge variant="outline" className="text-[9px] uppercase">{m.desired_state}</Badge>
+                                    <span className="text-muted-foreground">
+                                        ready={m.ready_replicas}/{m.desired_replicas}
+                                        {m.replica_gap !== 0 ? ` · gap=${m.replica_gap}` : ""}
+                                        {m.unhealthy_replicas > 0 ? ` · unhealthy=${m.unhealthy_replicas}` : ""}
+                                        {m.pending_total > 0 ? ` · pending=${m.pending_total}` : ""}
+                                        {m.avg_kv_usage != null ? ` · kv=${m.avg_kv_usage.toFixed(2)}` : ""}
+                                    </span>
+                                </div>
+                                {m.hints.map((h) => (
+                                    <p key={h} className="text-[11px] font-mono text-muted-foreground">{h}</p>
                                 ))}
                             </div>
                         ))}

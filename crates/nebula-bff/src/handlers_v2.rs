@@ -427,6 +427,17 @@ pub async fn hardware_inventory(
     Ok((StatusCode::OK, Json(inv)).into_response())
 }
 
+pub async fn capacity_snapshot(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp);
+    }
+    let snap = crate::compat_slo::capacity_snapshot(&*st.store).await?;
+    Ok((StatusCode::OK, Json(snap)).into_response())
+}
+
 pub async fn list_slos(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,

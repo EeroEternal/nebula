@@ -3,9 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use nebula_common::{
-    default_compatibility_rules, evaluate_compatibility, evaluate_slo, CompatCheckInput,
-    CompatibilityRule, DiagnosticEvent, EngineImage, ModelSlo, NodeStatus, PlacementPlan,
-    PlacementRejectReason, SloEvaluation, DesiredState,
+    default_compatibility_rules, evaluate_compatibility, evaluate_slo, CapacitySnapshot,
+    CompatCheckInput, CompatibilityRule, DiagnosticEvent, EngineImage, ModelSlo, NodeStatus,
+    PlacementPlan, PlacementRejectReason, SloEvaluation, DesiredState,
 };
 use nebula_meta::MetaStore;
 
@@ -239,6 +239,59 @@ pub async fn hardware_inventory(store: &dyn MetaStore) -> Result<HardwareInvento
         nodes,
         placements: occupancy,
     })
+}
+
+pub async fn capacity_snapshot(store: &dyn MetaStore) -> Result<CapacitySnapshot, ServiceError> {
+    use nebula_common::{
+        build_capacity_snapshot, EndpointInfo, EndpointStats, ModelDeployment,
+    };
+
+    let inv = hardware_inventory(store).await?;
+    let gpu_total = inv.nodes.iter().map(|n| n.gpus.len() as u32).sum::<u32>();
+    let gpu_free = inv
+        .nodes
+        .iter()
+        .flat_map(|n| n.gpus.iter())
+        .filter(|g| g.occupied_by.is_none())
+        .count() as u32;
+
+    let deps_raw = store.list_prefix("/deployments/").await?;
+    let mut deployments = Vec::new();
+    for (_, v, _) in deps_raw {
+        if let Ok(d) = serde_json::from_slice::<ModelDeployment>(&v) {
+            deployments.push(d);
+        }
+    }
+
+    let eps_raw = store.list_prefix("/endpoints/").await?;
+    let mut endpoints = Vec::new();
+    for (_, v, _) in eps_raw {
+        if let Ok(e) = serde_json::from_slice::<EndpointInfo>(&v) {
+            endpoints.push(e);
+        }
+    }
+
+    let stats_raw = store.list_prefix("/stats/").await?;
+    let mut stats = Vec::new();
+    for (_, v, _) in stats_raw {
+        if let Ok(s) = serde_json::from_slice::<EndpointStats>(&v) {
+            stats.push(s);
+        }
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    Ok(build_capacity_snapshot(
+        &deployments,
+        &endpoints,
+        &stats,
+        gpu_total,
+        gpu_free,
+        now_ms,
+    ))
 }
 
 // ── SLO ───────────────────────────────────────────────────────────────────
