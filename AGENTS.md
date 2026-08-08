@@ -20,19 +20,65 @@ This document defines rules and conventions for AI agents and developers working
     - Production-ready binaries and service management scripts belong in `bin/`.
 - **Temporary Data:** Do not store temporary data (like `default.etcd`) in the project root. Use `/tmp` or other designated temporary locations.
 
-## etcd boundaries
+## etcd 使用约束规范
 
-etcd is the **control-plane coordination authority**, not a general database. Details and key classification: [`docs/dev/etcd.md`](docs/dev/etcd.md). Keyspace table: [`docs/arch/architecture.md`](docs/arch/architecture.md).
+etcd 是 Nebula **控制面协调权威（排班黑板）**，不是通用数据库、不是对象存储、不是时序库。分类细则与 Keyspace：[`docs/dev/etcd.md`](docs/dev/etcd.md)、[`docs/arch/architecture.md`](docs/arch/architecture.md)。生产三节点运维：[`docs/manual/etcd-ha.md`](docs/manual/etcd-ha.md)。Owner：[`docs/dev/ownership.md`](docs/dev/ownership.md)。
 
-**May write to etcd only when** the data is shared across components via list/watch/CAS, needs watch / lease / CAS / election, and stays small (latest value only).
+### 定位（必须遵守）
 
-**Must use Node shared lease (or short TTL)** for node-ephemeral keys: `/nodes/…/status`, `/endpoints/`, `/stats/`, `/capabilities/`, `/image_status/`, `/model_cache/`, `/node_disk/`, `/alerts/`. `/download_progress/` uses short TTL. `/model_gc_requests/` must carry a TTL and be deleted after Node handles them.
+- **唯一权威：** 声明式期望与协调真相以 etcd 为准；组件本地缓存可丢可重建；对账是「etcd vs runtime」清孤儿，禁止内存/DB/文件另立第二权威。
+- **不替换：** 不得用 Kubernetes API、Postgres、Redis、对象存储等替代 etcd 作为 Deployment / Placement / Endpoint / 选主等协调真相源。K8s 仅可作 `k8s` runtime **执行面**（见下文）。
+- **热路径：** Gateway / Router 选路只认 etcd `/endpoints/`（及既有 Placement 版本约束）；不得把推理热路径改成依赖 kube Service / EndpointSlice 或其它发现系统。
 
-**Do not put in etcd:** console auth/SSO/sessions (Postgres); traces (xtrace); metric history/alert time series (Prometheus); logs (Loki); model weights / image layers; audit full text / token secrets; high-cardinality labels such as `tenant_id` on Prometheus metrics.
+### 准入三问（缺一不可 → 默认不进 etcd）
 
-**Borrowed (allowed for now, do not expand):** `/templates/`, `/pricing/`, `/usage/`, `/benchmarks/`, legacy `/model_requests/` (read-only, no new writes). Prefer Postgres when touching these for history, billing, or growth—without making Scheduler/Node read Postgres.
+写入 etcd 前必须同时满足：
 
-**When adding a key:** update `docs/dev/etcd.md` and the architecture Keyspace table; keep a single write owner ([`docs/dev/ownership.md`](docs/dev/ownership.md)). BFF-only CRUD defaults to Postgres, not a new etcd prefix. Do not add new Gateway write paths that duplicate BFF etcd updates.
+1. **多组件共享**，需要 list / watch / CAS 协调；
+2. **需要协调语义**（watch、lease、CAS、选主/fencing 之一）；
+3. **体量小且只要最新值**（不是历史、不是大对象、不是高基数序列）。
+
+BFF 仅自用的 CRUD → **默认 Postgres**，禁止顺手新开 etcd 前缀。
+
+### 写入口（Single Owner）
+
+- 每种状态 **只有一个写 Owner**（见 ownership 文档）。禁止 Node 与 K8s controller、或 Gateway 与 BFF，对同一副本/同一期望双重 reconcile。
+- **Deployment / Spec / 治理配置：** BFF（主写）。**Placement：** 仅 Scheduler（CAS）。**`/endpoints/`、`/stats/`、`/capabilities/`、节点 status：** Node（或 `k8s` 形态下唯一的 in-cluster controller）写 lease。
+- **禁止** 新增 Gateway 写 etcd 去重复 BFF 已有更新路径。
+- **禁止** 无 Owner 文档更新就新增前缀。
+
+### 生命周期
+
+- **节点附属 / 进程消失应失效的 key** 必须挂 **Node 共享 lease**（或短 TTL）：`/nodes/…/status`、`/endpoints/`、`/stats/`、`/capabilities/`、`/image_status/`、`/model_cache/`、`/node_disk/`、`/alerts/`。
+- `/download_progress/`：短 TTL。`/model_gc_requests/`：必须带 TTL，Node 处理后删除。
+- **声明类配置**（Deployment、compat、tenants、images 等）无 lease，但须小、可版本化、可 CAS。
+
+### 禁止写入（D 类）
+
+不得写入 etcd：控制台账号 / SSO / 会话（Postgres）；Trace（xtrace）；指标历史 / 告警曲线（Prometheus）；日志（Loki）；模型权重 / 镜像层；审计全文 / token 明文；完整 Pod 清单或高基数集群事件；任何「越写越大」的历史窗口。Prometheus **禁止**高基数 `tenant_id` 等 label（与 etcd 无关也禁止）。
+
+### 借住（C 类：允许暂留，禁止扩张）
+
+`/templates/`、`/pricing/`、`/usage/`、`/benchmarks/`、`/model_profiles/`、遗留 `/model_requests/`（只读、禁止新写）为借住。触碰时 **优先迁 Postgres**（或外置存储）；**禁止** 为迁出而让 Scheduler / Node 读 Postgres；**禁止** 在借住前缀上增加新字段/新子树/新写入方。
+
+### 新增 / 变更 checklist
+
+改 etcd 相关代码或设计前，Agent / 开发者必须：
+
+1. 用「准入三问」自检；不通过则改存 Postgres / Prometheus / 本地盘等。
+2. 指定唯一写 Owner，并更新 [`docs/dev/ownership.md`](docs/dev/ownership.md)（若涉及归属）。
+3. 更新 [`docs/dev/etcd.md`](docs/dev/etcd.md) 与 architecture Keyspace 表；拟议未实现的前缀须标明「拟议，勿写生产」（如 `/pools/`）。
+4. 节点附属 key 选好 lease / TTL；工作队列必须可过期、可清理。
+5. 确认 Gateway / Router 热路径无新增 etcd 写、无改发现模型。
+6. 生产多节点时客户端使用逗号分隔多 `ETCD_ENDPOINT`；文档不写内网 IP / 密钥。
+
+### 反模式（发现即改）
+
+- 把用量窗口、benchmark 大结果、审计流水当 etcd 主存继续加字段。
+- 用 etcd 做查询型业务库（复杂过滤、分页历史、全文检索）。
+- 同一 `model_uid` 副本由两个组件同时写 Placement 或 `/endpoints/`。
+- 本地缓存当真相、etcd 仅「备份」。
+- 为图省事把密钥、大配置 blob、镜像层 metadata 塞进 key。
 
 ## K8s / HAMi boundaries
 

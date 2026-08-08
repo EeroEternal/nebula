@@ -2,7 +2,7 @@
 
 > 控制面元数据边界（2026-07-13）。Keyspace 总表见 [`../arch/architecture.md`](../arch/architecture.md)；`/stats/` 字段见 [`stats.md`](./stats.md)。抽象：`nebula-meta::MetaStore`。Agent 硬规则见仓库根 [`AGENTS.md`](../../AGENTS.md)。
 
-etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地缓存可丢可重建；对账是「etcd vs runtime」清孤儿。K8s/HAMi 仅作引擎执行面时的边界见 [`k8s.md`](./k8s.md) 与 [`AGENTS.md`](../../AGENTS.md)。
+etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地缓存可丢可重建；对账是「etcd vs runtime」清孤儿。K8s/HAMi 仅作引擎执行面时的边界见 [`k8s.md`](./k8s.md)。**Agent / 开发硬约束**见仓库根 [`AGENTS.md`](../../AGENTS.md)「etcd 使用约束规范」。
 
 ## 准入准则
 
