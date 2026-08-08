@@ -29,6 +29,7 @@
 | [`arch/vision.md`](arch/vision.md) | 统一模型服务平台总纲：定位、能力分层（L0–L4）、原则与演进 |
 | [`arch/architecture.md`](arch/architecture.md) | 系统架构（L0 组件级实现） |
 | [`arch/selection.md`](arch/selection.md) | L3 智能选择层：画像、打分、草稿与半自动落地 |
+| [`arch/pool.md`](arch/pool.md) | L2 资源池：HardwarePool、池约束、拓扑与故障隔离（设计） |
 | [`arch/roadmap.md`](arch/roadmap.md) | 排期（与 vision Phase 0–3 对齐） |
 | [`dev/plan.md`](dev/plan.md) | 开发计划 |
 | [`dev/setup.md`](dev/setup.md) | 开发环境 |

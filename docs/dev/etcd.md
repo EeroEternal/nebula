@@ -56,3 +56,9 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 ## 新增 key
 
 先过准入准则与 [`ownership.md`](./ownership.md) 唯一写入口，再改本文件与 `architecture.md` Keyspace。只有 BFF 自读写 → 默认 Postgres，勿开新 etcd 前缀。
+
+## 拟议（尚未实现）
+
+| Key 前缀 | 预期写者 | 说明 |
+|----------|----------|------|
+| `/pools/{pool_id}` | BFF | L2 HardwarePool；设计见 [`../arch/pool.md`](../arch/pool.md)；落地前勿先写生产 |
