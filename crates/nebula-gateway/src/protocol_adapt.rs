@@ -1,11 +1,12 @@
 //! Thin UniGateway protocol adapters for Nebula Gateway.
 //!
-//! Uses `unigateway-protocol` for request parsing only. Cluster routing stays on
-//! Nebula Router — never call UniGatewayEngine pool selection here.
+//! Uses `unigateway-sdk` (`conversion` feature) for request parsing only.
+//! Cluster routing stays on Nebula Router — never call UniGatewayEngine pool
+//! selection here.
 
 use serde_json::{json, Value};
-use unigateway_core::{ContentBlock, MessageRole, ProxyChatRequest, ProxyResponsesRequest};
-use unigateway_protocol::{
+use unigateway_sdk::core::{ContentBlock, MessageRole, ProxyChatRequest, ProxyResponsesRequest};
+use unigateway_sdk::protocol::{
     anthropic_payload_to_chat_request, openai_payload_to_responses_request,
 };
 

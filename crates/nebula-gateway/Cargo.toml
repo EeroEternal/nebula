@@ -26,5 +26,5 @@ chrono.workspace = true
 nebula-common = { path = "../nebula-common" }
 nebula-meta = { path = "../nebula-meta" }
 async-trait.workspace = true
-unigateway-protocol = "2.6"
-unigateway-core = "2.6"
+# Protocol adapt only — no UniGatewayEngine / provider pool (Router owns routing).
+unigateway-sdk = { version = "2.7", default-features = false, features = ["conversion"] }
