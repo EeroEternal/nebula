@@ -22,6 +22,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ⏸ 压测 | Tenant + Gateway 准入 + 用量成本；真机压测 ⏸ |
 | **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP；EngineShim |
 | **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能 |
+| **K8s** | K0–K3 | K8s / HAMi 执行面 | ⏸ | etcd 声明 + controller 起 Pod；见 [`../dev/k8s.md`](../dev/k8s.md) |
 
 原则：不阻塞日常推理；生产 etcd 三节点仍暂缓。
 
@@ -32,6 +33,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 ```
 ①–⑦ Product P0–P6 Batch 1          ✅ 已随 v1.3.0 发布
 ⑧ N3–N4 / P7（有需求再开）
+⑧b K8s/HAMi K0–K1（有集群虚拟化客户再开；边界见 AGENTS.md / dev/k8s.md）
 ⑨ 生产 etcd 三节点（暂缓）
 ⑩ 真机 e2e / 多引擎 benchmark / 多租户压测（环境就绪后）
 ```

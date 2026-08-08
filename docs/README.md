@@ -33,6 +33,7 @@
 | [`dev/lite.md`](dev/lite.md) | Lite 单机：单进程 vLLM/SGLang，无 etcd/BFF |
 | [`dev/ownership.md`](dev/ownership.md) | 接口归属 |
 | [`dev/etcd.md`](dev/etcd.md) | etcd 放什么 / 不放什么 |
+| [`dev/k8s.md`](dev/k8s.md) | K8s / HAMi 运行时边界与分阶段方案 |
 | [`dev/stats.md`](dev/stats.md) | 引擎状态数据格式 |
 | [`dev/unigateway.md`](dev/unigateway.md) | 协议适配 |
 | [`dev/ha/report.md`](dev/ha/report.md) | 高可用验收报告 |

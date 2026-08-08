@@ -34,6 +34,23 @@ etcd is the **control-plane coordination authority**, not a general database. De
 
 **When adding a key:** update `docs/dev/etcd.md` and the architecture Keyspace table; keep a single write owner ([`docs/dev/ownership.md`](docs/dev/ownership.md)). BFF-only CRUD defaults to Postgres, not a new etcd prefix. Do not add new Gateway write paths that duplicate BFF etcd updates.
 
+## K8s / HAMi boundaries
+
+Nebula may add a **k8s** engine runtime for clusters that use Kubernetes GPU virtualization (e.g. HAMi). Plan: [`docs/dev/k8s.md`](docs/dev/k8s.md).
+
+**Split of authority:**
+- **etcd** remains the Nebula control-plane coordination authority (desired deployments/placements, `/endpoints/`, etc.). Do not replace it with the Kubernetes API as the source of truth for Nebula metadata.
+- **Kubernetes / HAMi** is the **execution plane** for the `k8s` runtime only: schedule Pods, allocate virtual GPUs via resource requests / HAMi, start/stop engine containers.
+- **Gateway / Router** keep selecting backends from etcd `/endpoints/`. Do not make the inference hot path depend on kube Service / EndpointSlice discovery.
+
+**Single owner per runtime:**
+- `process` / `docker`: `nebula-node` owns engine lifecycle on the host (unchanged).
+- `k8s`: an in-cluster **controller / Operator** is the sole owner that apply/deletes Pods (or Workloads) and, when Ready, writes `/endpoints/` (lease). Never let Node and the K8s controller reconcile the same replica.
+
+**GPU placement in `k8s` mode:** do not assign host `gpu_indices` or set `CUDA_VISIBLE_DEVICES` from Nebula Scheduler/Node. Request GPU (and HAMi memory/core annotations as needed) on the Pod spec; let kube-scheduler + HAMi allocate.
+
+**Do not:** store full Pod manifests or high-cardinality cluster events in etcd; scatter ad-hoc `kubectl`/client-go Pod creates from Scheduler or Node on the main path (a dedicated controller is required); dual-reconcile the same model replica across Node and K8s.
+
 ## Versioning
 
 - Follow semantic versioning for releases.
