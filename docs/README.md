@@ -27,7 +27,7 @@
 |------|------|
 | [`arch/vision.md`](arch/vision.md) | 统一模型服务平台总纲：定位、能力分层（L0–L4）、原则与演进 |
 | [`arch/architecture.md`](arch/architecture.md) | 系统架构（L0 组件级实现） |
-| [`arch/roadmap.md`](arch/roadmap.md) | 排期 |
+| [`arch/roadmap.md`](arch/roadmap.md) | 排期（与 vision Phase 0–3 对齐） |
 | [`dev/plan.md`](dev/plan.md) | 开发计划 |
 | [`dev/setup.md`](dev/setup.md) | 开发环境 |
 | [`dev/lite.md`](dev/lite.md) | Lite 单机：单进程 vLLM/SGLang，无 etcd/BFF |

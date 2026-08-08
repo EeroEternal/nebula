@@ -1,43 +1,46 @@
 # Nebula 下一步优化计划
 
-> 更新：2026-07-13（**v1.3.0**）。已完成项摘要见 [`architecture.md`](./architecture.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；Release Notes 见 [`../versions/v1.3.0.md`](../versions/v1.3.0.md)。
+> 更新：2026-08-08（对齐 [`vision.md`](./vision.md) Phase）。已完成项摘要见 [`architecture.md`](./architecture.md)；产品总纲与能力分层见 vision；批次勾选见本文与 [`../dev/plan.md`](../dev/plan.md)；Release Notes 见 [`../versions/v1.3.0.md`](../versions/v1.3.0.md)。
 
 ## 当前进展（一句话）
 
-M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.3.0** 发布。真机 Gateway e2e、多引擎 benchmark、多租户压测暂缓。剩余：按需 N3–N4 / P7。生产 etcd 三节点暂缓。
+M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.3.0** 发布（L0 底座 + L1/L3/L4 雏形）。**Phase 0 真机通路径已部分落地**（Gateway→Router→引擎；SGLang+vLLM 双引擎；Scheduler/Node 声明式拉起）；多租户压测 / SLO burn / 生产 etcd 仍待。
 
 ## 优先级总表
 
 | 批次 | ID | 主题 | 状态 | 说明 |
 |------|----|------|------|------|
 | **N2** | Q1–Q4 | 工程质量 | ✅ | BFF 去重、HTTP client、observe、CI |
-| **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd 暂缓 |
+| **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd → Phase 0 |
 | **N4-Obs** | O1–O10 | 可观测 | ✅ O1–O8 / ⏸ O9–O10 | SLO runbook + 告警样例已落；O9 按需 |
 | **Product P0** | P0 | 契约与观测可信度 | ✅ Batch 1–2 | 见 [`../dev/plan.md`](../dev/plan.md) |
-| **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 | 含能力 etcd 持久化、版本支持表 |
+| **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 / ✅ 真机通路径 | 含能力 etcd 持久化、版本支持表；5090 上 SGLang Node 声明式已通；契约硬化 → Phase 1 |
 | **Product P2** | P2 | Serving Cell 只读接入 | ❌ 已移除 | CellIngress / `/cells/` 已下线，不再宣传 |
-| **Product P3** | P3 | 镜像平台 / 加速器台账 | ✅ Batch 1–2 | 兼容矩阵 + platforms 放置 + 库存 API/控制台；历史画像 ⏸ |
-| **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 | ModelSlo CRUD/评估 + 诊断时间线；真机 burn ⏸ |
-| **Product P5** | P5 | Benchmark / 推荐 / Canary | ✅ Batch 1 / ⏸ e2e | schema + scripts + BFF + 控制台；真机双引擎 ⏸ |
-| **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ⏸ 压测 | Tenant + Gateway 准入 + 用量成本；真机压测 ⏸ |
-| **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP；EngineShim |
-| **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能 |
-| **K8s** | K0–K3 | K8s / HAMi 执行面 | ⏸ | etcd 声明 + controller 起 Pod；见 [`../dev/k8s.md`](../dev/k8s.md) |
+| **Product P3** | P3 | 镜像平台 / 加速器台账 | ✅ Batch 1–2 | 兼容矩阵 + platforms 放置 + 库存 API/控制台；历史画像 → Phase 3 |
+| **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 | ModelSlo CRUD/评估 + 诊断时间线；真机 burn → Phase 0；SLA 闭环 → Phase 3 |
+| **Product P5** | P5 | Benchmark / 推荐 / Canary | ✅ Batch 1 / ✅ 双引擎通路径 | 证据面已落；5090 上 Qwen3.5-4B × SGLang+vLLM 经 Gateway 均 200；Selection 成层 → Phase 1 |
+| **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ⏸ 压测 | Tenant + Gateway 准入 + 用量成本；压测 → Phase 0；成本联动 → Phase 3 |
+| **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP / EngineShim → Phase 2（有需求再开） |
+| **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能；选型向导属 Phase 1 |
+| **K8s** | K0–K3 | K8s / HAMi 执行面 | ⏸ | 与 Phase 正交；有集群虚拟化客户再开；见 [`../dev/k8s.md`](../dev/k8s.md) |
 
-原则：不阻塞日常推理；生产 etcd 三节点仍暂缓。
+原则：不阻塞日常推理；不破坏 L0 主轴；智能/重治理不进推理热路径。
 
 ---
 
-## 下一阶段顺序
+## 下一阶段顺序（对齐 vision Phase）
 
-```
-①–⑦ Product P0–P6 Batch 1          ✅ 已随 v1.3.0 发布
-⑧ N3–N4 / P7（有需求再开）
-⑧b K8s/HAMi K0–K1（有集群虚拟化客户再开；边界见 AGENTS.md / dev/k8s.md）
-⑨ 生产 etcd 三节点（暂缓）
-⑩ 真机 e2e / 多引擎 benchmark / 多租户压测（环境就绪后）
-```
+总纲路线见 [`vision.md`](./vision.md) §8。本文把既有 ⏸ 项映射到 Phase；Batch 勾选仍以本节下方历史表为准。
 
+| 阶段 | 对应层 | 重点 | 状态 | 承接的既有项 |
+|------|--------|------|------|----------------|
+| **已交付** | L0 + 雏形 | P0–P6 Batch 1、N1 主体、O1–O8、Lite | ✅ | v1.3.0 / v1.4.0 |
+| **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径 / ⏸ 其余 | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node 拉起。待：多租户压测、SLO burn、生产 etcd |
+| **Phase 1** | L1 + L3 骨架 | 一致性契约套件；ModelProfile；Selection 推荐+草稿；控制台选型向导 | ⏸ 设计先行 | P1 契约硬化；P5 recommend/Canary 升为选择层（`selection.md` 待写） |
+| **Phase 2** | L2 | HardwarePool、池约束、PD/TP（按需）、故障隔离 | ⏸ 有需求再开 | N3 D4/D5；与 K8s 执行面正交 |
+| **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ | P4 闭环、P3 历史画像、P6 成本反哺 |
+
+旁路（不插入 Phase 主轴）：**K8s/HAMi K0–K1** — 有客户再开；边界见 [`AGENTS.md`](../../AGENTS.md)、[`../dev/k8s.md`](../dev/k8s.md)。
 ### Product P6 Batch 1 勾选
 
 | 项 | 状态 |
@@ -57,7 +60,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | `scripts/benchmark` workload + runner（dry-run / ingest） | ✅ |
 | BFF `/benchmarks/*` + `/canaries/*`；不足数据不默引擎 | ✅ |
 | 控制台 governance：runs / recommend / canary | ✅ |
-| 真机双模型 × vLLM/SGLang 重复执行 | ⏸ |
+| 真机双模型 × vLLM/SGLang 通路径（Qwen3.5-4B @ 5090） | ✅ 通路径（benchmark 重复跑 ⏸） |
 
 ### Product P4 Batch 1 勾选
 
@@ -88,7 +91,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | Adapter `EngineVersionSupport` 静态表 + `validate_engine_version` | ✅ |
 | `NodeStatus.platform` + `GpuStatus` name/driver/cuda；`NEBULA_NODE_PLATFORM` | ✅ |
 | Scheduler：`EngineImage.platforms` 参与候选过滤与可解释拒绝 | ✅ |
-| 真实 SGLang Gateway / vLLM Router e2e | ⏸ 等真机环境 |
+| 真实 SGLang Gateway / vLLM Router e2e | ✅ 通路径（Gateway→Router→SGLang/vLLM） |
 
 ### Product P2 — Serving Cell（已移除）
 
@@ -248,8 +251,10 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 | 文档 | 用途 |
 |------|------|
-| [`architecture.md`](./architecture.md) | 架构现状 |
-| 本文 | **排期真源**（按需 O9 / N3–N4；Product P1） |
+| [`vision.md`](./vision.md) | 产品总纲：定位、L0–L4、原则、Phase 路线 |
+| [`architecture.md`](./architecture.md) | L0 架构现状 |
+| 本文 | **排期真源**：Phase 映射 + 批次勾选 |
+| `selection.md`（待写） | L3 分册；不阻塞 Phase 0 门禁 |
 | [`../manual/module.md`](../manual/module.md) | 功能模块（可观测 / SLO / Loki / HA） |
 | [`../dev/ha/report.md`](../dev/ha/report.md) | HA 真机报告 |
 | [`../dev/stats.md`](../dev/stats.md) | etcd `/stats/` 控制面契约 |
