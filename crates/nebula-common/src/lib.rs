@@ -14,6 +14,7 @@ pub mod model_spec;
 pub mod model_template;
 pub mod node_status;
 pub mod placement;
+pub mod selection;
 pub mod slo;
 pub mod tenant;
 pub mod admission;
@@ -60,6 +61,11 @@ pub use benchmark::{
     BenchmarkRun, BenchmarkRunStatus, BenchmarkWorkload, CanaryRelease, CanaryState,
     PerformanceProfile, ProfileKey, RecommendCandidate, RecommendConfidence, RecommendRequest,
     RecommendResponse, WorkloadClass,
+};
+pub use selection::{
+    draft_from_candidate, select_backends, switching_cost, BackendCandidate, CurrentBackend,
+    DeploymentDraft, DraftRequest, ModelArchitecture, ModelProfile, SelectionConstraints,
+    SelectionPreference, SelectionRequest, SelectionResponse, WorkloadHint,
 };
 pub use tenant::{
     admit_static, estimate_cost, summarize_usage, usage_window_start_ms, AdmitDecision,

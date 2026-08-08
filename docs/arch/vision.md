@@ -311,7 +311,7 @@
 |------|------|
 | **本文（vision / 总纲）** | 定位、分层目标、原则、路线 |
 | [`architecture.md`](./architecture.md) | L0 组件、etcd、数据面路径 |
-| `selection.md`（待合入） | L3 数据模型、API、打分与切换 |
+| [`selection.md`](./selection.md) | L3 数据模型、API、打分与切换 |
 | [`../dev/plan.md`](../dev/plan.md) / [`roadmap.md`](./roadmap.md) | 批次状态与验收勾选 |
 | [`../manual/positioning.md`](../manual/positioning.md) / [`../manual/module.md`](../manual/module.md) | 对客户与运维的白话说明 |
 

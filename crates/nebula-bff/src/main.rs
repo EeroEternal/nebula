@@ -5,6 +5,7 @@ mod benchmark_svc;
 mod compat_slo;
 mod handlers;
 mod handlers_v2;
+mod selection_svc;
 mod service;
 mod state;
 mod tenant_svc;
@@ -182,6 +183,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/benchmarks/runs/:run_id", get(handlers_v2::get_benchmark_run))
         .route("/benchmarks/profiles", get(handlers_v2::list_benchmark_profiles))
         .route("/benchmarks/recommend", post(handlers_v2::recommend_engines))
+        .route(
+            "/model-profiles/:profile_id",
+            get(handlers_v2::get_model_profile).put(handlers_v2::put_model_profile),
+        )
+        .route("/selection/recommend", post(handlers_v2::selection_recommend))
+        .route("/selection/draft", post(handlers_v2::selection_draft))
+        .route("/selection/apply", post(handlers_v2::selection_apply))
         .route(
             "/canaries",
             get(handlers_v2::list_canaries).post(handlers_v2::create_canary),

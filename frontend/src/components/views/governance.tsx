@@ -11,10 +11,11 @@ import type {
     BenchmarkRun,
     CanaryRelease,
     CompatibilityRule,
+    DeploymentDraft,
     DiagnosticEvent,
     HardwareInventory,
     ModelSlo,
-    RecommendResponse,
+    SelectionResponse,
     SloEvaluation,
     Tenant,
     TenantCostSummary,
@@ -42,8 +43,10 @@ export function GovernanceView() {
     const [evalUid, setEvalUid] = useState("")
     const [evaluation, setEvaluation] = useState<SloEvaluation | null>(null)
     const [recModel, setRecModel] = useState("")
+    const [recUid, setRecUid] = useState("")
     const [recWorkload, setRecWorkload] = useState("short-chat-v1")
-    const [recommend, setRecommend] = useState<RecommendResponse | null>(null)
+    const [recommend, setRecommend] = useState<SelectionResponse | null>(null)
+    const [draft, setDraft] = useState<DeploymentDraft | null>(null)
     const [canaryModel, setCanaryModel] = useState("")
     const [canaryCandidate, setCanaryCandidate] = useState("")
     const [canaryStable, setCanaryStable] = useState("")
@@ -132,16 +135,65 @@ export function GovernanceView() {
     const runRecommend = async () => {
         if (!recModel.trim()) return
         try {
-            const resp = await v2.recommendEngines({
-                model_name: recModel.trim(),
-                workload_id: recWorkload.trim() || undefined,
-            }, token || "")
+            const body = {
+                model: {
+                    profile_id: recUid.trim() || recModel.trim(),
+                    model_uid: recUid.trim() || undefined,
+                    model_name: recModel.trim(),
+                    architecture: "unknown",
+                },
+                workload: { workload_id: recWorkload.trim() || undefined },
+                constraints: { preference: "latency", max_candidates: 5 },
+                current: {},
+            }
+            const resp = await v2.selectionRecommend(body, token || "")
             setRecommend(resp)
+            setDraft(null)
             if (resp.status === "insufficient_data") {
                 toast.message(resp.message || t("governance.recInsufficient"))
             }
         } catch (err) {
             toast.error(err instanceof Error ? err.message : "recommend failed")
+        }
+    }
+
+    const runDraft = async (idx: number) => {
+        if (!recModel.trim() || !recUid.trim()) {
+            toast.error(t("governance.selectionNeedUid"))
+            return
+        }
+        try {
+            const d = await v2.selectionDraft({
+                selection: {
+                    model: {
+                        profile_id: recUid.trim(),
+                        model_uid: recUid.trim(),
+                        model_name: recModel.trim(),
+                        architecture: "unknown",
+                    },
+                    workload: { workload_id: recWorkload.trim() || undefined },
+                    constraints: { preference: "latency", max_candidates: 5 },
+                    current: {},
+                },
+                candidate_index: idx,
+                model_uid: recUid.trim(),
+                replicas: 1,
+            }, token || "")
+            setDraft(d)
+            toast.success(t("governance.selectionDraftReady"))
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : "draft failed")
+        }
+    }
+
+    const runApply = async () => {
+        if (!draft) return
+        try {
+            const applied = await v2.selectionApply({ draft, upsert_spec: true }, token || "")
+            setDraft(applied)
+            toast.success(t("governance.selectionApplied"))
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : "apply failed")
         }
     }
 
@@ -376,14 +428,21 @@ export function GovernanceView() {
 
             <section className="bg-card/40 border border-border rounded-xl p-6 space-y-4">
                 <h3 className="text-xs font-bold font-mono uppercase tracking-widest flex items-center gap-2">
-                    <FlaskConical className="h-3.5 w-3.5" /> {t("governance.recommend")}
+                    <FlaskConical className="h-3.5 w-3.5" /> {t("governance.selection")}
                 </h3>
-                <div className="flex flex-wrap gap-2 max-w-2xl">
+                <p className="text-xs text-muted-foreground">{t("governance.selectionHint")}</p>
+                <div className="flex flex-wrap gap-2 max-w-3xl">
                     <Input
                         className="font-mono max-w-[200px]"
                         placeholder="model_name"
                         value={recModel}
                         onChange={(e) => setRecModel(e.target.value)}
+                    />
+                    <Input
+                        className="font-mono max-w-[160px]"
+                        placeholder="model_uid"
+                        value={recUid}
+                        onChange={(e) => setRecUid(e.target.value)}
                     />
                     <Input
                         className="font-mono max-w-[180px]"
@@ -403,18 +462,35 @@ export function GovernanceView() {
                         </div>
                         {recommend.candidates.length === 0 ? (
                             <p className="text-xs text-muted-foreground">{t("governance.recInsufficient")}</p>
-                        ) : recommend.candidates.map((c) => (
-                            <p key={`${c.engine_type}-${c.image_id || ""}-${c.rationale}`} className="text-xs font-mono text-muted-foreground">
-                                {c.engine_type}
-                                {c.engine_version ? `@${c.engine_version}` : ""}
-                                {" · "}
-                                conf={c.confidence}
-                                {c.ttft_p95_ms != null ? ` · ttft_p95=${c.ttft_p95_ms.toFixed(0)}ms` : ""}
-                                {c.throughput_tps != null ? ` · tps=${c.throughput_tps.toFixed(1)}` : ""}
-                                {" — "}
-                                {c.rationale}
-                            </p>
+                        ) : recommend.candidates.map((c, idx) => (
+                            <div key={`${c.engine_type}-${c.image_id || ""}-${idx}`} className="flex flex-wrap items-center gap-2 text-xs font-mono text-muted-foreground">
+                                <span>
+                                    {c.engine_type}
+                                    {c.engine_version ? `@${c.engine_version}` : ""}
+                                    {" · "}
+                                    conf={c.confidence}
+                                    {" · "}
+                                    switch={c.switching_cost.toFixed(2)}
+                                    {c.ttft_p95_ms != null ? ` · ttft_p95=${c.ttft_p95_ms.toFixed(0)}ms` : ""}
+                                    {c.throughput_tps != null ? ` · tps=${c.throughput_tps.toFixed(1)}` : ""}
+                                    {" — "}
+                                    {c.reasons.join("; ")}
+                                </span>
+                                <Button size="sm" variant="outline" onClick={() => void runDraft(idx)}>
+                                    {t("governance.selectionDraft")}
+                                </Button>
+                            </div>
                         ))}
+                    </div>
+                )}
+                {draft && (
+                    <div className="border border-border/40 rounded-lg p-4 space-y-2">
+                        <p className="text-xs font-mono">
+                            draft {draft.model_uid} → {draft.engine_type}
+                            {draft.image_id ? ` / ${draft.image_id}` : ""}
+                        </p>
+                        <p className="text-xs text-muted-foreground">{draft.note}</p>
+                        <Button onClick={() => void runApply()}>{t("governance.selectionApply")}</Button>
                     </div>
                 )}
             </section>

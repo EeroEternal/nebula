@@ -108,6 +108,8 @@ import type {
   BenchmarkRun,
   RecommendRequest,
   RecommendResponse,
+  SelectionResponse,
+  DeploymentDraft,
   CanaryRelease,
   Tenant,
   TenantCostSummary,
@@ -251,6 +253,66 @@ export const v2 = {
 
   recommendEngines: (body: RecommendRequest, token?: string) =>
     apiPost<RecommendResponse, RecommendRequest>('/v2/benchmarks/recommend', body, token),
+
+  selectionRecommend: (
+    body: {
+      model: {
+        profile_id: string
+        model_uid?: string
+        model_name: string
+        architecture?: string
+        parameter_billions?: number
+        quantization?: string
+        context_length?: number
+      }
+      workload?: { workload_id?: string; concurrency?: number; target_qps?: number }
+      constraints?: {
+        platform?: string
+        ttft_p95_ms_max?: number
+        throughput_tps_min?: number
+        preference?: string
+        max_candidates?: number
+        allowed_engines?: string[]
+      }
+      current?: { engine_type?: string; image_id?: string; platform?: string }
+    },
+    token?: string,
+  ) => apiPost<SelectionResponse, typeof body>('/v2/selection/recommend', body, token),
+
+  selectionDraft: (
+    body: {
+      selection: {
+        model: {
+          profile_id: string
+          model_uid?: string
+          model_name: string
+          architecture?: string
+          parameter_billions?: number
+          quantization?: string
+          context_length?: number
+        }
+        workload?: { workload_id?: string; concurrency?: number; target_qps?: number }
+        constraints?: {
+          platform?: string
+          ttft_p95_ms_max?: number
+          throughput_tps_min?: number
+          preference?: string
+          max_candidates?: number
+          allowed_engines?: string[]
+        }
+        current?: { engine_type?: string; image_id?: string; platform?: string }
+      }
+      candidate_index?: number
+      model_uid?: string
+      replicas?: number
+    },
+    token?: string,
+  ) => apiPost<DeploymentDraft, typeof body>('/v2/selection/draft', body, token),
+
+  selectionApply: (
+    body: { draft: DeploymentDraft; upsert_spec?: boolean },
+    token?: string,
+  ) => apiPost<DeploymentDraft, typeof body>('/v2/selection/apply', body, token),
 
   listCanaries: (token?: string) =>
     apiGet<CanaryRelease[]>('/v2/canaries', token),

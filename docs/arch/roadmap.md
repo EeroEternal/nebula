@@ -36,7 +36,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 |------|--------|------|------|----------------|
 | **已交付** | L0 + 雏形 | P0–P6 Batch 1、N1 主体、O1–O8、Lite | ✅ | v1.3.0 / v1.4.0 |
 | **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径 / ⏸ 其余 | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node 拉起。待：多租户压测、SLO burn、生产 etcd |
-| **Phase 1** | L1 + L3 骨架 | 一致性契约套件；ModelProfile；Selection 推荐+草稿；控制台选型向导 | ⏸ 设计先行 | P1 契约硬化；P5 recommend/Canary 升为选择层（`selection.md` 待写） |
+| **Phase 1** | L1 + L3 骨架 | 一致性契约套件；ModelProfile；Selection 推荐+草稿；控制台选型向导 | ✅ 骨架 | [`selection.md`](./selection.md)、[`../dev/contracts.md`](../dev/contracts.md)；`/api/v2/selection/*` + 治理页半自动 |
 | **Phase 2** | L2 | HardwarePool、池约束、PD/TP（按需）、故障隔离 | ⏸ 有需求再开 | N3 D4/D5；与 K8s 执行面正交 |
 | **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ | P4 闭环、P3 历史画像、P6 成本反哺 |
 
@@ -254,7 +254,8 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 | [`vision.md`](./vision.md) | 产品总纲：定位、L0–L4、原则、Phase 路线 |
 | [`architecture.md`](./architecture.md) | L0 架构现状 |
 | 本文 | **排期真源**：Phase 映射 + 批次勾选 |
-| `selection.md`（待写） | L3 分册；不阻塞 Phase 0 门禁 |
+| [`selection.md`](./selection.md) | L3 分册 |
+| [`../dev/contracts.md`](../dev/contracts.md) | L1 契约验收条目 |
 | [`../manual/module.md`](../manual/module.md) | 功能模块（可观测 / SLO / Loki / HA） |
 | [`../dev/ha/report.md`](../dev/ha/report.md) | HA 真机报告 |
 | [`../dev/stats.md`](../dev/stats.md) | etcd `/stats/` 控制面契约 |

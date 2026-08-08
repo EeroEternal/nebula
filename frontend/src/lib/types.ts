@@ -509,6 +509,35 @@ export interface RecommendResponse {
   message?: string | null
 }
 
+export interface SelectionResponse {
+  model_name: string
+  status: string
+  candidates: Array<{
+    engine_type: string
+    engine_version?: string | null
+    image_id?: string | null
+    platform?: string | null
+    confidence: string
+    switching_cost: number
+    evidence_run_ids: string[]
+    ttft_p95_ms?: number | null
+    throughput_tps?: number | null
+    cost_per_1k_tokens?: number | null
+    reasons: string[]
+  }>
+  message?: string | null
+}
+
+export interface DeploymentDraft {
+  model_uid: string
+  model_name: string
+  engine_type: string
+  image_id?: string | null
+  deployment: ModelDeployment
+  candidate: SelectionResponse["candidates"][number]
+  note: string
+}
+
 export interface CanaryRelease {
   canary_id: string
   model_uid: string

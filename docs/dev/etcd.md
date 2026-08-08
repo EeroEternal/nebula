@@ -46,6 +46,7 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 | `/pricing/` | Postgres（账单同域） |
 | `/usage/{tenant}/{window}` | Postgres / 计费库（防窗口膨胀） |
 | `/benchmarks/runs\|profiles/…` | Postgres；大结果外置 |
+| `/model_profiles/` | Postgres（L3 画像；现 BFF 最新值借住） |
 | `/model_requests/` | 遗留只读；迁移后删除，**禁止新写** |
 
 ## D. 不应进

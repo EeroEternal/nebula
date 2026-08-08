@@ -27,12 +27,14 @@
 |------|------|
 | [`arch/vision.md`](arch/vision.md) | 统一模型服务平台总纲：定位、能力分层（L0–L4）、原则与演进 |
 | [`arch/architecture.md`](arch/architecture.md) | 系统架构（L0 组件级实现） |
+| [`arch/selection.md`](arch/selection.md) | L3 智能选择层：画像、打分、草稿与半自动落地 |
 | [`arch/roadmap.md`](arch/roadmap.md) | 排期（与 vision Phase 0–3 对齐） |
 | [`dev/plan.md`](dev/plan.md) | 开发计划 |
 | [`dev/setup.md`](dev/setup.md) | 开发环境 |
 | [`dev/lite.md`](dev/lite.md) | Lite 单机：单进程 vLLM/SGLang，无 etcd/BFF |
 | [`dev/ownership.md`](dev/ownership.md) | 接口归属 |
 | [`dev/etcd.md`](dev/etcd.md) | etcd 放什么 / 不放什么 |
+| [`dev/contracts.md`](dev/contracts.md) | L1 一致性契约套件验收条目 |
 | [`dev/k8s.md`](dev/k8s.md) | K8s / HAMi 运行时边界与分阶段方案 |
 | [`dev/stats.md`](dev/stats.md) | 引擎状态数据格式 |
 | [`dev/unigateway.md`](dev/unigateway.md) | 协议适配 |

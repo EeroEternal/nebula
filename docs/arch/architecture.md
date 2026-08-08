@@ -116,7 +116,7 @@ graph BT
 | `/model_cache/` `/node_disk/` `/alerts/` | 节点运维 | B | lease |
 | `/download_progress/` | 下载进度 | B | 短 TTL |
 | `/templates/` | 模板 | C | 借住；宜迁 PG |
-| `/pricing/` `/usage/` `/benchmarks/…` | 成本/画像 | C | 借住；宜迁 PG |
+| `/pricing/` `/usage/` `/benchmarks/…` `/model_profiles/` | 成本/画像 | C | 借住；宜迁 PG |
 | `/model_requests/` | 遗留 | C | 只读；禁止新写 |
 
 约束：placement 全路径 CAS；Router 每模型 `plan_version`；watch 用快照 revision，compact/重连后全量校正。Prometheus **禁止**高基数 `tenant_id` label。
@@ -139,7 +139,7 @@ graph BT
 |------|------|
 | `/v1/chat/completions`、`/v1/responses` | ✅ |
 | `/v1/embeddings` / `rerank`、`/v1/models` | ✅ |
-| BFF `/api/v2/compat|slos|benchmarks|canaries|tenants|pricing` | ✅ |
+| BFF `/api/v2/compat|slos|benchmarks|canaries|selection|tenants|pricing` | ✅ |
 
 控制台写路径走 BFF；Gateway `/v1/admin/*` 写接口不扩新双实现（见 [`ownership.md`](../dev/ownership.md)）。
 

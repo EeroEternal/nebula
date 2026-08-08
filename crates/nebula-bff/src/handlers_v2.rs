@@ -652,6 +652,73 @@ pub async fn rollback_canary(
 }
 
 // ---------------------------------------------------------------------------
+// L3 Selection (Phase 1)
+// ---------------------------------------------------------------------------
+
+pub async fn put_model_profile(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(profile_id): Path<String>,
+    Json(mut req): Json<nebula_common::ModelProfile>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp);
+    }
+    req.profile_id = profile_id;
+    let p = crate::selection_svc::put_profile(&*st.store, req).await?;
+    Ok((StatusCode::OK, Json(p)).into_response())
+}
+
+pub async fn get_model_profile(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(profile_id): Path<String>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp);
+    }
+    let p = crate::selection_svc::get_profile(&*st.store, &profile_id).await?;
+    Ok((StatusCode::OK, Json(p)).into_response())
+}
+
+pub async fn selection_recommend(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<nebula_common::SelectionRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp);
+    }
+    let resp = crate::selection_svc::recommend(&*st.store, req).await?;
+    Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
+pub async fn selection_draft(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<nebula_common::DraftRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp);
+    }
+    let draft = crate::selection_svc::draft(&*st.store, req).await?;
+    Ok((StatusCode::OK, Json(draft)).into_response())
+}
+
+pub async fn selection_apply(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<crate::selection_svc::ApplySelectionRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp);
+    }
+    let draft =
+        crate::selection_svc::apply(&*st.store, ctx.principal.clone(), req).await?;
+    Ok((StatusCode::OK, Json(draft)).into_response())
+}
+
+// ---------------------------------------------------------------------------
 // P6 Tenants / Pricing / Usage / Cost
 // ---------------------------------------------------------------------------
 
