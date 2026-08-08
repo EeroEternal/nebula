@@ -11,6 +11,7 @@
 | [`manual/positioning.md`](manual/positioning.md) | 产品定位与特性：是什么、模块说明、术语、能做什么 / 还在路上 |
 | [`manual/module.md`](manual/module.md) | 各功能模块：目录/网关/BFF/监控告警/高可用 |
 | [`manual/deployment.md`](manual/deployment.md) | 怎么安装、默认端口、常见问题 |
+| [`manual/etcd-ha.md`](manual/etcd-ha.md) | 生产 etcd 三节点：拓扑、迁移要点、演练与排障 |
 
 ## 版本（`versions/`）
 

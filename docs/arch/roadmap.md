@@ -4,14 +4,14 @@
 
 ## 当前进展（一句话）
 
-M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.3.0** 发布（L0 底座 + L1/L3/L4 雏形）。**Phase 0 真机通路径 + 多租户隔离压测 + 轻量 SLO burn 已落地**（Gateway→Router→引擎；双引擎；声明式拉起；A 限流/B 隔离；abort 不计 5xx）；生产 etcd 三节点仍待。
+M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.3.0** 发布（L0 底座 + L1/L3/L4 雏形）。**Phase 0 真机通路径 + 多租户隔离压测 + 轻量 SLO burn + etcd HA runbook 已落地**（Gateway→Router→引擎；双引擎；声明式拉起；A 限流/B 隔离；abort 不计 5xx；[`manual/etcd-ha.md`](../manual/etcd-ha.md)）；生产 etcd 三节点切入仍按维护窗。
 
 ## 优先级总表
 
 | 批次 | ID | 主题 | 状态 | 说明 |
 |------|----|------|------|------|
 | **N2** | Q1–Q4 | 工程质量 | ✅ | BFF 去重、HTTP client、observe、CI |
-| **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ etcd | 真机报告；生产 etcd → Phase 0 |
+| **N1** | D3 | 接入/调度 HA | ✅ 主体 / ⏸ 生产 etcd 切入 | 真机报告；runbook [`../manual/etcd-ha.md`](../manual/etcd-ha.md) |
 | **N4-Obs** | O1–O10 | 可观测 | ✅ O1–O8 / ⏸ O9–O10 | SLO runbook + 告警样例已落；O9 按需 |
 | **Product P0** | P0 | 契约与观测可信度 | ✅ Batch 1–2 | 见 [`../dev/plan.md`](../dev/plan.md) |
 | **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 / ✅ 真机通路径 | 含能力 etcd 持久化、版本支持表；5090 上 SGLang Node 声明式已通；契约硬化 → Phase 1 |
@@ -35,7 +35,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | 阶段 | 对应层 | 重点 | 状态 | 承接的既有项 |
 |------|--------|------|------|----------------|
 | **已交付** | L0 + 雏形 | P0–P6 Batch 1、N1 主体、O1–O8、Lite | ✅ | v1.3.0 / v1.4.0 |
-| **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径+压测+轻量 burn / ⏸ etcd HA | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node；`phase0_tenant_isolation.sh`；`phase0_slo_burn.sh`（abort≠5xx）。待：生产 etcd |
+| **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径+压测+轻量 burn+runbook / ⏸ 生产切入 | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node；`phase0_tenant_isolation.sh`；`phase0_slo_burn.sh`；[`../manual/etcd-ha.md`](../manual/etcd-ha.md)。待：维护窗迁生产 keyspace |
 | **Phase 1** | L1 + L3 骨架 | 一致性契约套件；ModelProfile；Selection 推荐+草稿；控制台选型向导 | ✅ 骨架 + L1 契约硬化（含流式 tool_calls）+ Selection 可解释/向导加深 | [`selection.md`](./selection.md)（score/breakdown、`current` 自动填充）；[`../dev/contracts.md`](../dev/contracts.md)（C1–C6 ✅）；`/api/v2/selection/*` + 治理页 preference/platform |
 | **Phase 2** | L2 | HardwarePool、池约束、PD/TP（按需）、故障隔离 | ⏸ 有需求再开 | N3 D4/D5；与 K8s 执行面正交 |
 | **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ | P4 闭环、P3 历史画像、P6 成本反哺 |
@@ -211,7 +211,7 @@ Serving Cell（`CellIngress` / etcd `/cells/` / BFF `/api/v2/cells` / Router 整
 | Scheduler 选主 + fencing 真机 | ✅ |
 | Gateway / Router ×2 + LB 真机 | ✅ |
 | 真机报告 | ✅ [`../dev/ha/report.md`](../dev/ha/report.md) |
-| 生产 etcd 三节点 | ⏸ **暂缓** |
+| 生产 etcd 三节点 | ⏸ 切入暂缓；runbook ✅ [`../manual/etcd-ha.md`](../manual/etcd-ha.md) |
 
 ---
 
