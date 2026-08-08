@@ -4,7 +4,7 @@ use std::time::Duration;
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
     response::{sse::Event, IntoResponse, Response, Sse},
     Extension, Json,
 };
@@ -17,16 +17,19 @@ use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use uuid::Uuid;
 
 use nebula_common::{
-    build_execution_context, inject_execution_context, peek_json_model_field, ClusterStatus,
-    DesiredState, EndpointInfo, ModelDeployment, ModelLoadRequest, ModelRequest, ModelSource,
-    ModelSpec, NodeStatus, PlacementPlan, Tenant, TenantDenyCode,
+    build_execution_context, ClusterStatus, DesiredState, EndpointInfo, ModelDeployment,
+    ModelLoadRequest, ModelRequest, ModelSource, ModelSpec, NodeStatus, PlacementPlan,
 };
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::auth::{require_role, AuthContext, Role};
-use crate::protocol_adapt::{
-    anthropic_json_to_openai_chat, openai_chat_json_to_anthropic, openai_sse_content_delta,
-    responses_json_to_openai_chat,
+use crate::interface::{
+    anthropic_json_to_openai_chat, check_tooling_gate, openai_chat_json_to_anthropic,
+    openai_sse_content_delta, responses_json_to_openai_chat,
+};
+use crate::proxy_common::{
+    append_headers, classify_reqwest_error, forward_upstream_response, prepare_upstream,
+    prepare_upstream_from_json, post_router_chat, to_reqwest_headers,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
@@ -42,8 +45,6 @@ pub async fn create_responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let _ctx = build_execution_context(&headers, auth.tenant_id.as_deref(), None);
-
     let payload: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -54,6 +55,14 @@ pub async fn create_responses(
                 .into_response();
         }
     };
+
+    let model = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if let Some(deny) = check_tooling_gate(&*st.store, &payload, model.as_deref()).await {
+        return deny;
+    }
 
     let (resp_req, chat_body) = match responses_json_to_openai_chat(&payload) {
         Ok(v) => v,
@@ -66,6 +75,11 @@ pub async fn create_responses(
         }
     };
 
+    let prepared = match prepare_upstream_from_json(&st, &auth, &headers, &chat_body).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
     let builder_seed = crate::responses::CreateResponseRequest {
         model: Some(resp_req.model.clone()),
         input: resp_req.input.clone(),
@@ -73,12 +87,20 @@ pub async fn create_responses(
         stream: Some(resp_req.stream),
     };
 
-    proxy_chat_as_responses(st, headers, chat_body, builder_seed, resp_req.stream).await
+    proxy_chat_as_responses(
+        st,
+        prepared,
+        chat_body,
+        builder_seed,
+        resp_req.stream,
+    )
+    .await
 }
 
 /// Anthropic Messages API → OpenAI chat via UniGateway protocol → Router → Anthropic-shaped reply.
 pub async fn create_anthropic_messages(
     State(st): State<AppState>,
+    Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -99,6 +121,12 @@ pub async fn create_anthropic_messages(
         .unwrap_or("unknown")
         .to_string();
 
+    if let Some(deny) =
+        check_tooling_gate(&*st.store, &payload, Some(requested_model.as_str())).await
+    {
+        return deny;
+    }
+
     let chat_body = match anthropic_json_to_openai_chat(&payload) {
         Ok(v) => v,
         Err(e) => {
@@ -115,54 +143,27 @@ pub async fn create_anthropic_messages(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    proxy_chat_as_anthropic(st, headers, chat_body, requested_model, stream).await
-}
+    let prepared = match prepare_upstream_from_json(&st, &auth, &headers, &chat_body).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
 
-async fn post_router_chat(
-    st: &AppState,
-    headers: &HeaderMap,
-    chat_body: Value,
-) -> Result<reqwest::Response, Response> {
-    let url = format!(
-        "{}/v1/chat/completions",
-        st.router_base_url.trim_end_matches('/')
-    );
-    let mut req_headers = to_reqwest_headers(headers);
-    nebula_common::telemetry::inject_trace_context(&mut req_headers);
-    req_headers.insert(
-        reqwest::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-
-    match st
-        .http
-        .post(url)
-        .headers(req_headers)
-        .json(&chat_body)
-        .send()
-        .await
-    {
-        Ok(r) => Ok(r),
-        Err(e) => {
-            let kind = classify_reqwest_error(&e);
-            st.metrics.record_upstream_error(kind);
-            tracing::error!(error=%e, "upstream chat request failed");
-            Err((StatusCode::BAD_GATEWAY, "upstream request failed").into_response())
-        }
-    }
+    proxy_chat_as_anthropic(st, prepared, chat_body, requested_model, stream).await
 }
 
 async fn proxy_chat_as_responses(
     st: AppState,
-    headers: HeaderMap,
+    prepared: crate::proxy_common::PreparedUpstream,
     chat_body: Value,
     builder_seed: crate::responses::CreateResponseRequest,
     stream: bool,
 ) -> Response {
-    let resp = match post_router_chat(&st, &headers, chat_body).await {
+    let resp = match post_router_chat(&st, prepared.headers.clone(), &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
+    // Keep admission guard alive until response finishes.
+    let _guard = prepared._conc_guard;
 
     if !resp.status().is_success() {
         let status =
@@ -262,20 +263,49 @@ async fn proxy_chat_as_responses(
         .unwrap_or("")
         .to_string();
     let built = build_response(&builder_seed, text);
-    (StatusCode::OK, Json(build_non_stream_json(&built))).into_response()
+    let mut out = build_non_stream_json(&built);
+    // Preserve non-stream tool_calls as Responses function_call output items.
+    if let Some(tcs) = openai
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|v| v.as_array())
+    {
+        if let Some(output) = out.get_mut("output").and_then(|v| v.as_array_mut()) {
+            for tc in tcs {
+                let call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = tc
+                    .pointer("/function/name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let arguments = tc
+                    .pointer("/function/arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
+                output.push(json!({
+                    "id": format!("fc_{}", Uuid::new_v4()),
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": arguments,
+                }));
+            }
+        }
+    }
+    (StatusCode::OK, Json(out)).into_response()
 }
 
 async fn proxy_chat_as_anthropic(
     st: AppState,
-    headers: HeaderMap,
+    prepared: crate::proxy_common::PreparedUpstream,
     chat_body: Value,
     requested_model: String,
     stream: bool,
 ) -> Response {
-    let resp = match post_router_chat(&st, &headers, chat_body).await {
+    let resp = match post_router_chat(&st, prepared.headers.clone(), &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
+    let _guard = prepared._conc_guard;
 
     if !resp.status().is_success() {
         let status =
@@ -425,40 +455,6 @@ pub async fn not_implemented(
     (StatusCode::NOT_IMPLEMENTED, Json(body))
 }
 
-fn to_reqwest_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
-    let mut out = reqwest::header::HeaderMap::new();
-    for (k, v) in headers.iter() {
-        if k.as_str().eq_ignore_ascii_case("host")
-            || k.as_str().eq_ignore_ascii_case("content-length")
-        {
-            continue;
-        }
-        out.insert(k, v.clone());
-    }
-    out
-}
-
-fn append_headers(src: &reqwest::header::HeaderMap, dst: &mut Response) {
-    for (k, v) in src.iter() {
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(k.as_str().as_bytes()),
-            HeaderValue::from_bytes(v.as_bytes()),
-        ) {
-            dst.headers_mut().insert(name, value);
-        }
-    }
-}
-
-fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        return "timeout";
-    }
-    if error.is_connect() {
-        return "connect";
-    }
-    "other"
-}
-
 pub async fn proxy_post(
     State(st): State<AppState>,
     Extension(auth): Extension<AuthContext>,
@@ -484,60 +480,28 @@ pub async fn proxy_post(
         }
     };
 
-    let model = peek_json_model_field(&body_bytes);
-    let ctx = build_execution_context(&headers, auth.tenant_id.as_deref(), None);
-
-    // Tenant admission at Gateway boundary (not pushed into engines).
-    let _conc_guard = if st.auth.multi_tenant {
-        if let Some(ref tenant_id) = ctx.tenant_id {
-            match load_tenant(&*st.store, tenant_id).await {
-                Ok(Some(tenant)) => {
-                    let est = ctx.budget_tokens.unwrap_or(0);
-                    match st
-                        .tenant_admission
-                        .try_admit(&tenant, model.as_deref(), est)
-                        .await
-                    {
-                        Ok(g) => Some(g),
-                        Err(code) => {
-                            st.metrics.record_tenant_deny(code.as_str());
-                            return deny_response(code);
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // Multi-tenant on but tenant record missing: allow with auth RPS only.
-                    None
-                }
-                Err(e) => {
-                    tracing::warn!(error=%e, tenant_id=%tenant_id, "tenant lookup failed; allowing request");
-                    None
-                }
+    // C5 tooling gate for chat completions (embeddings/rerank payloads rarely have tools).
+    if uri_path.contains("chat/completions") {
+        if let Ok(payload) = serde_json::from_slice::<Value>(&body_bytes) {
+            let model = payload
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Some(deny) = check_tooling_gate(&*st.store, &payload, model.as_deref()).await {
+                return deny;
             }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let mut outbound = headers.clone();
-    if let Some(ref model) = model {
-        if let Ok(v) = HeaderValue::from_str(model) {
-            outbound.insert(
-                HeaderName::from_static(nebula_common::HEADER_NEBULA_MODEL),
-                v,
-            );
         }
     }
-    inject_execution_context(&mut outbound, &ctx);
-    nebula_common::telemetry::inject_trace_context(&mut outbound);
-    let req_headers = to_reqwest_headers(&outbound);
+
+    let prepared = match prepare_upstream(&st, &auth, &headers, &body_bytes).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
 
     let resp = match st
         .http
-        .post(url)
-        .headers(req_headers)
+        .post(&url)
+        .headers(prepared.headers)
         .body(body_bytes)
         .send()
         .await
@@ -550,90 +514,9 @@ pub async fn proxy_post(
             return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
         }
     };
+    let _guard = prepared._conc_guard;
 
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let is_sse = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.contains("text/event-stream"))
-        .unwrap_or(false);
-    let resp_headers = resp.headers().clone();
-
-    if is_sse {
-        let mut upstream = resp.bytes_stream();
-        let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
-        let metrics = st.metrics.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = tx.closed() => {
-                        metrics
-                            .requests_aborted_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        tracing::info!("gateway SSE aborted: client disconnected");
-                        break;
-                    }
-                    item = upstream.next() => {
-                        match item {
-                            Some(Ok(b)) => {
-                                if tx.send(Ok(b)).await.is_err() {
-                                    metrics
-                                        .requests_aborted_total
-                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    tracing::info!("gateway SSE aborted: client dropped body");
-                                    break;
-                                }
-                            }
-                            Some(Err(_)) | None => break,
-                        }
-                    }
-                }
-            }
-        });
-
-        let stream = ReceiverStream::new(rx);
-        let mut out = Response::builder()
-            .status(status)
-            .header("content-type", "text/event-stream")
-            .body(Body::from_stream(stream))
-            .unwrap_or_else(|_| Response::new(Body::empty()));
-        append_headers(&resp_headers, &mut out);
-        return out;
-    }
-
-    let bytes = match resp.bytes().await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!(error=%e, "failed to read upstream response body");
-            Bytes::new()
-        }
-    };
-    let mut out = Response::builder()
-        .status(status)
-        .body(Body::from(bytes))
-        .unwrap_or_else(|_| Response::new(Body::empty()));
-    append_headers(&resp_headers, &mut out);
-    out
-}
-
-async fn load_tenant(store: &dyn MetaStore, tenant_id: &str) -> anyhow::Result<Option<Tenant>> {
-    match store.get(&format!("/tenants/{tenant_id}")).await? {
-        Some((data, _)) => Ok(serde_json::from_slice(&data).ok()),
-        None => Ok(None),
-    }
-}
-
-fn deny_response(code: TenantDenyCode) -> Response {
-    let mut resp = nebula_common::auth::tenant_denied(code.as_str(), code.message());
-    if let Ok(v) = HeaderValue::from_str(code.as_str()) {
-        resp.headers_mut().insert(
-            HeaderName::from_static("x-nebula-deny-code"),
-            v,
-        );
-    }
-    resp
+    forward_upstream_response(&st, resp).await
 }
 
 pub async fn proxy_v2(

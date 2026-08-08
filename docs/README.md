@@ -37,5 +37,5 @@
 | [`dev/contracts.md`](dev/contracts.md) | L1 一致性契约套件验收条目 |
 | [`dev/k8s.md`](dev/k8s.md) | K8s / HAMi 运行时边界与分阶段方案 |
 | [`dev/stats.md`](dev/stats.md) | 引擎状态数据格式 |
-| [`dev/unigateway.md`](dev/unigateway.md) | 协议适配 |
+| [`dev/unigateway.md`](dev/unigateway.md) | 接口层规范（UG 协议适配 + C5 tooling 门控） |
 | [`dev/ha/report.md`](dev/ha/report.md) | 高可用验收报告 |

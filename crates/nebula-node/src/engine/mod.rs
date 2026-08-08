@@ -81,6 +81,7 @@ pub trait Engine: Send + Sync {
             structured_output: None,
             kv_connector: None,
             grpc: None,
+            tool_calling: nebula_common::SupportLevel::Unknown,
             topologies: vec![],
             observability: Default::default(),
             notes: Some("unknown engine capability profile".into()),

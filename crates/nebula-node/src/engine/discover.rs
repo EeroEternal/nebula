@@ -35,6 +35,7 @@ pub fn merge_runtime_capability(
         structured_output: None,
         kv_connector: None,
         grpc: None,
+        tool_calling: SupportLevel::Unknown,
         topologies: vec![],
         observability: Default::default(),
         notes: Some("no static capability table".into()),

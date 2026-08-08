@@ -21,10 +21,10 @@ pub mod admission;
 
 pub use capability::{
     parse_version_tuple, resolve_engine_type, static_capability, static_capability_sglang,
-    static_capability_vllm, static_version_support, validate_engine_and_config,
-    validate_engine_type, validate_engine_version, validate_model_config, CapabilitySource,
-    EngineCapability, EngineVersionSupport, ObservabilityCapability, ReplicaCapability,
-    ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
+    static_capability_vllm, static_version_support, tool_calling_for_engine,
+    validate_engine_and_config, validate_engine_type, validate_engine_version, validate_model_config,
+    CapabilitySource, EngineCapability, EngineVersionSupport, ObservabilityCapability,
+    ReplicaCapability, ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
 };
 pub use cluster::ClusterStatus;
 pub use compat::{

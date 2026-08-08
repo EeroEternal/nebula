@@ -198,6 +198,11 @@ pub struct EngineCapability {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grpc: Option<bool>,
 
+    /// Whether the engine can honor OpenAI-style `tools` / `tool_choice`.
+    /// C5: Unsupported → Gateway rejects with stable `unsupported`; Unknown → allow + warn.
+    #[serde(default)]
+    pub tool_calling: SupportLevel,
+
     /// Topologies this engine release can participate in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topologies: Vec<ServingTopologyKind>,
@@ -257,6 +262,7 @@ pub fn static_capability_vllm() -> EngineCapability {
         structured_output: Some(true),
         kv_connector: Some(true),
         grpc: Some(false),
+        tool_calling: SupportLevel::Supported,
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
@@ -285,6 +291,7 @@ pub fn static_capability_sglang() -> EngineCapability {
         structured_output: Some(true),
         kv_connector: Some(true),
         grpc: Some(false),
+        tool_calling: SupportLevel::Supported,
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
@@ -299,6 +306,17 @@ pub fn static_capability_sglang() -> EngineCapability {
         },
         notes: Some("Ordinary Nebula-managed SGLang replicas".into()),
     }
+}
+
+/// Resolve `tool_calling` from the static table for a known engine type.
+/// Unknown / empty engine → `Unknown` (C5: allow + warn at Gateway).
+pub fn tool_calling_for_engine(engine_type: Option<&str>) -> SupportLevel {
+    let Some(et) = engine_type.map(str::trim).filter(|s| !s.is_empty()) else {
+        return SupportLevel::Unknown;
+    };
+    static_capability(&et.to_ascii_lowercase())
+        .map(|c| c.tool_calling)
+        .unwrap_or(SupportLevel::Unknown)
 }
 
 /// Validate `ModelConfig` against a resolved engine type's static capability.
@@ -427,11 +445,27 @@ mod tests {
             v.observability.prompt_cache_hit_rate,
             SupportLevel::Unsupported
         );
+        assert_eq!(v.tool_calling, SupportLevel::Supported);
 
         let s = static_capability_sglang();
         assert_eq!(
             s.observability.prefix_cache_hit_rate,
             SupportLevel::Unsupported
+        );
+        assert_eq!(s.tool_calling, SupportLevel::Supported);
+    }
+
+    #[test]
+    fn tool_calling_for_engine_unknown_when_missing() {
+        assert_eq!(tool_calling_for_engine(None), SupportLevel::Unknown);
+        assert_eq!(tool_calling_for_engine(Some("")), SupportLevel::Unknown);
+        assert_eq!(
+            tool_calling_for_engine(Some("tensorrt")),
+            SupportLevel::Unknown
+        );
+        assert_eq!(
+            tool_calling_for_engine(Some("vllm")),
+            SupportLevel::Supported
         );
     }
 
