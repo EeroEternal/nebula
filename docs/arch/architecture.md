@@ -118,6 +118,7 @@ graph BT
 | `/templates/` | 模板 | C | 借住；宜迁 PG |
 | `/pricing/` `/usage/` `/benchmarks/…` `/model_profiles/` | 成本/画像 | C | 借住；宜迁 PG |
 | `/model_requests/` | 遗留 | C | 只读；禁止新写 |
+| `/pools/{pool_id}`（拟议） | HardwarePool | — | L2；见 [`pool.md`](./pool.md)；未实现勿写生产 |
 
 约束：placement 全路径 CAS；Router 每模型 `plan_version`；watch 用快照 revision，compact/重连后全量校正。Prometheus **禁止**高基数 `tenant_id` label。
 

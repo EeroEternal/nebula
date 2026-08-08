@@ -257,7 +257,7 @@
 |--------|----------|----------|
 | L0 | 完整控制面 + Lite + 多租户 Batch1 | 真机 e2e、etcd 生产路径、压测证据 |
 | L1 | OpenAI Gateway、Capability、部分协议适配 | 工具调用/错误码/流式契约强制化；多引擎一致性套件 |
-| L2 | platform 过滤、兼容矩阵、单拓扑副本 | HardwarePool、PD/TP 拓扑、池级隔离与迁移规范 |
+| L2 | platform 过滤、兼容矩阵、单拓扑副本 | HardwarePool、PD/TP 拓扑、池级隔离与迁移规范（设计见 [`pool.md`](./pool.md)） |
 | L3 | P5 recommend + Canary | **独立选择层**、ModelProfile、切换成本、半自动闭环 |
 | L4 | SLO/诊断/审计/成本/多租户 | 真机 burn、容量规划、SLA 动作闭环、历史利用率 |
 
