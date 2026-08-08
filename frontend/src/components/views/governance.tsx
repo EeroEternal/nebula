@@ -374,13 +374,31 @@ export function GovernanceView() {
                         {evaluation.breaches.map((b) => (
                             <p key={b} className="text-xs text-destructive font-mono">{b}</p>
                         ))}
-                        {evaluation.suggestions.map((s) => (
-                            <p key={s.message} className="text-xs font-mono text-muted-foreground">
-                                [{s.target}/{s.kind}] {s.message}
-                            </p>
-                        ))}
                         {evaluation.status === "insufficient_data" && (
-                            <p className="text-xs text-muted-foreground">{t("governance.insufficient")}</p>
+                            <p className="text-xs text-amber-600/90 dark:text-amber-400/90 font-mono">
+                                {t("governance.insufficient")}
+                            </p>
+                        )}
+                        {evaluation.suggestions.length > 0 && (
+                            <div className="space-y-1.5 pt-1">
+                                <p className="text-[10px] uppercase tracking-wider font-mono text-muted-foreground">
+                                    {t("governance.sloSuggestions")}
+                                </p>
+                                {evaluation.suggestions.map((s) => (
+                                    <div
+                                        key={`${s.kind}-${s.message}`}
+                                        className="flex flex-wrap items-start gap-2 text-xs font-mono text-muted-foreground"
+                                    >
+                                        <Badge variant="outline" className="text-[9px] uppercase shrink-0">
+                                            {s.kind}
+                                        </Badge>
+                                        <span className="text-[10px] text-muted-foreground/70 shrink-0">
+                                            →{s.target}
+                                        </span>
+                                        <span className="min-w-0 flex-1">{s.message}</span>
+                                    </div>
+                                ))}
+                            </div>
                         )}
                     </div>
                 )}

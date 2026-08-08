@@ -17,7 +17,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 / ✅ 真机通路径 | 含能力 etcd 持久化、版本支持表；5090 上 SGLang Node 声明式已通；契约硬化 → Phase 1 |
 | **Product P2** | P2 | Serving Cell 只读接入 | ❌ 已移除 | CellIngress / `/cells/` 已下线，不再宣传 |
 | **Product P3** | P3 | 镜像平台 / 加速器台账 | ✅ Batch 1–2 | 兼容矩阵 + platforms 放置 + 库存 API/控制台；历史画像 → Phase 3 |
-| **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 / ✅ 轻量 burn | ModelSlo CRUD/评估 + 诊断时间线；真机 abort 口径 + offline metrics evaluate（低流量仍 `insufficient_data`）；Prometheus 告警实触发 / SLA 闭环 → Phase 3 |
+| **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 / ✅ 轻量 burn / ✅ 建议骨架 | ModelSlo CRUD/评估 + 诊断时间线；真机 abort 口径 + scrape evaluate；evaluate 按违约原因出建议；告警实触发 / Selection 半自动落地 → Phase 3 后续 |
 | **Product P5** | P5 | Benchmark / 推荐 / Canary | ✅ Batch 1 / ✅ 双引擎通路径 | 证据面已落；5090 上 Qwen3.5-4B × SGLang+vLLM 经 Gateway 均 200；Selection 成层 → Phase 1 |
 | **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ✅ 隔离压测 | Tenant + Gateway 准入 + 用量成本；真机双租户 RPS/ACL 隔离见 `scripts/phase0_tenant_isolation.sh`；成本联动 → Phase 3 |
 | **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP / EngineShim → Phase 2（有需求再开） |
@@ -38,7 +38,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径+压测+轻量 burn+runbook / ⏸ 生产切入 | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node；`phase0_tenant_isolation.sh`；`phase0_slo_burn.sh`；[`../manual/etcd-ha.md`](../manual/etcd-ha.md)。待：维护窗迁生产 keyspace |
 | **Phase 1** | L1 + L3 骨架 | 一致性契约套件；ModelProfile；Selection 推荐+草稿；控制台选型向导 | ✅ 骨架 + L1 契约硬化（含流式 tool_calls）+ Selection 可解释/向导加深 | [`selection.md`](./selection.md)（score/breakdown、`current` 自动填充）；[`../dev/contracts.md`](../dev/contracts.md)（C1–C6 ✅）；`/api/v2/selection/*` + 治理页 preference/platform |
 | **Phase 2** | L2 | HardwarePool、池约束、PD/TP（按需）、故障隔离 | ⏸ 设计 ✅ / 代码有需求再开 | [`pool.md`](./pool.md)；N3 D4/D5；与 K8s 执行面正交 |
-| **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ | P4 闭环、P3 历史画像、P6 成本反哺 |
+| **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ 建议骨架 ✅ / Selection 联动暂缓 | SLO 按违约原因产出 `observe`/`scale`/`check_endpoints`/`review_load`；半自动落地与成本反哺未做 |
 
 旁路（不插入 Phase 主轴）：**K8s/HAMi K0–K1** — 有客户再开；边界见 [`AGENTS.md`](../../AGENTS.md)、[`../dev/k8s.md`](../dev/k8s.md)。
 ### Product P6 Batch 1 勾选

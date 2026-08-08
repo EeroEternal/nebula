@@ -145,8 +145,14 @@ pub fn evaluate_slo(
 
     let low_traffic = request_rate.map(|r| r < 0.1).unwrap_or(true);
     let mut breaches = Vec::new();
+    let mut avail_breach: Option<(f64, f64)> = None;
+    let mut ttft_breach: Option<(f64, f64)> = None;
+    let mut latency_breach: Option<(f64, f64)> = None;
 
     if low_traffic {
+        let rate_note = request_rate
+            .map(|r| format!("request_rate={r:.3}"))
+            .unwrap_or_else(|| "request_rate=missing".into());
         return SloEvaluation {
             model_uid: slo.model_uid.clone(),
             window: slo.window.clone(),
@@ -155,8 +161,9 @@ pub fn evaluate_slo(
             breaches,
             suggestions: vec![SloSuggestion {
                 kind: "observe".into(),
-                message: "insufficient traffic to evaluate SLO; wait for request_rate >= 0.1"
-                    .into(),
+                message: format!(
+                    "insufficient traffic to evaluate SLO ({rate_note}); wait for request_rate >= 0.1 before treating status as compliant or breaching"
+                ),
                 target: "replica".into(),
             }],
             evaluated_at_ms: now_ms,
@@ -170,24 +177,34 @@ pub fn evaluate_slo(
             breaches.push(format!(
                 "availability {actual:.4} < target {target:.4} (5xx budget; abort/drain excluded)"
             ));
+            avail_breach = Some((actual, target));
         }
     }
     if let (Some(target), Some(actual)) = (slo.ttft_p95_ms, ttft_p95_ms) {
         if actual > target {
             breaches.push(format!("ttft_p95 {actual:.1}ms > target {target:.1}ms"));
+            ttft_breach = Some((actual, target));
         }
     }
     if let (Some(target), Some(actual)) = (slo.latency_p95_ms, latency_p95_ms) {
         if actual > target {
             breaches.push(format!("latency_p95 {actual:.1}ms > target {target:.1}ms"));
+            latency_breach = Some((actual, target));
         }
     }
 
     // If required metrics absent entirely → insufficient, not compliant.
-    let needed_missing = (slo.availability_target.is_some() && availability.is_none())
-        || (slo.ttft_p95_ms.is_some() && ttft_p95_ms.is_none())
-        || (slo.latency_p95_ms.is_some() && latency_p95_ms.is_none());
-    if needed_missing && breaches.is_empty() {
+    let mut missing = Vec::new();
+    if slo.availability_target.is_some() && availability.is_none() {
+        missing.push("availability");
+    }
+    if slo.ttft_p95_ms.is_some() && ttft_p95_ms.is_none() {
+        missing.push("ttft_p95");
+    }
+    if slo.latency_p95_ms.is_some() && latency_p95_ms.is_none() {
+        missing.push("latency_p95");
+    }
+    if !missing.is_empty() && breaches.is_empty() {
         samples.push(SloMetricSample {
             name: "note".into(),
             value: None,
@@ -200,7 +217,14 @@ pub fn evaluate_slo(
             status: SloComplianceStatus::InsufficientData,
             samples,
             breaches,
-            suggestions: vec![],
+            suggestions: vec![SloSuggestion {
+                kind: "observe".into(),
+                message: format!(
+                    "required SLI missing ({}); do not treat as compliant — check router scrape / metrics export",
+                    missing.join(", ")
+                ),
+                target: "replica".into(),
+            }],
             evaluated_at_ms: now_ms,
             abort_excluded: slo.exclude_abort_from_error_budget,
             drain_excluded: slo.exclude_drain_from_error_budget,
@@ -213,14 +237,7 @@ pub fn evaluate_slo(
         SloComplianceStatus::Breaching
     };
 
-    let mut suggestions = Vec::new();
-    if status == SloComplianceStatus::Breaching {
-        suggestions.push(SloSuggestion {
-            kind: "scale".into(),
-            message: "Consider increasing replicas or checking unhealthy endpoints".into(),
-            target: "replica".into(),
-        });
-    }
+    let suggestions = build_breach_suggestions(avail_breach, ttft_breach, latency_breach);
 
     SloEvaluation {
         model_uid: slo.model_uid.clone(),
@@ -233,6 +250,68 @@ pub fn evaluate_slo(
         abort_excluded: slo.exclude_abort_from_error_budget,
         drain_excluded: slo.exclude_drain_from_error_budget,
     }
+}
+
+/// Stable suggestion kinds: `observe` | `scale` | `check_endpoints` | `review_load`.
+fn build_breach_suggestions(
+    avail: Option<(f64, f64)>,
+    ttft: Option<(f64, f64)>,
+    latency: Option<(f64, f64)>,
+) -> Vec<SloSuggestion> {
+    let mut out = Vec::new();
+
+    if let Some((actual, target)) = avail {
+        out.push(SloSuggestion {
+            kind: "check_endpoints".into(),
+            message: format!(
+                "availability {actual:.4} below target {target:.4}: inspect unhealthy /endpoints and non-abort 5xx (abort/drain already excluded from budget)"
+            ),
+            target: "replica".into(),
+        });
+        out.push(SloSuggestion {
+            kind: "scale".into(),
+            message: format!(
+                "if endpoints are healthy but still burning error budget (availability {actual:.4} < {target:.4}), consider adding replicas or reducing bad traffic"
+            ),
+            target: "replica".into(),
+        });
+    }
+
+    if let Some((actual, target)) = ttft {
+        out.push(SloSuggestion {
+            kind: "review_load".into(),
+            message: format!(
+                "ttft_p95 {actual:.1}ms > target {target:.1}ms: check replica queueing, GPU saturation, and concurrency vs capacity"
+            ),
+            target: "replica".into(),
+        });
+        out.push(SloSuggestion {
+            kind: "check_endpoints".into(),
+            message: format!(
+                "ttft_p95 {actual:.1}ms > {target:.1}ms: confirm ready endpoints and that slow/unhealthy replicas are not still receiving traffic"
+            ),
+            target: "replica".into(),
+        });
+    }
+
+    if let Some((actual, target)) = latency {
+        out.push(SloSuggestion {
+            kind: "review_load".into(),
+            message: format!(
+                "latency_p95 {actual:.1}ms > target {target:.1}ms: review end-to-end load, max tokens, and downstream engine backlog"
+            ),
+            target: "replica".into(),
+        });
+        out.push(SloSuggestion {
+            kind: "check_endpoints".into(),
+            message: format!(
+                "latency_p95 {actual:.1}ms > {target:.1}ms: verify endpoint health and whether Drain/slow replicas skew the window"
+            ),
+            target: "replica".into(),
+        });
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -259,6 +338,8 @@ mod tests {
     fn low_traffic_is_insufficient() {
         let ev = evaluate_slo(&slo(), Some(1.0), Some(100.0), Some(1000.0), Some(0.01), 1);
         assert_eq!(ev.status, SloComplianceStatus::InsufficientData);
+        assert!(ev.suggestions.iter().any(|s| s.kind == "observe"));
+        assert_ne!(ev.status, SloComplianceStatus::Compliant);
     }
 
     #[test]
@@ -266,6 +347,26 @@ mod tests {
         let ev = evaluate_slo(&slo(), Some(0.90), Some(100.0), Some(1000.0), Some(5.0), 1);
         assert_eq!(ev.status, SloComplianceStatus::Breaching);
         assert!(!ev.breaches.is_empty());
-        assert_eq!(ev.suggestions[0].target, "replica");
+        assert!(ev.suggestions.iter().any(|s| s.kind == "check_endpoints"));
+        assert!(ev.suggestions.iter().any(|s| s.kind == "scale"));
+        assert!(ev.suggestions.iter().any(|s| s.message.contains("0.9000")));
+    }
+
+    #[test]
+    fn breach_ttft_suggests_review_load() {
+        let ev = evaluate_slo(&slo(), Some(1.0), Some(5000.0), Some(1000.0), Some(5.0), 1);
+        assert_eq!(ev.status, SloComplianceStatus::Breaching);
+        assert!(ev.suggestions.iter().any(|s| s.kind == "review_load"));
+        assert!(ev.suggestions.iter().any(|s| s.kind == "check_endpoints"));
+        assert!(ev.suggestions.iter().any(|s| s.message.contains("ttft_p95")));
+        assert!(!ev.suggestions.iter().any(|s| s.message.to_lowercase().contains("selection")));
+    }
+
+    #[test]
+    fn missing_metrics_observe_not_compliant() {
+        let ev = evaluate_slo(&slo(), None, None, None, Some(5.0), 1);
+        assert_eq!(ev.status, SloComplianceStatus::InsufficientData);
+        assert!(ev.suggestions.iter().any(|s| s.kind == "observe"));
+        assert!(ev.suggestions[0].message.contains("missing"));
     }
 }
