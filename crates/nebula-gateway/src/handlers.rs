@@ -25,8 +25,8 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 use crate::auth::{require_role, AuthContext, Role};
 use crate::interface::{
     anthropic_json_to_openai_chat, check_tooling_gate, openai_chat_json_to_anthropic,
-    openai_sse_content_delta, payload_too_large_response, responses_json_to_openai_chat,
-    maybe_normalize_router_error, upstream_transport_error,
+    parse_openai_sse_chunk, payload_too_large_response, responses_json_to_openai_chat,
+    maybe_normalize_router_error, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
     append_headers, classify_reqwest_error, forward_upstream_response, prepare_upstream,
@@ -223,20 +223,43 @@ async fn proxy_chat_as_responses(
                                         continue;
                                     }
                                     let data = line.trim_start_matches("data:").trim();
-                                    if data == "[DONE]" {
-                                        let completed = builder.completed_event();
-                                        let _ = tx
-                                            .send(Ok(Event::default().data(completed.to_string())))
-                                            .await;
-                                        return;
-                                    }
-                                    if let Some(delta) = openai_sse_content_delta(data) {
-                                        let ev = builder.push_delta(delta);
-                                        if tx.send(Ok(Event::default().data(ev.to_string()))).await.is_err() {
-                                            metrics
-                                                .requests_aborted_total
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                            return;
+                                    for chunk in parse_openai_sse_chunk(data) {
+                                        match chunk {
+                                            OpenAiStreamChunk::Done => {
+                                                let completed = builder.completed_event();
+                                                let _ = tx
+                                                    .send(Ok(Event::default().data(completed.to_string())))
+                                                    .await;
+                                                return;
+                                            }
+                                            OpenAiStreamChunk::Text(delta) => {
+                                                let ev = builder.push_delta(delta);
+                                                if tx.send(Ok(Event::default().data(ev.to_string()))).await.is_err() {
+                                                    metrics
+                                                        .requests_aborted_total
+                                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                    return;
+                                                }
+                                            }
+                                            OpenAiStreamChunk::ToolCallDelta {
+                                                index,
+                                                id,
+                                                name,
+                                                arguments,
+                                            } => {
+                                                for ev in builder.push_tool_call_delta(
+                                                    index, id, name, arguments,
+                                                ) {
+                                                    if tx.send(Ok(Event::default().data(ev.to_string()))).await.is_err() {
+                                                        metrics
+                                                            .requests_aborted_total
+                                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                        return;
+                                                    }
+                                                }
+                                            }
+                                            OpenAiStreamChunk::FinishReason(_)
+                                            | OpenAiStreamChunk::Ignored => {}
                                         }
                                     }
                                 }
@@ -374,6 +397,7 @@ async fn proxy_chat_as_anthropic(
             }
 
             let mut buf = String::new();
+            let mut mapper = AnthropicSseMapper::new();
             loop {
                 tokio::select! {
                     biased;
@@ -396,35 +420,40 @@ async fn proxy_chat_as_anthropic(
                                         continue;
                                     }
                                     let data = line.trim_start_matches("data:").trim();
-                                    if data == "[DONE]" {
-                                        let stop = json!({"type": "content_block_stop", "index": 0});
-                                        let _ = tx.send(Ok(Event::default().event("content_block_stop").data(stop.to_string()))).await;
-                                        let delta = json!({
-                                            "type": "message_delta",
-                                            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
-                                            "usage": {"output_tokens": 0}
-                                        });
-                                        let _ = tx.send(Ok(Event::default().event("message_delta").data(delta.to_string()))).await;
-                                        let end = json!({"type": "message_stop"});
-                                        let _ = tx.send(Ok(Event::default().event("message_stop").data(end.to_string()))).await;
-                                        return;
-                                    }
-                                    if let Some(text) = openai_sse_content_delta(data) {
-                                        let ev = json!({
-                                            "type": "content_block_delta",
-                                            "index": 0,
-                                            "delta": {"type": "text_delta", "text": text}
-                                        });
-                                        if tx.send(Ok(Event::default().event("content_block_delta").data(ev.to_string()))).await.is_err() {
-                                            metrics
-                                                .requests_aborted_total
-                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    for parsed in parse_openai_sse_chunk(data) {
+                                        let is_done =
+                                            matches!(parsed, OpenAiStreamChunk::Done);
+                                        let events = mapper.push(parsed);
+                                        for (event_name, payload) in events {
+                                            if tx
+                                                .send(Ok(Event::default()
+                                                    .event(event_name)
+                                                    .data(payload.to_string())))
+                                                .await
+                                                .is_err()
+                                            {
+                                                metrics
+                                                    .requests_aborted_total
+                                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                return;
+                                            }
+                                        }
+                                        if is_done {
                                             return;
                                         }
                                     }
                                 }
                             }
-                            Some(Err(_)) | None => break,
+                            Some(Err(_)) | None => {
+                                for (event_name, payload) in mapper.push(OpenAiStreamChunk::Done) {
+                                    let _ = tx
+                                        .send(Ok(Event::default()
+                                            .event(event_name)
+                                            .data(payload.to_string())))
+                                        .await;
+                                }
+                                break;
+                            }
                         }
                     }
                 }

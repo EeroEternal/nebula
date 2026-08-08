@@ -10,10 +10,8 @@
 | C2 | Abort | 客户端取消 → 上游 abort；不计 5xx 预算 | `test_cancel_sse.sh` / `phase0_slo_burn.sh` | ✅ |
 | C3 | 错误码 | 限流/不兼容/过载/上游故障稳定 JSON 映射 | `interface/errors` + 租户拒绝码 | ✅ |
 | C4 | Capability 三态 | Supported / Unsupported / Unknown；禁止用 0 装支持 | `EngineCapability` / `SupportLevel` | ✅ |
-| C5 | Tooling | 含 tools：`Supported` 透传；`Unsupported` → 400 `unsupported`；`Unknown` 放行+warn；不静默丢字段 | `interface/gate` + `tool_calling` | ✅ |
+| C5 | Tooling | 含 tools：门控 + 不静默丢字段；流式：chat 透传、Responses/Messages 适配 tool_calls | `interface/gate` + `parse_openai_sse_chunk` / `AnthropicSseMapper` | ✅ |
 | C6 | KV/指标单位 | 对外统一字段；引擎差在 scrape | `EndpointStats.kv_cache_usage` | ✅ |
-
-流式 tool_calls 完整 SSE 转发仍 ⏸（非流路径已保留 tool_calls）。
 
 ## C3 错误码表（Gateway 对外）
 

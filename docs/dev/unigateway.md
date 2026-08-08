@@ -10,9 +10,9 @@
 
 | 入站 | 适配 | 出站（经 Router） | C5 门控 |
 |------|------|-------------------|--------|
-| `POST /v1/chat/completions` | 直通 OpenAI JSON | 同左 | 有 `tools`/`tool_choice` 时按引擎 `tool_calling` |
-| `POST /v1/responses` | UG → OpenAI chat →（响应）UG Responses | OpenAI chat | 同上（适配前读入站 body） |
-| `POST /v1/messages` | UG Anthropic → OpenAI chat →（响应）Anthropic | OpenAI chat | 同上 |
+| `POST /v1/chat/completions` | 直通 OpenAI JSON（流式含 `delta.tool_calls` 透传） | 同左 | 有 `tools`/`tool_choice` 时按引擎 `tool_calling` |
+| `POST /v1/responses` | UG → OpenAI chat → 响应映射（流式含 function_call 事件） | OpenAI chat | 同上（适配前读入站 body） |
+| `POST /v1/messages` | UG Anthropic → OpenAI chat → Anthropic（流式含 tool_use） | OpenAI chat | 同上 |
 | `POST /v1/embeddings` | 直通 | 同左 | 无 |
 | `POST /v1/rerank` | 直通 | 同左 | 无 |
 

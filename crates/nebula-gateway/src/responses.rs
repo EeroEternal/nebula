@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -69,6 +70,14 @@ pub struct BuiltResponse {
     pub usage: Value,
 }
 
+struct PendingFunctionCall {
+    item_id: String,
+    call_id: String,
+    name: String,
+    arguments: String,
+    started: bool,
+}
+
 pub struct ResponseStreamBuilder {
     response_id: String,
     message_id: String,
@@ -77,6 +86,9 @@ pub struct ResponseStreamBuilder {
     seq: u64,
     deltas: Vec<String>,
     input_tokens: u32,
+    /// OpenAI tool_call index → pending function call.
+    tool_calls: HashMap<usize, PendingFunctionCall>,
+    next_output_index: usize,
 }
 
 impl ResponseStreamBuilder {
@@ -94,6 +106,9 @@ impl ResponseStreamBuilder {
             seq: 0,
             deltas: Vec::new(),
             input_tokens,
+            tool_calls: HashMap::new(),
+            // output index 0 reserved for assistant message text item in completed payload
+            next_output_index: 1,
         }
     }
 
@@ -132,9 +147,94 @@ impl ResponseStreamBuilder {
         ev
     }
 
+    /// Ingest an OpenAI tool_call delta; returns zero or more Responses SSE events.
+    pub fn push_tool_call_delta(
+        &mut self,
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    ) -> Vec<Value> {
+        let mut evs = Vec::new();
+        if !self.tool_calls.contains_key(&index) {
+            self.next_output_index += 1;
+            self.tool_calls.insert(
+                index,
+                PendingFunctionCall {
+                    item_id: format!("fc_{}", Uuid::new_v4()),
+                    call_id: String::new(),
+                    name: String::new(),
+                    arguments: String::new(),
+                    started: false,
+                },
+            );
+        }
+        let entry = self.tool_calls.get_mut(&index).expect("just inserted");
+        if let Some(id) = id {
+            entry.call_id = id;
+        }
+        if let Some(name) = name {
+            entry.name = name;
+        }
+        if let Some(ref args) = arguments {
+            entry.arguments.push_str(args);
+        }
+
+        let need_start = !entry.started;
+        if need_start {
+            entry.started = true;
+            if entry.call_id.is_empty() {
+                entry.call_id = format!("call_{index}");
+            }
+        }
+        let item_id = entry.item_id.clone();
+        let call_id = entry.call_id.clone();
+        let call_name = entry.name.clone();
+        let output_index = index + 1;
+
+        if need_start {
+            let ev = json!({
+                "type": "response.output_item.added",
+                "sequence_number": self.seq,
+                "response_id": self.response_id,
+                "output_index": output_index,
+                "item": {
+                    "id": item_id,
+                    "type": "function_call",
+                    "status": "in_progress",
+                    "call_id": call_id,
+                    "name": call_name,
+                    "arguments": ""
+                }
+            });
+            self.seq += 1;
+            evs.push(ev);
+        }
+
+        if let Some(args) = arguments {
+            if !args.is_empty() {
+                let entry = self.tool_calls.get(&index).expect("exists");
+                let ev = json!({
+                    "type": "response.function_call_arguments.delta",
+                    "sequence_number": self.seq,
+                    "response_id": self.response_id,
+                    "item_id": entry.item_id,
+                    "output_index": output_index,
+                    "delta": args,
+                });
+                self.seq += 1;
+                evs.push(ev);
+            }
+        }
+        evs
+    }
+
     pub fn completed_event(&mut self) -> Value {
         let full_text = self.deltas.join("");
-        let output_tokens = estimate_tokens(&full_text);
+        let mut output_tokens = estimate_tokens(&full_text);
+        for tc in self.tool_calls.values() {
+            output_tokens += estimate_tokens(&tc.arguments);
+        }
         let usage = json!({
             "input_tokens": self.input_tokens,
             "output_tokens": output_tokens,
@@ -147,9 +247,28 @@ impl ResponseStreamBuilder {
             created: self.created,
             model: self.model.clone(),
             text: full_text,
-            usage,
+            usage: usage.clone(),
         };
-        let completed_response = build_non_stream_json(&b);
+        let mut completed_response = build_non_stream_json(&b);
+        if let Some(output) = completed_response
+            .get_mut("output")
+            .and_then(|v| v.as_array_mut())
+        {
+            let mut keys: Vec<usize> = self.tool_calls.keys().copied().collect();
+            keys.sort_unstable();
+            for k in keys {
+                if let Some(tc) = self.tool_calls.get(&k) {
+                    output.push(json!({
+                        "id": tc.item_id,
+                        "type": "function_call",
+                        "status": "completed",
+                        "call_id": tc.call_id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    }));
+                }
+            }
+        }
 
         let ev = json!({
             "type": "response.completed",
@@ -234,5 +353,37 @@ mod tests {
         assert_eq!(delta["sequence_number"], 1);
         assert_eq!(completed["type"], "response.completed");
         assert_eq!(completed["sequence_number"], 2);
+    }
+
+    #[test]
+    fn tool_call_stream_events_and_completed_output() {
+        let req = CreateResponseRequest {
+            model: Some("m".into()),
+            input: Some(Value::String("hi".into())),
+            instructions: None,
+            stream: Some(true),
+        };
+        let mut builder = ResponseStreamBuilder::new(&req);
+        let _ = builder.created_event();
+        let evs = builder.push_tool_call_delta(
+            0,
+            Some("call_1".into()),
+            Some("get_weather".into()),
+            Some("{\"x\":1}".into()),
+        );
+        assert!(evs.iter().any(|e| e["type"] == "response.output_item.added"));
+        assert!(evs
+            .iter()
+            .any(|e| e["type"] == "response.function_call_arguments.delta"));
+        let completed = builder.completed_event();
+        let output = completed["response"]["output"].as_array().unwrap();
+        assert!(output.iter().any(|o| o["type"] == "function_call"));
+        assert_eq!(
+            output
+                .iter()
+                .find(|o| o["type"] == "function_call")
+                .unwrap()["arguments"],
+            "{\"x\":1}"
+        );
     }
 }

@@ -347,16 +347,247 @@ pub fn openai_chat_json_to_anthropic(openai: &Value, requested_model: &str) -> V
     })
 }
 
-/// Extract text delta from an OpenAI chat SSE `data:` JSON payload.
-pub fn openai_sse_content_delta(data: &str) -> Option<String> {
+/// One logical piece from an OpenAI chat completions SSE `data:` JSON payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenAiStreamChunk {
+    Done,
+    Text(String),
+    ToolCallDelta {
+        index: usize,
+        id: Option<String>,
+        name: Option<String>,
+        arguments: Option<String>,
+    },
+    FinishReason(String),
+    Ignored,
+}
+
+/// Parse an OpenAI chat SSE data payload into zero or more logical chunks.
+pub fn parse_openai_sse_chunk(data: &str) -> Vec<OpenAiStreamChunk> {
     if data == "[DONE]" {
-        return None;
+        return vec![OpenAiStreamChunk::Done];
     }
-    let v: Value = serde_json::from_str(data).ok()?;
-    v.pointer("/choices/0/delta/content")
+    let Ok(v) = serde_json::from_str::<Value>(data) else {
+        return vec![OpenAiStreamChunk::Ignored];
+    };
+    let Some(choice) = v.pointer("/choices/0") else {
+        return vec![OpenAiStreamChunk::Ignored];
+    };
+    let mut out = Vec::new();
+    if let Some(content) = choice
+        .pointer("/delta/content")
         .and_then(|c| c.as_str())
         .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+    {
+        out.push(OpenAiStreamChunk::Text(content.to_string()));
+    }
+    if let Some(tcs) = choice
+        .pointer("/delta/tool_calls")
+        .and_then(|t| t.as_array())
+    {
+        for (fallback_idx, tc) in tcs.iter().enumerate() {
+            let index = tc
+                .get("index")
+                .and_then(|i| i.as_u64())
+                .map(|i| i as usize)
+                .unwrap_or(fallback_idx);
+            let id = tc
+                .get("id")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let name = tc
+                .pointer("/function/name")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            let arguments = tc
+                .pointer("/function/arguments")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+            if id.is_none() && name.is_none() && arguments.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+            {
+                continue;
+            }
+            out.push(OpenAiStreamChunk::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments,
+            });
+        }
+    }
+    if let Some(fr) = choice
+        .get("finish_reason")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty() && *s != "null")
+    {
+        out.push(OpenAiStreamChunk::FinishReason(fr.to_string()));
+    }
+    if out.is_empty() {
+        out.push(OpenAiStreamChunk::Ignored);
+    }
+    out
+}
+
+/// Extract text delta from an OpenAI chat SSE `data:` JSON payload.
+pub fn openai_sse_content_delta(data: &str) -> Option<String> {
+    parse_openai_sse_chunk(data).into_iter().find_map(|c| match c {
+        OpenAiStreamChunk::Text(t) => Some(t),
+        _ => None,
+    })
+}
+
+/// Maps OpenAI chat SSE chunks into Anthropic Messages SSE event payloads.
+#[derive(Debug)]
+pub struct AnthropicSseMapper {
+    /// Text block at index 0 starts open (handlers emit content_block_start for text).
+    text_open: bool,
+    next_block_index: usize,
+    /// OpenAI tool_call index → (anthropic block index, started, id, name).
+    tools: std::collections::BTreeMap<usize, (usize, bool, String, String)>,
+    saw_tool_calls: bool,
+    finish_reason: Option<String>,
+}
+
+impl AnthropicSseMapper {
+    pub fn new() -> Self {
+        Self {
+            text_open: true,
+            next_block_index: 1,
+            tools: std::collections::BTreeMap::new(),
+            saw_tool_calls: false,
+            finish_reason: None,
+        }
+    }
+
+    /// Returns `(event_name, data_json)` pairs to send as Anthropic SSE.
+    pub fn push(&mut self, chunk: OpenAiStreamChunk) -> Vec<(String, Value)> {
+        match chunk {
+            OpenAiStreamChunk::Ignored => Vec::new(),
+            OpenAiStreamChunk::Text(text) => {
+                if !self.text_open {
+                    // Late text after tools — ignore (rare).
+                    return Vec::new();
+                }
+                vec![(
+                    "content_block_delta".into(),
+                    json!({
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {"type": "text_delta", "text": text}
+                    }),
+                )]
+            }
+            OpenAiStreamChunk::ToolCallDelta {
+                index,
+                id,
+                name,
+                arguments,
+            } => {
+                let mut evs = Vec::new();
+                if self.text_open {
+                    evs.push((
+                        "content_block_stop".into(),
+                        json!({"type": "content_block_stop", "index": 0}),
+                    ));
+                    self.text_open = false;
+                }
+                self.saw_tool_calls = true;
+                let entry = self.tools.entry(index).or_insert_with(|| {
+                    let ai = self.next_block_index;
+                    self.next_block_index += 1;
+                    (ai, false, String::new(), String::new())
+                });
+                if let Some(id) = id {
+                    entry.2 = id;
+                }
+                if let Some(name) = name {
+                    entry.3 = name;
+                }
+                if !entry.1 {
+                    entry.1 = true;
+                    let anth_index = entry.0;
+                    let call_id = if entry.2.is_empty() {
+                        format!("toolu_{index}")
+                    } else {
+                        entry.2.clone()
+                    };
+                    let call_name = entry.3.clone();
+                    evs.push((
+                        "content_block_start".into(),
+                        json!({
+                            "type": "content_block_start",
+                            "index": anth_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": call_id,
+                                "name": call_name,
+                                "input": {}
+                            }
+                        }),
+                    ));
+                }
+                if let Some(args) = arguments {
+                    if !args.is_empty() {
+                        let anth_index = entry.0;
+                        evs.push((
+                            "content_block_delta".into(),
+                            json!({
+                                "type": "content_block_delta",
+                                "index": anth_index,
+                                "delta": {"type": "input_json_delta", "partial_json": args}
+                            }),
+                        ));
+                    }
+                }
+                evs
+            }
+            OpenAiStreamChunk::FinishReason(reason) => {
+                self.finish_reason = Some(reason);
+                Vec::new()
+            }
+            OpenAiStreamChunk::Done => self.finish(),
+        }
+    }
+
+    fn finish(&mut self) -> Vec<(String, Value)> {
+        let mut evs = Vec::new();
+        if self.text_open {
+            evs.push((
+                "content_block_stop".into(),
+                json!({"type": "content_block_stop", "index": 0}),
+            ));
+            self.text_open = false;
+        }
+        for (_, (anth_index, started, _, _)) in &self.tools {
+            if *started {
+                evs.push((
+                    "content_block_stop".into(),
+                    json!({"type": "content_block_stop", "index": anth_index}),
+                ));
+            }
+        }
+        let stop_reason = match self.finish_reason.as_deref() {
+            Some("tool_calls") => "tool_use",
+            Some("length") => "max_tokens",
+            _ if self.saw_tool_calls => "tool_use",
+            _ => "end_turn",
+        };
+        evs.push((
+            "message_delta".into(),
+            json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                "usage": {"output_tokens": 0}
+            }),
+        ));
+        evs.push((
+            "message_stop".into(),
+            json!({"type": "message_stop"}),
+        ));
+        evs
+    }
 }
 
 #[cfg(test)]
@@ -456,5 +687,63 @@ mod tests {
         assert_eq!(anth["content"][0]["type"], "tool_use");
         assert_eq!(anth["content"][0]["name"], "get_weather");
         assert_eq!(anth["content"][0]["input"]["city"], "SF");
+    }
+
+    #[test]
+    fn parse_sse_text_and_tool_call_deltas() {
+        let text = parse_openai_sse_chunk(
+            r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
+        );
+        assert_eq!(text, vec![OpenAiStreamChunk::Text("hi".into())]);
+        assert_eq!(
+            openai_sse_content_delta(
+                r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#
+            )
+            .as_deref(),
+            Some("hi")
+        );
+
+        let tc = parse_openai_sse_chunk(
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"fn","arguments":"{"}}]}}]}"#,
+        );
+        assert!(matches!(
+            &tc[0],
+            OpenAiStreamChunk::ToolCallDelta {
+                index: 0,
+                id: Some(_),
+                name: Some(_),
+                arguments: Some(_)
+            }
+        ));
+
+        let done = parse_openai_sse_chunk("[DONE]");
+        assert_eq!(done, vec![OpenAiStreamChunk::Done]);
+    }
+
+    #[test]
+    fn anthropic_mapper_emits_tool_use_stream() {
+        let mut m = AnthropicSseMapper::new();
+        let evs = m.push(OpenAiStreamChunk::ToolCallDelta {
+            index: 0,
+            id: Some("call_1".into()),
+            name: Some("get_weather".into()),
+            arguments: Some("{\"city\":".into()),
+        });
+        assert!(evs.iter().any(|(e, _)| e == "content_block_stop"));
+        assert!(evs.iter().any(|(e, v)| {
+            e == "content_block_start" && v["content_block"]["type"] == "tool_use"
+        }));
+        assert!(evs.iter().any(|(e, v)| {
+            e == "content_block_delta" && v["delta"]["type"] == "input_json_delta"
+        }));
+        let fin = m.push(OpenAiStreamChunk::FinishReason("tool_calls".into()));
+        assert!(fin.is_empty());
+        let done = m.push(OpenAiStreamChunk::Done);
+        assert_eq!(done.last().unwrap().0, "message_stop");
+        let delta = done
+            .iter()
+            .find(|(e, _)| e == "message_delta")
+            .unwrap();
+        assert_eq!(delta.1["delta"]["stop_reason"], "tool_use");
     }
 }
