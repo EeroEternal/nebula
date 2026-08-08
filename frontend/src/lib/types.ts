@@ -519,6 +519,8 @@ export interface SelectionResponse {
     platform?: string | null
     confidence: string
     switching_cost: number
+    score?: number
+    score_breakdown?: string[]
     evidence_run_ids: string[]
     ttft_p95_ms?: number | null
     throughput_tps?: number | null

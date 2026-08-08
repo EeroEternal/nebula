@@ -139,6 +139,12 @@ pub struct BackendCandidate {
     pub confidence: RecommendConfidence,
     /// 0.0 = no switch cost; higher = more expensive to migrate.
     pub switching_cost: f64,
+    /// Final ranking score for the active preference (higher is better).
+    #[serde(default)]
+    pub score: f64,
+    /// Human-readable score components for the console / API clients.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub score_breakdown: Vec<String>,
     pub evidence_run_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttft_p95_ms: Option<f64>,
@@ -222,6 +228,61 @@ fn score_candidate(pref: SelectionPreference, c: &BackendCandidate) -> f64 {
     }
 }
 
+fn preference_label(pref: SelectionPreference) -> &'static str {
+    match pref {
+        SelectionPreference::Latency => "latency",
+        SelectionPreference::Throughput => "throughput",
+        SelectionPreference::Cost => "cost",
+    }
+}
+
+fn build_score_breakdown(pref: SelectionPreference, c: &BackendCandidate, score: f64) -> Vec<String> {
+    let switch_penalty = c.switching_cost * 10.0;
+    let mut parts = vec![format!("preference={}", preference_label(pref))];
+    match pref {
+        SelectionPreference::Latency => {
+            parts.push(format!(
+                "ttft_p95={}",
+                c.ttft_p95_ms
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "missing".into())
+            ));
+        }
+        SelectionPreference::Throughput => {
+            parts.push(format!(
+                "throughput_tps={}",
+                c.throughput_tps
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "missing".into())
+            ));
+        }
+        SelectionPreference::Cost => {
+            parts.push(format!(
+                "cost_per_1k={}",
+                c.cost_per_1k_tokens
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "missing".into())
+            ));
+        }
+    }
+    parts.push(format!("switch_penalty={switch_penalty:.1}"));
+    parts.push(format!("switching_cost={:.2}", c.switching_cost));
+    parts.push(format!("score={score:.2}"));
+    parts
+}
+
+fn annotate_scores(pref: SelectionPreference, candidates: &mut [BackendCandidate]) {
+    for c in candidates.iter_mut() {
+        let score = score_candidate(pref, c);
+        c.score = score;
+        c.score_breakdown = build_score_breakdown(pref, c, score);
+        let pref_reason = format!("preference={}", preference_label(pref));
+        if !c.reasons.iter().any(|r| r == &pref_reason) {
+            c.reasons.insert(0, pref_reason);
+        }
+    }
+}
+
 fn to_backend_candidate(current: &CurrentBackend, c: RecommendCandidate) -> BackendCandidate {
     let cost = switching_cost(current, &c);
     let mut reasons = vec![c.rationale];
@@ -235,6 +296,8 @@ fn to_backend_candidate(current: &CurrentBackend, c: RecommendCandidate) -> Back
         platform: c.platform,
         confidence: c.confidence,
         switching_cost: cost,
+        score: 0.0,
+        score_breakdown: Vec::new(),
         evidence_run_ids: c.evidence_run_ids,
         ttft_p95_ms: c.ttft_p95_ms,
         throughput_tps: c.throughput_tps,
@@ -288,6 +351,7 @@ pub fn select_backends(
     if out.len() > max_k {
         out.truncate(max_k);
     }
+    annotate_scores(pref, &mut out);
 
     let status = if out.is_empty() {
         RecommendConfidence::InsufficientData
@@ -300,11 +364,9 @@ pub fn select_backends(
         status,
         candidates: out,
         message: if status == RecommendConfidence::InsufficientData {
-            Some(
-                message.unwrap_or_else(|| {
-                    "insufficient_data: no matching benchmark profiles for constraints".into()
-                }),
-            )
+            Some(message.unwrap_or_else(|| {
+                "insufficient_data: no matching benchmark profiles for constraints".into()
+            }))
         } else {
             message
         },
@@ -496,6 +558,10 @@ mod tests {
             .expect("sglang");
         assert!(vllm.switching_cost < sglang.switching_cost);
         assert!(vllm.switching_cost <= 0.2);
+        assert!(sglang.score_breakdown.iter().any(|s| s.starts_with("switch_penalty=")));
+        assert!(sglang.score_breakdown.iter().any(|s| s.contains("switching_cost=")));
+        assert!(vllm.reasons.iter().any(|r| r == "preference=latency"));
+        assert!(vllm.score >= sglang.score);
     }
 
     #[test]
@@ -507,6 +573,8 @@ mod tests {
             platform: Some("nvidia".into()),
             confidence: RecommendConfidence::High,
             switching_cost: 0.0,
+            score: 0.0,
+            score_breakdown: vec![],
             evidence_run_ids: vec![],
             ttft_p95_ms: Some(10.0),
             throughput_tps: Some(1.0),

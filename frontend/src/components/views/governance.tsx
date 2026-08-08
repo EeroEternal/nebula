@@ -45,6 +45,8 @@ export function GovernanceView() {
     const [recModel, setRecModel] = useState("")
     const [recUid, setRecUid] = useState("")
     const [recWorkload, setRecWorkload] = useState("short-chat-v1")
+    const [recPreference, setRecPreference] = useState<"latency" | "throughput" | "cost">("latency")
+    const [recPlatform, setRecPlatform] = useState("")
     const [recommend, setRecommend] = useState<SelectionResponse | null>(null)
     const [draft, setDraft] = useState<DeploymentDraft | null>(null)
     const [canaryModel, setCanaryModel] = useState("")
@@ -132,21 +134,26 @@ export function GovernanceView() {
         }
     }
 
+    const selectionBody = () => ({
+        model: {
+            profile_id: recUid.trim() || recModel.trim(),
+            model_uid: recUid.trim() || undefined,
+            model_name: recModel.trim(),
+            architecture: "unknown",
+        },
+        workload: { workload_id: recWorkload.trim() || undefined },
+        constraints: {
+            preference: recPreference,
+            platform: recPlatform.trim() || undefined,
+            max_candidates: 5,
+        },
+        current: {},
+    })
+
     const runRecommend = async () => {
         if (!recModel.trim()) return
         try {
-            const body = {
-                model: {
-                    profile_id: recUid.trim() || recModel.trim(),
-                    model_uid: recUid.trim() || undefined,
-                    model_name: recModel.trim(),
-                    architecture: "unknown",
-                },
-                workload: { workload_id: recWorkload.trim() || undefined },
-                constraints: { preference: "latency", max_candidates: 5 },
-                current: {},
-            }
-            const resp = await v2.selectionRecommend(body, token || "")
+            const resp = await v2.selectionRecommend(selectionBody(), token || "")
             setRecommend(resp)
             setDraft(null)
             if (resp.status === "insufficient_data") {
@@ -162,18 +169,17 @@ export function GovernanceView() {
             toast.error(t("governance.selectionNeedUid"))
             return
         }
+        if (recommend?.status === "insufficient_data") return
         try {
             const d = await v2.selectionDraft({
                 selection: {
+                    ...selectionBody(),
                     model: {
                         profile_id: recUid.trim(),
                         model_uid: recUid.trim(),
                         model_name: recModel.trim(),
                         architecture: "unknown",
                     },
-                    workload: { workload_id: recWorkload.trim() || undefined },
-                    constraints: { preference: "latency", max_candidates: 5 },
-                    current: {},
                 },
                 candidate_index: idx,
                 model_uid: recUid.trim(),
@@ -431,7 +437,7 @@ export function GovernanceView() {
                     <FlaskConical className="h-3.5 w-3.5" /> {t("governance.selection")}
                 </h3>
                 <p className="text-xs text-muted-foreground">{t("governance.selectionHint")}</p>
-                <div className="flex flex-wrap gap-2 max-w-3xl">
+                <div className="flex flex-wrap gap-2 max-w-3xl items-center">
                     <Input
                         className="font-mono max-w-[200px]"
                         placeholder="model_name"
@@ -450,6 +456,22 @@ export function GovernanceView() {
                         value={recWorkload}
                         onChange={(e) => setRecWorkload(e.target.value)}
                     />
+                    <select
+                        className="h-10 rounded-md border border-input bg-background px-3 text-xs font-mono"
+                        value={recPreference}
+                        onChange={(e) => setRecPreference(e.target.value as "latency" | "throughput" | "cost")}
+                        aria-label={t("governance.selectionPreference")}
+                    >
+                        <option value="latency">latency</option>
+                        <option value="throughput">throughput</option>
+                        <option value="cost">cost</option>
+                    </select>
+                    <Input
+                        className="font-mono max-w-[140px]"
+                        placeholder={t("governance.selectionPlatform")}
+                        value={recPlatform}
+                        onChange={(e) => setRecPlatform(e.target.value)}
+                    />
                     <Button onClick={() => void runRecommend()}>{t("governance.recommendRun")}</Button>
                 </div>
                 {recommend && (
@@ -460,25 +482,42 @@ export function GovernanceView() {
                                 <span className="text-xs text-muted-foreground">{recommend.message}</span>
                             )}
                         </div>
-                        {recommend.candidates.length === 0 ? (
-                            <p className="text-xs text-muted-foreground">{t("governance.recInsufficient")}</p>
+                        {recommend.status === "insufficient_data" || recommend.candidates.length === 0 ? (
+                            <p className="text-xs text-muted-foreground">{t("governance.selectionInsufficientBlock")}</p>
                         ) : recommend.candidates.map((c, idx) => (
-                            <div key={`${c.engine_type}-${c.image_id || ""}-${idx}`} className="flex flex-wrap items-center gap-2 text-xs font-mono text-muted-foreground">
-                                <span>
-                                    {c.engine_type}
-                                    {c.engine_version ? `@${c.engine_version}` : ""}
-                                    {" · "}
-                                    conf={c.confidence}
-                                    {" · "}
-                                    switch={c.switching_cost.toFixed(2)}
-                                    {c.ttft_p95_ms != null ? ` · ttft_p95=${c.ttft_p95_ms.toFixed(0)}ms` : ""}
-                                    {c.throughput_tps != null ? ` · tps=${c.throughput_tps.toFixed(1)}` : ""}
-                                    {" — "}
-                                    {c.reasons.join("; ")}
-                                </span>
-                                <Button size="sm" variant="outline" onClick={() => void runDraft(idx)}>
-                                    {t("governance.selectionDraft")}
-                                </Button>
+                            <div key={`${c.engine_type}-${c.image_id || ""}-${idx}`} className="space-y-1 border-b border-border/20 pb-2 last:border-0">
+                                <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-muted-foreground">
+                                    <span>
+                                        {c.engine_type}
+                                        {c.engine_version ? `@${c.engine_version}` : ""}
+                                        {" · "}
+                                        conf={c.confidence}
+                                        {" · "}
+                                        {t("governance.selectionScore")}={typeof c.score === "number" ? c.score.toFixed(2) : "—"}
+                                        {" · "}
+                                        switch={c.switching_cost.toFixed(2)}
+                                        {c.ttft_p95_ms != null ? ` · ttft_p95=${c.ttft_p95_ms.toFixed(0)}ms` : ""}
+                                        {c.throughput_tps != null ? ` · tps=${c.throughput_tps.toFixed(1)}` : ""}
+                                    </span>
+                                    <Button size="sm" variant="outline" onClick={() => void runDraft(idx)}>
+                                        {t("governance.selectionDraft")}
+                                    </Button>
+                                </div>
+                                {(c.score_breakdown?.length || c.reasons.length) > 0 && (
+                                    <details className="text-[11px] font-mono text-muted-foreground/90">
+                                        <summary className="cursor-pointer select-none">breakdown / reasons</summary>
+                                        <ul className="mt-1 list-disc pl-4 space-y-0.5">
+                                            {(c.score_breakdown?.length ? c.score_breakdown : c.reasons).map((line) => (
+                                                <li key={line}>{line}</li>
+                                            ))}
+                                        </ul>
+                                    </details>
+                                )}
+                                {c.evidence_run_ids.length > 0 && (
+                                    <p className="text-[11px] font-mono text-muted-foreground/80">
+                                        {t("governance.selectionEvidence")}: {c.evidence_run_ids.join(", ")}
+                                    </p>
+                                )}
                             </div>
                         ))}
                     </div>

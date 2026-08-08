@@ -1,13 +1,65 @@
 //! L3 selection APIs (Phase 1): profiles + recommend/draft/apply.
 
 use nebula_common::{
-    draft_from_candidate, select_backends, DeploymentDraft, DesiredState, DraftRequest, ModelProfile,
-    ModelSpec, ModelSource, SelectionRequest, SelectionResponse,
+    draft_from_candidate, select_backends, CurrentBackend, DeploymentDraft, DesiredState,
+    DraftRequest, ModelProfile, ModelSpec, ModelSource, SelectionRequest, SelectionResponse,
 };
 use nebula_meta::MetaStore;
 use serde::Deserialize;
 
 use crate::service::{get_model_deployment, get_model_spec, put_model_deployment, put_model_spec, ServiceError};
+
+fn current_is_empty(current: &CurrentBackend) -> bool {
+    current.engine_type.is_none() && current.image_id.is_none() && current.platform.is_none()
+}
+
+/// Fill `current` from ModelSpec / Deployment when the client left it empty.
+async fn fill_current_from_model(
+    store: &dyn MetaStore,
+    req: &mut SelectionRequest,
+) -> Result<(), ServiceError> {
+    if !current_is_empty(&req.current) {
+        return Ok(());
+    }
+    let Some(uid) = req
+        .model
+        .model_uid
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let spec = match get_model_spec(store, uid).await {
+        Ok(s) => Some(s),
+        Err(ServiceError::NotFound(_)) => None,
+        Err(e) => return Err(e),
+    };
+    let deployment = get_model_deployment(store, uid).await?;
+
+    let engine_type = spec
+        .as_ref()
+        .and_then(|s| s.engine_type.clone())
+        .filter(|s| !s.trim().is_empty());
+    let image_id = deployment
+        .as_ref()
+        .and_then(|d| d.image_id.clone())
+        .or_else(|| {
+            spec.as_ref()
+                .and_then(|s| s.docker_image.clone())
+                .filter(|s| !s.trim().is_empty())
+        });
+
+    if engine_type.is_some() || image_id.is_some() {
+        req.current = CurrentBackend {
+            engine_type,
+            image_id,
+            platform: None,
+        };
+    }
+    Ok(())
+}
 
 fn profile_key(id: &str) -> String {
     format!("/model_profiles/{id}")
@@ -44,8 +96,9 @@ pub async fn get_profile(store: &dyn MetaStore, id: &str) -> Result<ModelProfile
 
 pub async fn recommend(
     store: &dyn MetaStore,
-    req: SelectionRequest,
+    mut req: SelectionRequest,
 ) -> Result<SelectionResponse, ServiceError> {
+    fill_current_from_model(store, &mut req).await?;
     let profiles = crate::benchmark_svc::list_profiles(store).await?;
     let runs = crate::benchmark_svc::list_runs(store).await?;
     Ok(select_backends(&req, &profiles, &runs))
