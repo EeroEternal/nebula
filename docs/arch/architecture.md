@@ -1,6 +1,6 @@
 # Nebula 架构
 
-> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。排期与勾选见 [`roadmap.md`](./roadmap.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；HA 见 [`../manual/module.md`](../manual/module.md)、[`report.md`](../dev/ha/report.md)；边界见 [`../dev/ownership.md`](../dev/ownership.md)。
+> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。产品定位与能力分层总纲见 [`vision.md`](./vision.md)；排期与勾选见 [`roadmap.md`](./roadmap.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；HA 见 [`../manual/module.md`](../manual/module.md)、[`report.md`](../dev/ha/report.md)；边界见 [`../dev/ownership.md`](../dev/ownership.md)。
 
 **结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 / N1 HA 主体 / N2 / 可观测 O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 v1.3.0 落地。真机 Gateway e2e、多引擎 benchmark、多租户压测与生产 etcd 三节点暂缓。剩余按需项（N3/N4/P7）以 [`roadmap.md`](./roadmap.md) 为准。
 
