@@ -3,7 +3,7 @@
 use axum::{
     body::Body,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use bytes::Bytes;
 use nebula_common::{
@@ -13,6 +13,7 @@ use nebula_meta::MetaStore;
 use serde_json::Value;
 
 use crate::auth::AuthContext;
+use crate::interface::{maybe_normalize_router_error, upstream_transport_error};
 use crate::state::AppState;
 
 pub struct PreparedUpstream {
@@ -103,7 +104,10 @@ pub async fn post_router_path(
             let kind = classify_reqwest_error(&e);
             st.metrics.record_upstream_error(kind);
             tracing::error!(error=%e, "upstream request failed");
-            Err((StatusCode::BAD_GATEWAY, "upstream request failed").into_response())
+            Err(upstream_transport_error(
+                kind,
+                format!("upstream request failed: {kind}"),
+            ))
         }
     }
 }
@@ -243,6 +247,9 @@ pub async fn forward_upstream_response(st: &AppState, resp: reqwest::Response) -
             Bytes::new()
         }
     };
+    if let Some(normalized) = maybe_normalize_router_error(status, &bytes) {
+        return normalized;
+    }
     let mut out = Response::builder()
         .status(status)
         .body(Body::from(bytes))

@@ -2,12 +2,30 @@
 
 use axum::{
     http::StatusCode,
-    response::{IntoResponse, Response},
-    Json,
+    response::Response,
 };
 use nebula_common::{tool_calling_for_engine, ModelSpec, SupportLevel};
 use nebula_meta::MetaStore;
 use serde_json::{json, Value};
+
+use crate::interface::errors::openai_error_response;
+
+/// Outcome of the C5 tooling capability check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolingGate {
+    Allow,
+    AllowWithWarn,
+    Deny,
+}
+
+/// Pure decision from `SupportLevel` (no I/O) — unit-testable C5 core.
+pub fn tooling_gate_decision(level: SupportLevel) -> ToolingGate {
+    match level {
+        SupportLevel::Supported => ToolingGate::Allow,
+        SupportLevel::Unknown => ToolingGate::AllowWithWarn,
+        SupportLevel::Unsupported => ToolingGate::Deny,
+    }
+}
 
 /// True when the request body asks for tools / tool_choice.
 pub fn request_has_tools(payload: &Value) -> bool {
@@ -36,17 +54,12 @@ pub fn unsupported_tooling_response(engine_type: Option<&str>) -> Response {
         }
         _ => "tools / tool_choice is not supported for this model".to_string(),
     };
-    (
+    openai_error_response(
         StatusCode::BAD_REQUEST,
-        Json(json!({
-            "error": {
-                "message": detail,
-                "type": "unsupported",
-                "code": "tool_calling_unsupported"
-            }
-        })),
+        "unsupported",
+        "tool_calling_unsupported",
+        detail,
     )
-        .into_response()
 }
 
 /// Look up model spec engine_type from etcd (`/models/{uid}/spec`).
@@ -82,9 +95,9 @@ pub async fn check_tooling_gate(
     }
     let engine_type = resolve_engine_type_for_model(store, model).await;
     let level = tool_calling_for_engine(engine_type.as_deref());
-    match level {
-        SupportLevel::Supported => None,
-        SupportLevel::Unknown => {
+    match tooling_gate_decision(level) {
+        ToolingGate::Allow => None,
+        ToolingGate::AllowWithWarn => {
             tracing::warn!(
                 model = model.unwrap_or(""),
                 engine_type = engine_type.as_deref().unwrap_or(""),
@@ -92,9 +105,7 @@ pub async fn check_tooling_gate(
             );
             None
         }
-        SupportLevel::Unsupported => {
-            Some(unsupported_tooling_response(engine_type.as_deref()))
-        }
+        ToolingGate::Deny => Some(unsupported_tooling_response(engine_type.as_deref())),
     }
 }
 
@@ -111,6 +122,22 @@ mod tests {
         assert!(request_has_tools(&json!({"tool_choice": "auto"})));
         assert!(!request_has_tools(&json!({"tool_choice": "none"})));
         assert!(!request_has_tools(&json!({"tools": []})));
+    }
+
+    #[test]
+    fn tooling_gate_decision_three_states() {
+        assert_eq!(
+            tooling_gate_decision(SupportLevel::Supported),
+            ToolingGate::Allow
+        );
+        assert_eq!(
+            tooling_gate_decision(SupportLevel::Unknown),
+            ToolingGate::AllowWithWarn
+        );
+        assert_eq!(
+            tooling_gate_decision(SupportLevel::Unsupported),
+            ToolingGate::Deny
+        );
     }
 
     #[test]

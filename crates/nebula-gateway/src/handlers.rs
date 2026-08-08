@@ -25,7 +25,8 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 use crate::auth::{require_role, AuthContext, Role};
 use crate::interface::{
     anthropic_json_to_openai_chat, check_tooling_gate, openai_chat_json_to_anthropic,
-    openai_sse_content_delta, responses_json_to_openai_chat,
+    openai_sse_content_delta, payload_too_large_response, responses_json_to_openai_chat,
+    maybe_normalize_router_error, upstream_transport_error,
 };
 use crate::proxy_common::{
     append_headers, classify_reqwest_error, forward_upstream_response, prepare_upstream,
@@ -169,6 +170,9 @@ async fn proxy_chat_as_responses(
         let status =
             StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let bytes = resp.bytes().await.unwrap_or_default();
+        if let Some(normalized) = maybe_normalize_router_error(status, &bytes) {
+            return normalized;
+        }
         return Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -311,6 +315,9 @@ async fn proxy_chat_as_anthropic(
         let status =
             StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let bytes = resp.bytes().await.unwrap_or_default();
+        if let Some(normalized) = maybe_normalize_router_error(status, &bytes) {
+            return normalized;
+        }
         return Response::builder()
             .status(status)
             .header("content-type", "application/json")
@@ -476,7 +483,7 @@ pub async fn proxy_post(
             st.metrics
                 .request_too_large_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+            return payload_too_large_response();
         }
     };
 
@@ -511,7 +518,7 @@ pub async fn proxy_post(
             let kind = classify_reqwest_error(&e);
             st.metrics.record_upstream_error(kind);
             tracing::error!(error=%e, "upstream request failed");
-            return (StatusCode::BAD_GATEWAY, "upstream request failed").into_response();
+            return upstream_transport_error(kind, format!("upstream request failed: {kind}"));
         }
     };
     let _guard = prepared._conc_guard;
@@ -541,7 +548,7 @@ pub async fn proxy_v2(
             st.metrics
                 .request_too_large_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response();
+            return payload_too_large_response();
         }
     };
 
@@ -564,7 +571,7 @@ pub async fn proxy_v2(
             let kind = classify_reqwest_error(&e);
             st.metrics.record_upstream_error(kind);
             tracing::error!(error=%e, url=%url, "bff proxy request failed");
-            return (StatusCode::BAD_GATEWAY, "bff proxy request failed").into_response();
+            return upstream_transport_error(kind, format!("bff proxy request failed: {kind}"));
         }
     };
 
