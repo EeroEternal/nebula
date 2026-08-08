@@ -4,7 +4,7 @@
 
 ## 当前进展（一句话）
 
-M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.3.0** 发布（L0 底座 + L1/L3/L4 雏形）。**Phase 0 真机通路径已部分落地**（Gateway→Router→引擎；SGLang+vLLM 双引擎；Scheduler/Node 声明式拉起）；多租户压测 / SLO burn / 生产 etcd 仍待。
+M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.3.0** 发布（L0 底座 + L1/L3/L4 雏形）。**Phase 0 真机通路径 + 多租户隔离压测 + 轻量 SLO burn 已落地**（Gateway→Router→引擎；双引擎；声明式拉起；A 限流/B 隔离；abort 不计 5xx）；生产 etcd 三节点仍待。
 
 ## 优先级总表
 
@@ -17,9 +17,9 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **Product P1** | P1 | Engine Capability / Adapter | ✅ Batch 1–3 / ✅ 真机通路径 | 含能力 etcd 持久化、版本支持表；5090 上 SGLang Node 声明式已通；契约硬化 → Phase 1 |
 | **Product P2** | P2 | Serving Cell 只读接入 | ❌ 已移除 | CellIngress / `/cells/` 已下线，不再宣传 |
 | **Product P3** | P3 | 镜像平台 / 加速器台账 | ✅ Batch 1–2 | 兼容矩阵 + platforms 放置 + 库存 API/控制台；历史画像 → Phase 3 |
-| **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 | ModelSlo CRUD/评估 + 诊断时间线；真机 burn → Phase 0；SLA 闭环 → Phase 3 |
+| **Product P4** | P4 | 统一 SLI / SLO | ✅ Batch 1 / ✅ 轻量 burn | ModelSlo CRUD/评估 + 诊断时间线；真机 abort 口径 + offline metrics evaluate（低流量仍 `insufficient_data`）；Prometheus 告警实触发 / SLA 闭环 → Phase 3 |
 | **Product P5** | P5 | Benchmark / 推荐 / Canary | ✅ Batch 1 / ✅ 双引擎通路径 | 证据面已落；5090 上 Qwen3.5-4B × SGLang+vLLM 经 Gateway 均 200；Selection 成层 → Phase 1 |
-| **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ⏸ 压测 | Tenant + Gateway 准入 + 用量成本；压测 → Phase 0；成本联动 → Phase 3 |
+| **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ✅ 隔离压测 | Tenant + Gateway 准入 + 用量成本；真机双租户 RPS/ACL 隔离见 `scripts/phase0_tenant_isolation.sh`；成本联动 → Phase 3 |
 | **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP / EngineShim → Phase 2（有需求再开） |
 | **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能；选型向导属 Phase 1 |
 | **K8s** | K0–K3 | K8s / HAMi 执行面 | ⏸ | 与 Phase 正交；有集群虚拟化客户再开；见 [`../dev/k8s.md`](../dev/k8s.md) |
@@ -35,7 +35,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | 阶段 | 对应层 | 重点 | 状态 | 承接的既有项 |
 |------|--------|------|------|----------------|
 | **已交付** | L0 + 雏形 | P0–P6 Batch 1、N1 主体、O1–O8、Lite | ✅ | v1.3.0 / v1.4.0 |
-| **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径 / ⏸ 其余 | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node 拉起。待：多租户压测、SLO burn、生产 etcd |
+| **Phase 0** | L0/L4 地基 | 真机 e2e、多租户压测、观测 burn、etcd HA runbook | ✅ 通路径+压测+轻量 burn / ⏸ etcd HA | 已：Gateway→Router→引擎；双引擎；Deployment→Placement→Node；`phase0_tenant_isolation.sh`；`phase0_slo_burn.sh`（abort≠5xx）。待：生产 etcd |
 | **Phase 1** | L1 + L3 骨架 | 一致性契约套件；ModelProfile；Selection 推荐+草稿；控制台选型向导 | ✅ 骨架 | [`selection.md`](./selection.md)、[`../dev/contracts.md`](../dev/contracts.md)；`/api/v2/selection/*` + 治理页半自动 |
 | **Phase 2** | L2 | HardwarePool、池约束、PD/TP（按需）、故障隔离 | ⏸ 有需求再开 | N3 D4/D5；与 K8s 执行面正交 |
 | **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ | P4 闭环、P3 历史画像、P6 成本反哺 |
@@ -50,7 +50,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | Gateway 准入 + ExecutionContext 传播；稳定拒绝码 | ✅ |
 | 低基数 `tenant_denied_total{reason=}`；审计含 tenant/deny | ✅ |
 | BFF + 控制台租户用量/成本视图 | ✅ |
-| 真机多租户隔离压测 | ⏸ |
+| 真机多租户隔离压测 | ✅ `scripts/phase0_tenant_isolation.sh`（A RPS/ACL 拒、B 不受影响） |
 
 ### Product P5 Batch 1 勾选
 
@@ -71,7 +71,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | abort/Drain 排除错误预算语义写入评估结果 | ✅ |
 | `DiagnosticEvent` 聚合 deployment/placement/slo | ✅ |
 | 控制台 `/governance`：矩阵 / 库存 / SLO / 时间线 | ✅ |
-| 真机流量 burn / Prometheus 告警实触发 | ⏸ |
+| 真机流量 burn / Prometheus 告警实触发 | ✅ 轻量（`phase0_slo_burn.sh` + abort 口径）/ ⏸ Alertmanager 实触发 |
 
 ### Product P3 Batch 2 勾选
 
