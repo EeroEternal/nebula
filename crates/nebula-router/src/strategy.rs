@@ -146,6 +146,7 @@ mod tests {
             api_flavor: "openai".to_string(),
             status: EndpointStatus::Ready,
             last_heartbeat_ms: 0,
+            status_detail: None,
             grpc_target: None,
             base_url: Some("http://127.0.0.1:8000".to_string()),
         }

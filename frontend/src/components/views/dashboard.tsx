@@ -9,7 +9,8 @@ import {
     BarChart, Bar, LineChart, Line, XAxis, YAxis, ResponsiveContainer, CartesianGrid, Tooltip,
 } from "recharts"
 import { apiGet, v2 } from "@/lib/api"
-import type { DiskAlert, EndpointStats } from "@/lib/types"
+import type { AlertsSummary, EndpointStats } from "@/lib/types"
+import { engineAlertLabel, endpointStatusTone, isEngineAlertCritical } from "@/lib/endpoint-status"
 import { useI18n } from "@/lib/i18n"
 import { useClusterOverview } from "@/hooks/useClusterOverview"
 import { useEngineStats } from "@/hooks/useEngineStats"
@@ -56,20 +57,49 @@ export function DashboardView() {
         }
     }, [overview])
 
-    // Disk alerts from v2
-    const [diskAlerts, setDiskAlerts] = useState<DiskAlert[]>([])
-    const refreshDiskAlerts = useCallback(() => {
+    // Alerts from v2 (disk + engine probe)
+    const [alerts, setAlerts] = useState<AlertsSummary>({ disk: [], engine: [] })
+    const refreshAlerts = useCallback(() => {
         if (!token) return
         v2.listAlerts(token)
-            .then(setDiskAlerts)
-            .catch(() => setDiskAlerts([]))
+            .then(setAlerts)
+            .catch(() => setAlerts({ disk: [], engine: [] }))
     }, [token])
 
     useEffect(() => {
-        refreshDiskAlerts()
-        const id = setInterval(refreshDiskAlerts, 30000)
+        refreshAlerts()
+        const id = setInterval(refreshAlerts, 30000)
         return () => clearInterval(id)
-    }, [refreshDiskAlerts])
+    }, [refreshAlerts])
+
+    const alertBanners = useMemo(() => {
+        const rows: Array<{
+            key: string
+            critical: boolean
+            label: string
+            message: string
+            meta: string
+        }> = []
+        for (const alert of alerts.disk) {
+            rows.push({
+                key: `disk-${alert.node_id}-${alert.alert_type}-${alert.created_at_ms}`,
+                critical: alert.alert_type === 'disk_critical',
+                label: alert.alert_type === 'disk_critical' ? t('dashboard.critical') : t('dashboard.warning'),
+                message: alert.message,
+                meta: alert.node_id,
+            })
+        }
+        for (const alert of alerts.engine) {
+            rows.push({
+                key: `engine-${alert.node_id}-${alert.model_uid}-${alert.replica_id}-${alert.created_at_ms}`,
+                critical: isEngineAlertCritical(alert.alert_type),
+                label: engineAlertLabel(alert.alert_type, t),
+                message: alert.message,
+                meta: `${alert.model_uid} · ${alert.node_id} · r${alert.replica_id}`,
+            })
+        }
+        return rows
+    }, [alerts, t])
 
     // GPU utilization trend data from xtrace
     const [gpuTrend, setGpuTrend] = useState<{ time: string; utilization: number; temperature: number }[]>([])
@@ -190,7 +220,9 @@ export function DashboardView() {
                 memUsed: memUsed || "—",
                 kvPct,
                 pending: es?.pending_requests ?? 0,
-                status: ep.status?.toLowerCase().includes("ready") || ep.status?.toLowerCase().includes("run") ? "ready" as const : "loading" as const,
+                status: ep.status?.toLowerCase() ?? '',
+                statusDetail: ep.status_detail ?? null,
+                statusTone: endpointStatusTone(ep.status ?? ''),
             }
         })
     }, [overview, statsMap])
@@ -245,25 +277,22 @@ export function DashboardView() {
                 </div>
             </div>
 
-            {/* Disk alert banners */}
-            {diskAlerts.length > 0 && (
+            {/* Probe / disk alert banners */}
+            {alertBanners.length > 0 && (
                 <div className="space-y-3">
-                    {diskAlerts.map((alert, i) => {
-                        const isCritical = alert.alert_type === "disk_critical"
-                        return (
-                            <div key={i} className={cn(
-                                "flex items-center gap-4 rounded-lg px-5 py-4 text-sm backdrop-blur-md border",
-                                isCritical ? "bg-destructive/10 border-destructive text-destructive" : "bg-warning/10 border-warning text-warning"
-                            )}>
-                                <AlertTriangle className="h-5 w-5 shrink-0" />
-                                <div className="flex-1">
-                                    <span className="font-bold uppercase tracking-wide mr-2">{isCritical ? "Critical" : "Warning"}:</span>
-                                    {alert.message}
-                                </div>
-                                <div className="font-mono bg-black/20 px-2 py-1 rounded text-xs">{alert.node_id}</div>
+                    {alertBanners.map((alert) => (
+                        <div key={alert.key} className={cn(
+                            "flex items-center gap-4 rounded-lg px-5 py-4 text-sm backdrop-blur-md border",
+                            alert.critical ? "bg-destructive/10 border-destructive text-destructive" : "bg-warning/10 border-warning text-warning"
+                        )}>
+                            <AlertTriangle className="h-5 w-5 shrink-0" />
+                            <div className="flex-1 min-w-0">
+                                <span className="font-bold uppercase tracking-wide mr-2">{alert.label}:</span>
+                                <span>{alert.message}</span>
                             </div>
-                        )
-                    })}
+                            <div className="font-mono bg-black/20 px-2 py-1 rounded text-xs shrink-0 max-w-[240px] truncate">{alert.meta}</div>
+                        </div>
+                    ))}
                 </div>
             )}
 
@@ -400,11 +429,24 @@ export function DashboardView() {
                                         </div>
                                     </TableCell>
                                     <TableCell>
-                                        <div className="flex items-center gap-2">
-                                            <div className={cn("w-1.5 h-1.5 rounded-full", row.status === "ready" ? "bg-success" : "bg-warning animate-pulse")} />
-                                            <span className={cn("text-[10px] uppercase font-bold tracking-wider", row.status === "ready" ? "text-success" : "text-warning")}>
-                                                {row.status === "ready" ? "Operational" : "Synchronizing"}
-                                            </span>
+                                        <div className="flex flex-col gap-1">
+                                            <div className="flex items-center gap-2">
+                                                <div className={cn(
+                                                    "w-1.5 h-1.5 rounded-full",
+                                                    row.statusTone === "success" ? "bg-success" : row.statusTone === "destructive" ? "bg-destructive animate-pulse" : "bg-warning animate-pulse"
+                                                )} />
+                                                <span className={cn(
+                                                    "text-[10px] uppercase font-bold tracking-wider",
+                                                    row.statusTone === "success" ? "text-success" : row.statusTone === "destructive" ? "text-destructive" : "text-warning"
+                                                )}>
+                                                    {row.status || "unknown"}
+                                                </span>
+                                            </div>
+                                            {row.statusDetail && (
+                                                <span className="text-[10px] text-muted-foreground truncate max-w-[200px]" title={row.statusDetail}>
+                                                    {row.statusDetail}
+                                                </span>
+                                            )}
                                         </div>
                                     </TableCell>
                                 </TableRow>

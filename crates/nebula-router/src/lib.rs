@@ -497,6 +497,7 @@ mod plan_version_tests {
             api_flavor: "openai".into(),
             status: EndpointStatus::Ready,
             last_heartbeat_ms: 0,
+            status_detail: None,
             grpc_target: None,
             base_url: Some(format!("http://127.0.0.1:{}", 8000 + replica_id)),
         }

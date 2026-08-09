@@ -268,7 +268,7 @@ pub async fn list_alerts(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let alerts = service::list_disk_alerts(&*st.store).await?;
+    let alerts = service::list_alerts(&*st.store).await?;
     Ok((StatusCode::OK, Json(alerts)).into_response())
 }
 

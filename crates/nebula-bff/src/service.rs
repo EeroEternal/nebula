@@ -11,9 +11,9 @@ use uuid::Uuid;
 
 use nebula_common::{
     validate_engine_and_config, DesiredState, DiskAlert, DownloadPhase, DownloadProgress,
-    EndpointInfo, EndpointStats, ModelCacheEntry, ModelConfig, ModelDeployment, ModelRequest,
-    ModelRequestStatus, ModelSource, ModelSpec, ModelTemplate, NodeDiskStatus, PlacementPlan,
-    TemplateCategory, TemplateSource,
+    EndpointInfo, EndpointStats, EngineProbeAlert, ModelCacheEntry, ModelConfig, ModelDeployment,
+    ModelRequest, ModelRequestStatus, ModelSource, ModelSpec, ModelTemplate, NodeDiskStatus,
+    PlacementPlan, TemplateCategory, TemplateSource,
 };
 use nebula_meta::MetaStore;
 
@@ -1254,12 +1254,33 @@ pub async fn build_cache_summary(store: &dyn MetaStore) -> Result<CacheSummary, 
     })
 }
 
-pub async fn list_disk_alerts(store: &dyn MetaStore) -> Result<Vec<DiskAlert>, ServiceError> {
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertsSummary {
+    pub disk: Vec<DiskAlert>,
+    pub engine: Vec<EngineProbeAlert>,
+}
+
+pub async fn list_alerts(store: &dyn MetaStore) -> Result<AlertsSummary, ServiceError> {
     let kvs = store.list_prefix("/alerts/").await?;
-    Ok(kvs
-        .into_iter()
-        .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
-        .collect())
+    let mut disk = Vec::new();
+    let mut engine = Vec::new();
+    for (key, v, _) in kvs {
+        if key.contains("/engine_") {
+            if let Ok(alert) = serde_json::from_slice::<EngineProbeAlert>(&v) {
+                engine.push(alert);
+            }
+        } else if let Ok(alert) = serde_json::from_slice::<DiskAlert>(&v) {
+            disk.push(alert);
+        }
+    }
+    disk.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    engine.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    Ok(AlertsSummary { disk, engine })
+}
+
+/// Backward-compatible alias; prefer [`list_alerts`].
+pub async fn list_disk_alerts(store: &dyn MetaStore) -> Result<Vec<DiskAlert>, ServiceError> {
+    Ok(list_alerts(store).await?.disk)
 }
 
 // ---------------------------------------------------------------------------

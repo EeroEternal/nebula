@@ -452,6 +452,7 @@ async fn launch_replica_engine(
         api_flavor: "openai".to_string(),
         status: EndpointStatus::Ready,
         last_heartbeat_ms: now_ms(),
+        status_detail: None,
         grpc_target: None,
         base_url: Some(handle.base_url.clone()),
     };

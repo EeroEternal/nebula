@@ -194,6 +194,7 @@ mod tests {
             api_flavor: "openai".into(),
             status,
             last_heartbeat_ms: 1,
+            status_detail: None,
             grpc_target: None,
             base_url: Some("http://127.0.0.1:1".into()),
         }

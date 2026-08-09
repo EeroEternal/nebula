@@ -10,6 +10,7 @@ import {
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
+import { endpointStatusTone } from "@/lib/endpoint-status"
 import { v2 } from "@/lib/api"
 import type { ModelDetailView, AggregatedModelState } from "@/lib/types"
 import { useI18n } from "@/lib/i18n"
@@ -181,7 +182,20 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                                     <TableCell className="font-mono text-xs">{ep.replica_id}</TableCell>
                                     <TableCell className="font-mono text-xs">{ep.node_id}</TableCell>
                                     <TableCell className="text-xs">{ep.endpoint_kind}</TableCell>
-                                    <TableCell><Badge variant="outline" className="text-[10px]">{ep.status}</Badge></TableCell>
+                                    <TableCell>
+                                        <div className="flex flex-col gap-1">
+                                            <Badge variant="outline" className={cn(
+                                                "text-[10px] w-fit",
+                                                endpointStatusTone(ep.status) === "destructive" && "border-destructive/50 text-destructive",
+                                                endpointStatusTone(ep.status) === "warning" && "border-warning/50 text-warning",
+                                            )}>{ep.status}</Badge>
+                                            {ep.status_detail && (
+                                                <span className="text-[10px] text-muted-foreground truncate max-w-[200px]" title={ep.status_detail}>
+                                                    {ep.status_detail}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </TableCell>
                                     <TableCell className="font-mono text-[10px] text-muted-foreground truncate max-w-[240px]">{ep.base_url || "—"}</TableCell>
                                 </TableRow>
                             ))}
@@ -218,8 +232,6 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                         ))}
                     </div>
                 </Section>
-            )}
-
             )}
 
             {/* Cache status */}

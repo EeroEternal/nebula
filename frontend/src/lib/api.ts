@@ -127,7 +127,7 @@ import type {
   ModelView,
   ModelDetailView,
   ModelTemplate,
-  DiskAlert,
+  AlertsSummary,
   LoginResponse,
   SloEvaluation,
   UpdateUserPayload,
@@ -198,7 +198,7 @@ export const v2 = {
     apiPost<unknown, Record<string, unknown>>(`/v2/templates/${id}/deploy`, body, token),
 
   listAlerts: (token?: string) =>
-    apiGet<DiskAlert[]>('/v2/alerts', token),
+    apiGet<AlertsSummary>('/v2/alerts', token),
 
   gatewayOverview: (window: string, token?: string) =>
     apiGetWithParams<GatewayOverview>('/v2/observability/gateway/overview', { window }, token),

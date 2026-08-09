@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { useClusterOverview } from "@/hooks/useClusterOverview"
 import { cn } from "@/lib/utils"
+import { endpointStatusTone } from "@/lib/endpoint-status"
 
 export function EndpointsView() {
     const { data: overview } = useClusterOverview()
@@ -92,13 +93,31 @@ export function EndpointsView() {
                                         </div>
                                     </TableCell>
                                     <TableCell className="text-right pr-6">
-                                        <div className="flex items-center justify-end gap-2">
-                                            <div className={cn("w-1.5 h-1.5 rounded-full animate-signal", 
-                                                ep.status.toLowerCase().includes('run') ? "bg-success" : "bg-warning")} />
-                                            <span className={cn("text-[9px] font-bold uppercase tracking-widest", 
-                                                ep.status.toLowerCase().includes('run') ? "text-success" : "text-warning")}>
-                                                {ep.status}
-                                            </span>
+                                        <div className="flex flex-col items-end gap-1">
+                                            <div className="flex items-center justify-end gap-2">
+                                                {(() => {
+                                                    const tone = endpointStatusTone(ep.status)
+                                                    return (
+                                                        <>
+                                                            <div className={cn(
+                                                                "w-1.5 h-1.5 rounded-full",
+                                                                tone === "success" ? "bg-success animate-signal" : tone === "destructive" ? "bg-destructive animate-pulse" : "bg-warning"
+                                                            )} />
+                                                            <span className={cn(
+                                                                "text-[9px] font-bold uppercase tracking-widest",
+                                                                tone === "success" ? "text-success" : tone === "destructive" ? "text-destructive" : "text-warning"
+                                                            )}>
+                                                                {ep.status}
+                                                            </span>
+                                                        </>
+                                                    )
+                                                })()}
+                                            </div>
+                                            {ep.status_detail && (
+                                                <span className="text-[9px] text-muted-foreground max-w-[220px] truncate text-right" title={ep.status_detail}>
+                                                    {ep.status_detail}
+                                                </span>
+                                            )}
                                         </div>
                                     </TableCell>
                                 </TableRow>
