@@ -267,7 +267,7 @@ impl Engine for VllmEngine {
                 .arg("-p")
                 .arg(format!("{}:{}", selected_port, selected_port))
                 .arg("-v")
-                .arg(format!("{host_mount}:/model:ro"));
+                .arg(format!("{host_mount}:/model"));
 
             if self.config.use_modelscope {
                 cmd.arg("-e").arg("VLLM_USE_MODELSCOPE=True");

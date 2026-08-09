@@ -50,6 +50,17 @@ impl SglangEngine {
     fn is_docker(&self) -> bool {
         self.config.docker_image.is_some()
     }
+
+    /// Split `--sglang-bin` into executable + prefix args (e.g. `python3 -m sglang.launch_server`).
+    fn split_bin(&self) -> (String, Vec<String>) {
+        let parts: Vec<&str> = self.config.bin.split_whitespace().collect();
+        if parts.is_empty() {
+            return ("python3".into(), vec!["-m".into(), "sglang.launch_server".into()]);
+        }
+        let program = parts[0].to_string();
+        let prefix = parts[1..].iter().map(|s| (*s).to_string()).collect();
+        (program, prefix)
+    }
 }
 
 #[async_trait]
@@ -176,6 +187,12 @@ impl Engine for SglangEngine {
 
             cmd.arg(image);
 
+            // Reuse --sglang-bin so Docker and local mode share the same launch command.
+            let (program, prefix_args) = self.split_bin();
+            cmd.arg(&program);
+            for a in &prefix_args {
+                cmd.arg(a);
+            }
             cmd.arg("--model-path")
                 .arg(&container_model)
                 .arg("--host")
@@ -189,18 +206,12 @@ impl Engine for SglangEngine {
 
             process_kind = "docker";
         } else {
-            // Local binary mode
-            // sglang_bin might be "python3 -m sglang.launch_server" (multi-word)
-            let parts: Vec<&str> = self.config.bin.split_whitespace().collect();
-            let (program, prefix_args) = if parts.len() > 1 {
-                (parts[0], &parts[1..])
-            } else {
-                (parts[0], &[][..])
-            };
+            // Local binary mode — same launch command as Docker (`--sglang-bin`).
+            let (program, prefix_args) = self.split_bin();
 
             tracing::info!(bin=%self.config.bin, "using sglang binary");
-            cmd = Command::new(program);
-            for a in prefix_args {
+            cmd = Command::new(&program);
+            for a in &prefix_args {
                 cmd.arg(a);
             }
             if let Some(ref indices) = ctx.gpu_indices {
