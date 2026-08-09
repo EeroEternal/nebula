@@ -53,6 +53,28 @@ fn build_vllm_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
         args.push("--max-model-len".to_string());
         args.push(max_len.to_string());
     }
+    if let Some(name) = cfg.served_model_name.as_deref() {
+        args.push("--served-model-name".to_string());
+        args.push(name.to_string());
+    }
+    if let Some(dtype) = cfg.kv_cache_dtype.as_deref() {
+        args.push("--kv-cache-dtype".to_string());
+        args.push(dtype.to_string());
+    }
+    if cfg.trust_remote_code == Some(true) {
+        args.push("--trust-remote-code".to_string());
+    }
+    if cfg.enable_expert_parallel == Some(true) {
+        args.push("--enable-expert-parallel".to_string());
+    }
+    if let Some(block) = cfg.block_size {
+        args.push("--block-size".to_string());
+        args.push(block.to_string());
+    }
+    if let Some(mode) = cfg.tokenizer_mode.as_deref() {
+        args.push("--tokenizer-mode".to_string());
+        args.push(mode.to_string());
+    }
     if let Some(mods) = cfg.lora_modules.as_ref() {
         if !mods.is_empty() {
             args.push("--enable-lora".to_string());
@@ -110,6 +132,12 @@ mod tests {
             max_model_len: Some(8192),
             required_vram_mb: None,
             lora_modules: None,
+            served_model_name: None,
+            kv_cache_dtype: None,
+            trust_remote_code: None,
+            enable_expert_parallel: None,
+            block_size: None,
+            tokenizer_mode: None,
         }
     }
 
@@ -149,5 +177,24 @@ mod tests {
     fn unknown_engine_errors() {
         let err = build_engine_extra_args(Some("tensorrt"), &sample_cfg()).unwrap_err();
         assert!(err.contains("unknown engine_type"));
+    }
+
+    #[test]
+    fn vllm_deepseek_v4_flags() {
+        let cfg = ModelConfig {
+            kv_cache_dtype: Some("fp8".into()),
+            trust_remote_code: Some(true),
+            enable_expert_parallel: Some(true),
+            block_size: Some(256),
+            tokenizer_mode: Some("deepseek_v4".into()),
+            served_model_name: Some("deepseek-v4-flash".into()),
+            ..sample_cfg()
+        };
+        let args = build_engine_extra_args(Some("vllm"), &cfg).unwrap().unwrap();
+        assert!(args.windows(2).any(|w| w[0] == "--kv-cache-dtype" && w[1] == "fp8"));
+        assert!(args.iter().any(|a| a == "--trust-remote-code"));
+        assert!(args.iter().any(|a| a == "--enable-expert-parallel"));
+        assert!(args.windows(2).any(|w| w[0] == "--block-size" && w[1] == "256"));
+        assert!(args.windows(2).any(|w| w[0] == "--tokenizer-mode" && w[1] == "deepseek_v4"));
     }
 }

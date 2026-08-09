@@ -414,11 +414,8 @@ mod tests {
     #[test]
     fn rejects_invalid_gpu_util_and_tp() {
         let bad_util = ModelConfig {
-            tensor_parallel_size: None,
             gpu_memory_utilization: Some(1.5),
-            max_model_len: None,
-            required_vram_mb: None,
-            lora_modules: None,
+            ..Default::default()
         };
         assert!(validate_model_config("vllm", &bad_util)
             .unwrap_err()
@@ -427,9 +424,7 @@ mod tests {
         let bad_tp = ModelConfig {
             tensor_parallel_size: Some(0),
             gpu_memory_utilization: Some(0.9),
-            max_model_len: None,
-            required_vram_mb: None,
-            lora_modules: None,
+            ..Default::default()
         };
         assert!(validate_model_config("sglang", &bad_tp)
             .unwrap_err()

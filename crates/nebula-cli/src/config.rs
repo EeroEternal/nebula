@@ -22,5 +22,6 @@ pub fn build_config(
         max_model_len,
         required_vram_mb,
         lora_modules,
+        ..Default::default()
     })
 }

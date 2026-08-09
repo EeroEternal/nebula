@@ -304,6 +304,15 @@ pub fn merge_config(
             max_model_len: o.max_model_len.or(b.max_model_len),
             required_vram_mb: o.required_vram_mb.or(b.required_vram_mb),
             lora_modules: o.lora_modules.clone().or_else(|| b.lora_modules.clone()),
+            served_model_name: o
+                .served_model_name
+                .clone()
+                .or_else(|| b.served_model_name.clone()),
+            kv_cache_dtype: o.kv_cache_dtype.clone().or_else(|| b.kv_cache_dtype.clone()),
+            trust_remote_code: o.trust_remote_code.or(b.trust_remote_code),
+            enable_expert_parallel: o.enable_expert_parallel.or(b.enable_expert_parallel),
+            block_size: o.block_size.or(b.block_size),
+            tokenizer_mode: o.tokenizer_mode.clone().or_else(|| b.tokenizer_mode.clone()),
         }),
     }
 }

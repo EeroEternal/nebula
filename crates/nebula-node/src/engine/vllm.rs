@@ -12,6 +12,79 @@ use super::{
 };
 use crate::util::now_ms;
 
+/// Resolve host mount path and in-container model path for Docker mode.
+fn resolve_docker_model_mount(model_tag: &str, model_dir: &str) -> (String, String) {
+    let path = std::path::Path::new(model_tag);
+    if path.is_absolute() {
+        return (model_tag.to_string(), "/model".to_string());
+    }
+    if model_tag.starts_with(model_dir) {
+        return (
+            model_dir.to_string(),
+            model_tag.replacen(model_dir, "/model", 1),
+        );
+    }
+    (model_dir.to_string(), model_tag.to_string())
+}
+
+/// DeepSeek V4 requires flashinfer and a bash entrypoint when run in Docker.
+fn needs_deepseek_v4_docker_wrapper(model_tag: &str, vllm_args: &[String]) -> bool {
+    if vllm_args
+        .windows(2)
+        .any(|w| w[0] == "--kv-cache-dtype" && w[1].starts_with("fp8"))
+    {
+        return true;
+    }
+    let config_path = std::path::Path::new(model_tag).join("config.json");
+    if let Ok(text) = std::fs::read_to_string(config_path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            return v.get("model_type").and_then(|t| t.as_str()) == Some("deepseek_v4");
+        }
+    }
+    false
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Inspect a named Docker container; returns (base_url, healthy) when running.
+async fn inspect_running_container(name: &str) -> Option<(String, bool)> {
+    let output = Command::new("docker")
+        .args([
+            "inspect",
+            "-f",
+            "{{.State.Running}} {{range .NetworkSettings.Ports}}{{(index . 0).HostPort}}{{end}}",
+            name,
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim();
+    if !stdout.starts_with("true ") {
+        return None;
+    }
+
+    let port_str = stdout.strip_prefix("true ")?.trim();
+    let _port: u16 = port_str.parse().ok()?;
+    let base_url = format!("http://127.0.0.1:{_port}");
+
+    let http = nebula_common::health_http_client().ok()?;
+    let health_url = format!("{base_url}/health");
+    let healthy = matches!(
+        http.get(&health_url).send().await,
+        Ok(resp) if resp.status().is_success()
+    );
+
+    Some((base_url, healthy))
+}
+
 /// vLLM-specific configuration extracted from Node CLI args.
 /// These are the vllm_* parameters that used to live directly in Args.
 #[derive(Debug, Clone)]
@@ -171,14 +244,19 @@ impl Engine for VllmEngine {
                 "all".to_string()
             };
 
-            // Remap model path: if model_tag starts with model_dir, replace with /model
-            let container_model = if model_tag.starts_with(&self.config.model_dir) {
-                model_tag.replacen(&self.config.model_dir, "/model", 1)
-            } else {
-                model_tag.clone()
-            };
+            let (host_mount, container_model) =
+                resolve_docker_model_mount(&model_tag, &self.config.model_dir);
+            let use_wrapper = needs_deepseek_v4_docker_wrapper(&model_tag, &vllm_args);
 
-            tracing::info!(image=%image, container=%cname, gpu=%gpu_device, model=%container_model, "launching vLLM via docker");
+            tracing::info!(
+                image=%image,
+                container=%cname,
+                gpu=%gpu_device,
+                model=%container_model,
+                host_mount=%host_mount,
+                deepseek_wrapper=%use_wrapper,
+                "launching vLLM via docker"
+            );
 
             cmd = Command::new("docker");
             cmd.arg("run")
@@ -189,7 +267,7 @@ impl Engine for VllmEngine {
                 .arg("-p")
                 .arg(format!("{}:{}", selected_port, selected_port))
                 .arg("-v")
-                .arg(format!("{}:/model", self.config.model_dir));
+                .arg(format!("{host_mount}:/model:ro"));
 
             if self.config.use_modelscope {
                 cmd.arg("-e").arg("VLLM_USE_MODELSCOPE=True");
@@ -204,17 +282,46 @@ impl Engine for VllmEngine {
             cmd.arg("-e").arg("XDG_CACHE_HOME=/model/.cache");
             cmd.arg("-e").arg("HF_HUB_DISABLE_XET=1");
 
+            if use_wrapper {
+                cmd.arg("-e").arg("FLASHINFER_DISABLE_VERSION_CHECK=1");
+            }
+
+            if use_wrapper {
+                cmd.arg("--entrypoint").arg("bash");
+            }
+
             cmd.arg(image);
 
-            cmd.arg("--model")
-                .arg(&container_model)
-                .arg("--host")
-                .arg("0.0.0.0")
-                .arg("--port")
-                .arg(selected_port.to_string());
+            if use_wrapper {
+                let mut serve_args = vec![
+                    "serve".to_string(),
+                    container_model.clone(),
+                    "--host".to_string(),
+                    "0.0.0.0".to_string(),
+                    "--port".to_string(),
+                    selected_port.to_string(),
+                ];
+                serve_args.extend(vllm_args.clone());
+                let args_str = serve_args
+                    .iter()
+                    .map(|a| shell_escape(a))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let script = format!(
+                    "set -e\npip install --no-deps -q flashinfer-python==0.6.14 2>/dev/null || true\nexport FLASHINFER_DISABLE_VERSION_CHECK=1\nexec vllm {args_str}"
+                );
+                cmd.arg("-lc").arg(script);
+            } else {
+                cmd.arg("--model")
+                    .arg(&container_model)
+                    .arg("--host")
+                    .arg("0.0.0.0")
+                    .arg("--port")
+                    .arg(selected_port.to_string());
 
-            for a in &vllm_args {
-                cmd.arg(a);
+                for a in &vllm_args {
+                    cmd.arg(a);
+                }
             }
 
             process_kind = "docker";
@@ -284,75 +391,53 @@ impl Engine for VllmEngine {
         }
 
         let name = container_name(&ctx.model_uid, ctx.replica_id);
+        let (base_url, healthy) = inspect_running_container(&name).await?;
 
-        // Check if container is running
-        let output = Command::new("docker")
-            .args(["inspect", "-f", "{{.State.Running}} {{range .NetworkSettings.Ports}}{{(index . 0).HostPort}}{{end}}", &name])
-            .output()
-            .await
+        if healthy {
+            tracing::info!(%name, %base_url, "reusing existing healthy container");
+        } else {
+            tracing::info!(
+                %name,
+                %base_url,
+                "container running but not healthy yet; waiting instead of recreating"
+            );
+        }
+
+        let http = nebula_common::health_http_client().ok()?;
+        let models_url = format!("{base_url}/v1/models");
+        let engine_model = if healthy {
+            match http.get(&models_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let v: serde_json::Value =
+                        resp.json().await.unwrap_or(serde_json::Value::Null);
+                    v.get("data")
+                        .and_then(|d| d.get(0))
+                        .and_then(|m| m.get("id"))
+                        .and_then(|id| id.as_str())
+                        .unwrap_or_default()
+                        .to_string()
+                }
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        let wait_child = Command::new("docker")
+            .args(["wait", &name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
             .ok()?;
 
-        if !output.status.success() {
-            return None;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stdout = stdout.trim();
-        if !stdout.starts_with("true ") {
-            tracing::info!(%name, "container exists but not running, will recreate");
-            return None;
-        }
-
-        let port_str = stdout.strip_prefix("true ")?.trim();
-        let _port: u16 = port_str.parse().ok()?;
-        let base_url = format!("http://127.0.0.1:{}", _port);
-
-        // Health check
-        let http = nebula_common::health_http_client().ok()?;
-
-        let health_url = format!("{}/health", base_url);
-        match http.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!(%name, %base_url, "reusing existing healthy container");
-
-                // Try to get the served model name
-                let models_url = format!("{}/v1/models", base_url);
-                let engine_model = match http.get(&models_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        let v: serde_json::Value =
-                            resp.json().await.unwrap_or(serde_json::Value::Null);
-                        v.get("data")
-                            .and_then(|d| d.get(0))
-                            .and_then(|m| m.get("id"))
-                            .and_then(|id| id.as_str())
-                            .unwrap_or_default()
-                            .to_string()
-                    }
-                    _ => String::new(),
-                };
-
-                // Spawn `docker wait` to track container lifecycle
-                let wait_child = Command::new("docker")
-                    .args(["wait", &name])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .spawn()
-                    .ok()?;
-
-                Some(EngineHandle {
-                    base_url,
-                    engine_model,
-                    process: EngineProcess::DockerContainer {
-                        name: name.clone(),
-                        wait_child,
-                    },
-                })
-            }
-            _ => {
-                tracing::info!(%name, "container running but not healthy, will recreate");
-                None
-            }
-        }
+        Some(EngineHandle {
+            base_url,
+            engine_model,
+            process: EngineProcess::DockerContainer {
+                name: name.clone(),
+                wait_child,
+            },
+        })
     }
 
     async fn stop(&self, handle: &mut EngineHandle) -> anyhow::Result<()> {
@@ -565,6 +650,35 @@ fn extract_metric(line: &str, metric_suffix: &str) -> Option<f64> {
     // Value is the last whitespace-separated token
     let value_str = line.rsplit_once(|c: char| c.is_whitespace())?.1;
     value_str.parse::<f64>().ok()
+}
+
+#[cfg(test)]
+mod docker_mount_tests {
+    use super::{needs_deepseek_v4_docker_wrapper, resolve_docker_model_mount};
+
+    #[test]
+    fn absolute_local_path_mounts_directly() {
+        let (host, container) =
+            resolve_docker_model_mount("/data/models/DeepSeek-V4-Flash-0731", "/data/models");
+        assert_eq!(host, "/data/models/DeepSeek-V4-Flash-0731");
+        assert_eq!(container, "/model");
+    }
+
+    #[test]
+    fn model_dir_prefix_remaps_container_path() {
+        let (host, container) =
+            resolve_docker_model_mount("/data/models/foo/bar", "/data/models");
+        assert_eq!(host, "/data/models/foo/bar");
+        assert_eq!(container, "/model");
+    }
+
+    #[test]
+    fn fp8_kv_cache_triggers_deepseek_wrapper() {
+        assert!(needs_deepseek_v4_docker_wrapper(
+            "/tmp/x",
+            &["--kv-cache-dtype".into(), "fp8".into()]
+        ));
+    }
 }
 
 #[cfg(test)]

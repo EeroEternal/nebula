@@ -44,6 +44,7 @@ async fn periodic_full_reconcile_loop(
     store: EtcdMetaStore,
     args: Args,
     running: Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
+    starting: Arc<Mutex<HashSet<ReplicaKey>>>,
     endpoint_state: Arc<Mutex<HashMap<ReplicaKey, nebula_common::EndpointInfo>>>,
     last_epochs: Arc<Mutex<HashMap<String, u64>>>,
 ) {
@@ -75,6 +76,7 @@ async fn periodic_full_reconcile_loop(
                 &store,
                 &args,
                 &running,
+                &starting,
                 &endpoint_state,
                 &last_epochs,
                 &mid,
@@ -99,6 +101,7 @@ async fn periodic_full_reconcile_loop(
                 &store,
                 &args,
                 &running,
+                &starting,
                 &endpoint_state,
                 &last_epochs,
                 &mid,
@@ -150,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
     // shared running state (used by reconcile, heartbeat, and periodic drain)
     let running: Arc<Mutex<HashMap<ReplicaKey, RunningModel>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let starting: Arc<Mutex<HashSet<ReplicaKey>>> = Arc::new(Mutex::new(HashSet::new()));
     let last_epochs: Arc<Mutex<HashMap<String, u64>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let xtrace = init_xtrace_client(&args);
@@ -176,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
         store.clone(),
         args.clone(),
         running.clone(),
+        starting.clone(),
         endpoint_state.clone(),
         last_epochs.clone(),
     ));
@@ -228,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
                             &store,
                             &args,
                             &running,
+                            &starting,
                             &endpoint_state,
                             &last_epochs,
                             &mid,
@@ -269,6 +275,7 @@ async fn main() -> anyhow::Result<()> {
                         &store,
                         &args,
                         &running,
+                        &starting,
                         &endpoint_state,
                         &last_epochs,
                         &mid,
@@ -287,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
                             &store,
                             &args,
                             &running,
+                            &starting,
                             &endpoint_state,
                             &last_epochs,
                             &model_uid,
