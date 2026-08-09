@@ -11,7 +11,7 @@ use nebula_common::{
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::args::Args;
-use crate::engine::{write_engine_env, Engine, EngineHandle, EngineStartContext};
+use crate::engine::{write_engine_env, wait_engine_ready, Engine, EngineHandle, EngineStartContext};
 use crate::heartbeat::{
     delete_capability, delete_endpoint, delete_stats, register_capability, register_endpoint,
 };
@@ -309,17 +309,6 @@ async fn launch_replica_engine(
         "engine adapter selected"
     );
 
-    let ctx = EngineStartContext {
-        model_uid: model_uid.to_string(),
-        model_name: plan.model_name.clone(),
-        replica_id,
-        port: assignment.port,
-        gpu_indices: assignment.effective_gpu_indices(),
-        engine_config_path: assignment.engine_config_path.clone(),
-        extra_args: assignment.extra_args.clone(),
-        ready_timeout: Duration::from_secs(args.ready_timeout_secs),
-    };
-
     if let Some(image) = assignment.docker_image.as_deref() {
         let output = tokio::process::Command::new("docker")
             .args(["images", "-q", image])
@@ -343,11 +332,12 @@ async fn launch_replica_engine(
         }
     }
 
+    let mut engine_model_path = plan.model_name.clone();
     let spec_key = format!("/models/{}/spec", model_uid);
     if let Ok(Some((spec_bytes, _))) = store.get(&spec_key).await {
         if let Ok(spec) = serde_json::from_slice::<ModelSpec>(&spec_bytes) {
             tracing::info!(%model_uid, replica_id, source=?spec.model_source, "ensuring model files are available");
-            if let Err(e) = crate::model_cache_manager::download_model_if_needed(
+            match crate::model_cache_manager::download_model_if_needed(
                 store,
                 &args.node_id,
                 model_uid,
@@ -361,15 +351,29 @@ async fn launch_replica_engine(
             )
             .await
             {
-                let reason = format!("model download failed: {}", e);
-                tracing::error!(%model_uid, replica_id, error=%e, "model download failed");
-                if let Some(request_id) = plan.request_id.as_deref() {
-                    mark_request_failed(store, request_id, reason).await;
+                Ok(path) => engine_model_path = path,
+                Err(e) => {
+                    let reason = format!("model download failed: {}", e);
+                    tracing::error!(%model_uid, replica_id, error=%e, "model download failed");
+                    if let Some(request_id) = plan.request_id.as_deref() {
+                        mark_request_failed(store, request_id, reason).await;
+                    }
+                    return Ok(None);
                 }
-                return Ok(None);
             }
         }
     }
+
+    let ctx = EngineStartContext {
+        model_uid: model_uid.to_string(),
+        model_name: engine_model_path,
+        replica_id,
+        port: assignment.port,
+        gpu_indices: assignment.effective_gpu_indices(),
+        engine_config_path: assignment.engine_config_path.clone(),
+        extra_args: assignment.extra_args.clone(),
+        ready_timeout: Duration::from_secs(args.ready_timeout_secs),
+    };
 
     let handle = if let Some(h) = engine.try_reuse(&ctx).await {
         tracing::info!(%model_uid, replica_id, base_url=%h.base_url, engine=%engine.engine_type(), "reused existing engine instance");
@@ -387,6 +391,25 @@ async fn launch_replica_engine(
             }
         }
     };
+
+    let engine_model = match wait_engine_ready(&handle.base_url, ctx.ready_timeout).await {
+        Ok(name) => name,
+        Err(e) => {
+            tracing::error!(%model_uid, replica_id, error=%e, "engine not ready within timeout");
+            if let Some(request_id) = plan.request_id.as_deref() {
+                mark_request_failed(store, request_id, e.to_string()).await;
+            }
+            let mut h = handle;
+            let _ = engine.stop(&mut h).await;
+            return Ok(None);
+        }
+    };
+    let mut handle = handle;
+    if !engine_model.is_empty() {
+        handle.engine_model = engine_model;
+    } else if handle.engine_model.is_empty() {
+        handle.engine_model = plan.model_name.clone();
+    }
 
     // Best-effort runtime capability discovery (never blocks Ready).
     let mut capability = None;
@@ -453,6 +476,7 @@ async fn start_replica(
     store: &EtcdMetaStore,
     args: &Args,
     running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
+    starting: &Arc<Mutex<HashSet<ReplicaKey>>>,
     endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     plan: &PlacementPlan,
     assignment: &PlacementAssignment,
@@ -465,9 +489,19 @@ async fn start_replica(
             return Ok(());
         }
     }
+    {
+        let guard = starting.lock().await;
+        if guard.contains(&key) {
+            tracing::debug!(?key, "replica start already in progress");
+            return Ok(());
+        }
+    }
+    starting.lock().await.insert(key.clone());
 
-    let launched = launch_replica_engine(store, args, plan, assignment).await?;
-    let Some((rm, info)) = launched else {
+    let launch_result = launch_replica_engine(store, args, plan, assignment).await;
+    starting.lock().await.remove(&key);
+
+    let Some((rm, info)) = launch_result? else {
         return Ok(());
     };
 
@@ -509,6 +543,7 @@ pub async fn reconcile_model(
     store: &EtcdMetaStore,
     args: &Args,
     running: &Arc<Mutex<HashMap<ReplicaKey, RunningModel>>>,
+    starting: &Arc<Mutex<HashSet<ReplicaKey>>>,
     endpoint_state: &Arc<Mutex<HashMap<ReplicaKey, EndpointInfo>>>,
     last_epochs: &Arc<Mutex<HashMap<String, u64>>>,
     model_uid: &str,
@@ -577,8 +612,20 @@ pub async fn reconcile_model(
                         actions.push(((*assignment).clone(), Action::KeepRefreshVersion));
                     }
                 }
-                Some(_) => actions.push(((*assignment).clone(), Action::Restart)),
-                None => actions.push(((*assignment).clone(), Action::Start)),
+                Some(_) => {
+                    let key = replica_key(model_uid, assignment.replica_id);
+                    if starting.lock().await.contains(&key) {
+                        continue;
+                    }
+                    actions.push(((*assignment).clone(), Action::Restart))
+                }
+                None => {
+                    let key = replica_key(model_uid, assignment.replica_id);
+                    if starting.lock().await.contains(&key) {
+                        continue;
+                    }
+                    actions.push(((*assignment).clone(), Action::Start))
+                }
             }
         }
     }
@@ -617,10 +664,28 @@ pub async fn reconcile_model(
                     assignment.replica_id,
                 )
                 .await?;
-                start_replica(store, args, running, endpoint_state, &plan, &assignment).await?;
+                start_replica(
+                    store,
+                    args,
+                    running,
+                    starting,
+                    endpoint_state,
+                    &plan,
+                    &assignment,
+                )
+                .await?;
             }
             Action::Start => {
-                start_replica(store, args, running, endpoint_state, &plan, &assignment).await?;
+                start_replica(
+                    store,
+                    args,
+                    running,
+                    starting,
+                    endpoint_state,
+                    &plan,
+                    &assignment,
+                )
+                .await?;
             }
         }
     }

@@ -403,6 +403,7 @@ pub fn draft_from_candidate(
             max_model_len: req.selection.model.context_length,
             required_vram_mb: None,
             lora_modules: None,
+            ..Default::default()
         }),
         image_id: candidate.image_id.clone(),
         image_override_reason: Some("selection_draft".into()),

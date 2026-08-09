@@ -47,7 +47,7 @@ fn default_replicas() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelConfig {
     pub tensor_parallel_size: Option<u32>,
     pub gpu_memory_utilization: Option<f32>,
@@ -58,6 +58,26 @@ pub struct ModelConfig {
 
     #[serde(default)]
     pub lora_modules: Option<Vec<String>>,
+
+    /// OpenAI API model id exposed by the engine (`--served-model-name`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_model_name: Option<String>,
+
+    /// vLLM KV cache dtype (e.g. `fp8` for DeepSeek V4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_cache_dtype: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_remote_code: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_expert_parallel: Option<bool>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_size: Option<u32>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

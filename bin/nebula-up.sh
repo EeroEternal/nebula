@@ -22,6 +22,10 @@ NODE_PORT="${NODE_PORT:-10824}"
 MODEL_UID="${MODEL_UID:-qwen2_5_0_5b}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-0.5B-Instruct}"
 NODE_ID="${NODE_ID:-node_gpu0}"
+VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.11.0}"
+VLLM_MODEL_DIR="${VLLM_MODEL_DIR:-/DATA/Model}"
+SEED_DEPLOYMENT="${SEED_DEPLOYMENT:-0}"
+NEBULA_AUTH_DISABLED="${NEBULA_AUTH_DISABLED:-0}"
 
 # xtrace config for observability/audit APIs.
 # OBSERVE_TOKEN is the bearer token used when Nebula calls xtrace.
@@ -82,9 +86,15 @@ fi
 
 # 2. Start Router
 echo "Starting Nebula Router..."
-nohup "$NEBULA_ROOT/target/release/nebula-router" \
-    --listen-addr "0.0.0.0:$ROUTER_PORT" \
-    --etcd-endpoint "$ETCD_ENDPOINT" > "$LOG_DIR/router.log" 2>&1 &
+if [ "$NEBULA_AUTH_DISABLED" = "1" ]; then
+	nohup env NEBULA_AUTH_DISABLED=1 "$NEBULA_ROOT/target/release/nebula-router" \
+		--listen-addr "0.0.0.0:$ROUTER_PORT" \
+		--etcd-endpoint "$ETCD_ENDPOINT" > "$LOG_DIR/router.log" 2>&1 &
+else
+	nohup "$NEBULA_ROOT/target/release/nebula-router" \
+		--listen-addr "0.0.0.0:$ROUTER_PORT" \
+		--etcd-endpoint "$ETCD_ENDPOINT" > "$LOG_DIR/router.log" 2>&1 &
+fi
 
 # 2.5 Start Scheduler
 echo "Starting Nebula Scheduler..."
@@ -107,17 +117,23 @@ if [ "$START_BFF" = "1" ]; then
 fi
 
 # 3. Start Gateway
-nohup "$NEBULA_ROOT/target/release/nebula-gateway" \
-    --listen-addr "0.0.0.0:$GATEWAY_PORT" \
-    --router-url "http://127.0.0.1:$ROUTER_PORT" \
-    --bff-url "http://127.0.0.1:$BFF_PORT" \
-    --xtrace-url "$OBSERVE_URL" \
-    --xtrace-token "$OBSERVE_TOKEN" > "$LOG_DIR/gateway.log" 2>&1 &
+if [ "$NEBULA_AUTH_DISABLED" = "1" ]; then
+	nohup env NEBULA_AUTH_DISABLED=1 "$NEBULA_ROOT/target/release/nebula-gateway" \
+		--listen-addr "0.0.0.0:$GATEWAY_PORT" \
+		--router-url "http://127.0.0.1:$ROUTER_PORT" \
+		--bff-url "http://127.0.0.1:$BFF_PORT" \
+		--xtrace-url "$OBSERVE_URL" \
+		--xtrace-token "$OBSERVE_TOKEN" > "$LOG_DIR/gateway.log" 2>&1 &
+else
+	nohup "$NEBULA_ROOT/target/release/nebula-gateway" \
+		--listen-addr "0.0.0.0:$GATEWAY_PORT" \
+		--router-url "http://127.0.0.1:$ROUTER_PORT" \
+		--bff-url "http://127.0.0.1:$BFF_PORT" \
+		--xtrace-url "$OBSERVE_URL" \
+		--xtrace-token "$OBSERVE_TOKEN" > "$LOG_DIR/gateway.log" 2>&1 &
+fi
 
 # 4. Start Node (docker mode — all vLLM runs inside containers)
-VLLM_IMAGE="vllm/vllm-openai:v0.11.0"
-VLLM_MODEL_DIR="/DATA/Model"
-
 echo "Starting Nebula Node ($NODE_ID) [docker: $VLLM_IMAGE]..."
 nohup "$NEBULA_ROOT/target/release/nebula-node" \
     --node-id "$NODE_ID" \
@@ -126,7 +142,14 @@ nohup "$NEBULA_ROOT/target/release/nebula-node" \
     --vllm-model-dir "$VLLM_MODEL_DIR" \
     --vllm-port "$NODE_PORT" \
     --vllm-use-modelscope \
-    --ready-timeout-secs 1200 > "$LOG_DIR/node_$NODE_ID.log" 2>&1 &
+    --ready-timeout-secs 3600 > "$LOG_DIR/node_$NODE_ID.log" 2>&1 &
+
+if [ "$SEED_DEPLOYMENT" = "1" ]; then
+	echo "Seeding model spec + deployment for $MODEL_UID..."
+	MODEL_UID="$MODEL_UID" MODEL_NAME="$MODEL_NAME" \
+		"$NEBULA_ROOT/scripts/seed_deployment.sh" || \
+		echo "WARN: seed_deployment.sh failed (is etcdctl installed?)"
+fi
 
 echo "All services started!"
 echo "Gateway: http://127.0.0.1:$GATEWAY_PORT"
