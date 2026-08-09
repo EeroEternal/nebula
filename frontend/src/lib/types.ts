@@ -26,6 +26,7 @@ export interface EndpointInfo {
   api_flavor: string
   status: string
   last_heartbeat_ms: number
+  status_detail?: string | null
   grpc_target?: string | null
   base_url?: string | null
 }
@@ -286,6 +287,28 @@ export interface DiskAlert {
   usage_pct: number
   available_bytes: number
   created_at_ms: number
+}
+
+export type EngineAlertType =
+  | 'oom_killed'
+  | 'container_exited'
+  | 'gpu_memory_pressure'
+  | 'kv_cache_high'
+  | 'health_probe_failed'
+
+export interface EngineProbeAlert {
+  node_id: string
+  model_uid: string
+  replica_id: number
+  alert_type: EngineAlertType
+  message: string
+  exit_code?: number | null
+  created_at_ms: number
+}
+
+export interface AlertsSummary {
+  disk: DiskAlert[]
+  engine: EngineProbeAlert[]
 }
 
 export interface GatewayTimePoint {

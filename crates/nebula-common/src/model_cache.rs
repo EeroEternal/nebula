@@ -160,3 +160,29 @@ pub struct DiskAlert {
     #[serde(default)]
     pub created_at_ms: u64,
 }
+
+/// Engine replica probe alert (OOM, container exit, memory pressure).
+///
+/// Stored in etcd under `/alerts/{node_id}/engine_{model_uid}_{replica_id}` (node lease).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineAlertType {
+    OomKilled,
+    ContainerExited,
+    GpuMemoryPressure,
+    KvCacheHigh,
+    HealthProbeFailed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineProbeAlert {
+    pub node_id: String,
+    pub model_uid: String,
+    pub replica_id: u32,
+    pub alert_type: EngineAlertType,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub created_at_ms: u64,
+}

@@ -21,6 +21,8 @@ pub struct EngineMetricSnapshot {
     pub pending_requests: u64,
     pub kv_cache_usage: Option<f64>,
     pub prefix_cache_hit_rate: Option<f64>,
+    pub container_running: Option<bool>,
+    pub probe_failures: u32,
 }
 
 /// Latest engine `/metrics` scrape outcome for Prometheus export.
@@ -301,6 +303,36 @@ async fn get_metrics(State(metrics): State<SharedNodeMetrics>) -> impl IntoRespo
                     out,
                     "nebula_node_engine_prefix_cache_hit_rate{{model_uid=\"{}\",replica_id=\"{}\"}} {}",
                     eng.model_uid, eng.replica_id, rate
+                );
+            }
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_engine_probe_failures Consecutive failed health probes."
+        );
+        let _ = writeln!(out, "# TYPE nebula_node_engine_probe_failures gauge");
+        for eng in &snap.engines {
+            let _ = writeln!(
+                out,
+                "nebula_node_engine_probe_failures{{model_uid=\"{}\",replica_id=\"{}\"}} {}",
+                eng.model_uid, eng.replica_id, eng.probe_failures
+            );
+        }
+
+        let _ = writeln!(
+            out,
+            "# HELP nebula_node_engine_container_running Docker container running (1=yes, 0=no)."
+        );
+        let _ = writeln!(out, "# TYPE nebula_node_engine_container_running gauge");
+        for eng in &snap.engines {
+            if let Some(running) = eng.container_running {
+                let _ = writeln!(
+                    out,
+                    "nebula_node_engine_container_running{{model_uid=\"{}\",replica_id=\"{}\"}} {}",
+                    eng.model_uid,
+                    eng.replica_id,
+                    if running { 1 } else { 0 }
                 );
             }
         }

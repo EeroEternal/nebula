@@ -31,6 +31,10 @@ pub struct EndpointInfo {
     pub status: EndpointStatus,
     pub last_heartbeat_ms: u64,
 
+    /// Human-readable detail when status is unhealthy/failed (OOM, exit code, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<String>,
+
     pub grpc_target: Option<String>,
     pub base_url: Option<String>,
 }

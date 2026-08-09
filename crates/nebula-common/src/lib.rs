@@ -43,7 +43,8 @@ pub use json_model::{
     peek_json_model_field, rewrite_json_model_field, HEADER_NEBULA_MODEL, HEADER_NEBULA_MODEL_UID,
 };
 pub use model_cache::{
-    AlertType, DiskAlert, DownloadPhase, DownloadProgress, ModelCacheEntry, NodeDiskStatus,
+    AlertType, DiskAlert, DownloadPhase, DownloadProgress, EngineAlertType, EngineProbeAlert,
+    ModelCacheEntry, NodeDiskStatus,
 };
 pub use model_deployment::{DesiredState, ModelDeployment};
 pub use model_request::*;

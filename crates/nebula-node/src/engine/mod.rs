@@ -1,3 +1,4 @@
+pub mod container;
 pub mod discover;
 pub mod sglang;
 pub mod vllm;

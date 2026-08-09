@@ -5,16 +5,21 @@ use std::time::Duration;
 use chrono::Utc;
 use tokio::sync::Mutex;
 
-use nebula_common::{EndpointInfo, EndpointStatus, NodeStatus};
+use nebula_common::{EndpointInfo, EndpointStatus, EngineAlertType, EngineProbeAlert, NodeStatus};
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::docker_api::{
     EngineMetricSnapshot, NodeMetricsSnapshot, ScrapeOutcomeRecord, SharedNodeMetrics,
 };
-use crate::engine::{Engine, EngineHandle, EngineProcess};
+use crate::engine::{container::inspect_docker_container, Engine, EngineHandle, EngineProcess};
 use crate::gpu::read_gpu_statuses;
 use crate::reconcile::{mark_request_failed, replica_key, ReplicaKey, RunningModel};
 use crate::util::now_ms;
+
+/// KV cache usage above this ratio triggers a warning alert (not a hard failure).
+const KV_CACHE_HIGH_THRESHOLD: f64 = 0.95;
+/// GPU memory used/total above this percentage triggers a warning alert.
+const GPU_MEMORY_PRESSURE_PCT: f64 = 98.0;
 
 /// Snapshot for health/scrape outside the `running` lock (C2).
 struct ProbeTarget {
@@ -24,6 +29,14 @@ struct ProbeTarget {
     base_url: String,
     engine: Arc<dyn Engine>,
     request_id: Option<String>,
+    container_name: Option<String>,
+    gpu_indices: Option<Vec<u32>>,
+}
+
+/// Outcome of container-level probe before HTTP health check.
+enum ContainerProbeOutcome {
+    Ok,
+    Failed { reason: String, alert_type: EngineAlertType, exit_code: Option<i32> },
 }
 
 fn probe_handle(base_url: &str) -> EngineHandle {
@@ -107,6 +120,63 @@ mod budget_tests {
         now = b.window_start_ms + RESTART_BUDGET_WINDOW_MS + 1;
         assert!(b.try_consume(now).is_ok());
     }
+}
+
+async fn emit_engine_probe_alert(
+    store: &EtcdMetaStore,
+    alert: &EngineProbeAlert,
+    ttl_ms: u64,
+    lease_id: Option<i64>,
+) -> anyhow::Result<()> {
+    let key = format!(
+        "/alerts/{}/engine_{}_{}",
+        alert.node_id, alert.model_uid, alert.replica_id
+    );
+    let bytes = serde_json::to_vec(alert)?;
+    if let Some(lease_id) = lease_id {
+        let _ = store.put_with_lease(&key, bytes, lease_id).await?;
+    } else {
+        let _ = store.put(&key, bytes, Some(ttl_ms)).await?;
+    }
+    Ok(())
+}
+
+fn docker_container_name(process: &EngineProcess) -> Option<String> {
+    match process {
+        EngineProcess::DockerContainer { name, .. } => Some(name.clone()),
+        _ => None,
+    }
+}
+
+async fn probe_container(container_name: &str) -> ContainerProbeOutcome {
+    let Some(state) = inspect_docker_container(container_name).await else {
+        return ContainerProbeOutcome::Failed {
+            reason: "docker container not found".into(),
+            alert_type: EngineAlertType::ContainerExited,
+            exit_code: None,
+        };
+    };
+
+    if state.oom_killed {
+        return ContainerProbeOutcome::Failed {
+            reason: format!("container OOM killed (exit={:?})", state.exit_code),
+            alert_type: EngineAlertType::OomKilled,
+            exit_code: state.exit_code,
+        };
+    }
+
+    if !state.running {
+        return ContainerProbeOutcome::Failed {
+            reason: format!(
+                "container not running (status={}, exit={:?})",
+                state.status, state.exit_code
+            ),
+            alert_type: EngineAlertType::ContainerExited,
+            exit_code: state.exit_code,
+        };
+    }
+
+    ContainerProbeOutcome::Ok
 }
 
 pub async fn register_endpoint(
@@ -344,6 +414,8 @@ pub async fn heartbeat_loop(
                         base_url: rm.handle.base_url.clone(),
                         engine: rm.engine.clone(),
                         request_id: rm.request_id.clone(),
+                        container_name: docker_container_name(&rm.handle.process),
+                        gpu_indices: rm.start_ctx.gpu_indices.clone(),
                     })
                 })
                 .collect(),
@@ -351,8 +423,55 @@ pub async fn heartbeat_loop(
 
         for target in targets {
             let probe = probe_handle(&target.base_url);
-            let healthy = target.engine.health_check(&probe).await;
             let count = fail_counts.entry(target.rkey.clone()).or_insert(0);
+
+            let mut container_failed = false;
+            if let Some(cname) = target.container_name.as_deref() {
+                match probe_container(cname).await {
+                    ContainerProbeOutcome::Ok => {}
+                    ContainerProbeOutcome::Failed {
+                        reason,
+                        alert_type,
+                        exit_code,
+                    } => {
+                        container_failed = true;
+                        tracing::error!(
+                            model_uid=%target.model_uid,
+                            replica_id=target.replica_id,
+                            container=%cname,
+                            %reason,
+                            "container probe failed"
+                        );
+                        let alert = EngineProbeAlert {
+                            node_id: node_id.clone(),
+                            model_uid: target.model_uid.clone(),
+                            replica_id: target.replica_id,
+                            alert_type,
+                            message: reason.clone(),
+                            exit_code,
+                            created_at_ms: now_ms(),
+                        };
+                        if let Err(e) =
+                            emit_engine_probe_alert(&store, &alert, ttl_ms, lease_id).await
+                        {
+                            tracing::warn!(error=%e, "failed to write engine probe alert");
+                        }
+                        let mut ep_guard = endpoint.lock().await;
+                        if let Some(info) = ep_guard.get_mut(&target.rkey) {
+                            info.status = EndpointStatus::Unhealthy;
+                            info.status_detail = Some(reason);
+                            let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
+                        }
+                        *count = RESTART_THRESHOLD;
+                    }
+                }
+            }
+
+            let healthy = if container_failed {
+                false
+            } else {
+                target.engine.health_check(&probe).await
+            };
 
             if healthy {
                 if *count > 0 {
@@ -368,6 +487,7 @@ pub async fn heartbeat_loop(
                     if let Some(info) = ep_guard.get_mut(&target.rkey) {
                         if info.status == EndpointStatus::Unhealthy {
                             info.status = EndpointStatus::Ready;
+                            info.status_detail = None;
                             let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
                             tracing::info!(
                                 model_uid=%target.model_uid,
@@ -378,12 +498,66 @@ pub async fn heartbeat_loop(
                     }
                 }
 
+                if let Some(ref indices) = target.gpu_indices {
+                    for &idx in indices {
+                        if let Some(gpu) = gpus_for_metrics.iter().find(|g| g.index == idx) {
+                            if gpu.memory_total_mb > 0 {
+                                let pct = gpu.memory_used_mb as f64 * 100.0
+                                    / gpu.memory_total_mb as f64;
+                                if pct >= GPU_MEMORY_PRESSURE_PCT {
+                                    let msg = format!(
+                                        "GPU {idx} memory at {pct:.1}% ({}/{})",
+                                        gpu.memory_used_mb, gpu.memory_total_mb
+                                    );
+                                    tracing::warn!(
+                                        model_uid=%target.model_uid,
+                                        replica_id=target.replica_id,
+                                        %msg,
+                                        "GPU memory pressure"
+                                    );
+                                    let alert = EngineProbeAlert {
+                                        node_id: node_id.clone(),
+                                        model_uid: target.model_uid.clone(),
+                                        replica_id: target.replica_id,
+                                        alert_type: EngineAlertType::GpuMemoryPressure,
+                                        message: msg,
+                                        exit_code: None,
+                                        created_at_ms: now_ms(),
+                                    };
+                                    let _ = emit_engine_probe_alert(
+                                        &store, &alert, ttl_ms, lease_id,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 match target
                     .engine
                     .scrape_stats(&http, &probe, &target.model_uid, target.replica_id)
                     .await
                 {
                     Ok(stats) => {
+                        if stats
+                            .kv_cache_usage
+                            .is_some_and(|u| u >= KV_CACHE_HIGH_THRESHOLD)
+                        {
+                            let usage = stats.kv_cache_usage.unwrap();
+                            let msg = format!("KV cache usage at {usage:.1}%");
+                            let alert = EngineProbeAlert {
+                                node_id: node_id.clone(),
+                                model_uid: target.model_uid.clone(),
+                                replica_id: target.replica_id,
+                                alert_type: EngineAlertType::KvCacheHigh,
+                                message: msg,
+                                exit_code: None,
+                                created_at_ms: now_ms(),
+                            };
+                            let _ =
+                                emit_engine_probe_alert(&store, &alert, ttl_ms, lease_id).await;
+                        }
                         scrape_outcomes.push(ScrapeOutcomeRecord {
                             model_uid: target.model_uid.clone(),
                             replica_id: target.replica_id,
@@ -427,6 +601,8 @@ pub async fn heartbeat_loop(
                             pending_requests: stats.pending_requests,
                             kv_cache_usage: stats.kv_cache_usage,
                             prefix_cache_hit_rate: stats.prefix_cache_hit_rate,
+                            container_running: target.container_name.as_ref().map(|_| true),
+                            probe_failures: *count,
                         });
 
                         if let Err(e) = register_stats(&store, &stats, ttl_ms, lease_id).await {
@@ -459,16 +635,37 @@ pub async fn heartbeat_loop(
             );
 
             if *count == UNHEALTHY_THRESHOLD {
-                let mut ep_guard = endpoint.lock().await;
-                if let Some(info) = ep_guard.get_mut(&target.rkey) {
-                    info.status = EndpointStatus::Unhealthy;
-                    let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
-                    tracing::warn!(
-                        model_uid=%target.model_uid,
-                        replica_id=target.replica_id,
-                        "endpoint marked Unhealthy"
-                    );
-                }
+                let detail = {
+                    let mut ep_guard = endpoint.lock().await;
+                    if let Some(info) = ep_guard.get_mut(&target.rkey) {
+                        info.status = EndpointStatus::Unhealthy;
+                        if info.status_detail.is_none() {
+                            info.status_detail =
+                                Some("engine health probe failed".to_string());
+                        }
+                        let detail = info.status_detail.clone();
+                        let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
+                        tracing::warn!(
+                            model_uid=%target.model_uid,
+                            replica_id=target.replica_id,
+                            detail=?detail,
+                            "endpoint marked Unhealthy"
+                        );
+                        detail
+                    } else {
+                        None
+                    }
+                };
+                let alert = EngineProbeAlert {
+                    node_id: node_id.clone(),
+                    model_uid: target.model_uid.clone(),
+                    replica_id: target.replica_id,
+                    alert_type: EngineAlertType::HealthProbeFailed,
+                    message: detail.unwrap_or_else(|| "engine health probe failed".into()),
+                    exit_code: None,
+                    created_at_ms: now_ms(),
+                };
+                let _ = emit_engine_probe_alert(&store, &alert, ttl_ms, lease_id).await;
             }
 
             if *count < RESTART_THRESHOLD {

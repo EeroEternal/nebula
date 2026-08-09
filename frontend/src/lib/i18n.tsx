@@ -183,6 +183,12 @@ const messages: Record<Locale, Record<string, string>> = {
     'dashboard.utilizationPct': '利用率 %',
     'dashboard.tempC': '温度 °C',
 
+    'alerts.engine.oomKilled': 'OOM',
+    'alerts.engine.containerExited': '容器退出',
+    'alerts.engine.gpuMemoryPressure': '显存压力',
+    'alerts.engine.kvCacheHigh': 'KV 缓存过高',
+    'alerts.engine.healthProbeFailed': '探活失败',
+
     'nodes.title': '节点与 GPU',
     'nodes.subtitle': '查看有哪些机器和显卡在线、显存用了多少',
     'nodes.emptyTitle': '未检测到节点',
@@ -531,6 +537,12 @@ const messages: Record<Locale, Record<string, string>> = {
     'dashboard.free': 'Free',
     'dashboard.utilizationPct': 'Utilization %',
     'dashboard.tempC': 'Temp °C',
+
+    'alerts.engine.oomKilled': 'OOM',
+    'alerts.engine.containerExited': 'Container exited',
+    'alerts.engine.gpuMemoryPressure': 'GPU memory pressure',
+    'alerts.engine.kvCacheHigh': 'KV cache high',
+    'alerts.engine.healthProbeFailed': 'Health probe failed',
 
     'library.pending': 'Pending',
     'library.assetStatus': 'Asset Status',
