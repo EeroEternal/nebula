@@ -198,24 +198,8 @@ async fn reconcile_once(
                     }
                 }
                 None => {
-                    // No endpoint registered yet — could be still starting.
-                    // Only remove if the plan is old enough (keep a generous startup grace).
-                    let plan_age = now.saturating_sub(plan.effective_updated_at_ms());
-                    if plan_age > STARTUP_GRACE_MS {
-                        warn!(
-                            model_uid=%plan.model_uid,
-                            replica_id=assignment.replica_id,
-                            plan_age_ms=plan_age,
-                            "no endpoint registered after startup grace period, removing assignment"
-                        );
-                        stale_replica_ids.push(assignment.replica_id);
-                        metrics
-                            .unhealthy_endpoints_total
-                            .fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        // Still within startup grace period, keep it.
-                        healthy_assignments.push(assignment.clone());
-                    }
+                    // Keep assignment while node registers or recovers the endpoint.
+                    healthy_assignments.push(assignment.clone());
                 }
             }
         }
