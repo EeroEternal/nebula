@@ -354,6 +354,25 @@ pub async fn heartbeat_loop(
             tracing::warn!(error=%e, "failed to write heartbeat");
         }
 
+        // Sync endpoint metadata from live engine handles (e.g. after recreate on new port).
+        if let (Ok(mut ep_guard), Ok(running_guard)) = (endpoint.try_lock(), running.try_lock()) {
+            for (key, rm) in running_guard.iter() {
+                if let Some(info) = ep_guard.get_mut(key) {
+                    let live = Some(rm.handle.base_url.clone());
+                    if info.base_url != live {
+                        tracing::info!(
+                            model_uid=%info.model_uid,
+                            replica_id=info.replica_id,
+                            old=?info.base_url,
+                            new=?live,
+                            "syncing endpoint base_url from running engine"
+                        );
+                        info.base_url = live;
+                    }
+                }
+            }
+        }
+
         // Refresh endpoint registrations (best-effort; never block heartbeat loop).
         if let Ok(mut guard) = endpoint.try_lock() {
             for info in guard.values_mut() {
@@ -488,6 +507,7 @@ pub async fn heartbeat_loop(
                         if info.status == EndpointStatus::Unhealthy {
                             info.status = EndpointStatus::Ready;
                             info.status_detail = None;
+                            info.base_url = Some(target.base_url.clone());
                             let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
                             tracing::info!(
                                 model_uid=%target.model_uid,

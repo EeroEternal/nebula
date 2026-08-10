@@ -127,8 +127,13 @@ impl Router {
     }
 
     pub fn upsert_endpoint(&self, info: EndpointInfo) {
-        self.endpoints
-            .insert((info.model_uid.clone(), info.replica_id), info);
+        let key = (info.model_uid.clone(), info.replica_id);
+        if let Some(old) = self.endpoints.get(&key) {
+            if old.base_url != info.base_url {
+                self.endpoint_circuit.remove(&key);
+            }
+        }
+        self.endpoints.insert(key, info);
     }
 
     pub fn remove_endpoint(&self, model_uid: &str, replica_id: u32) {
