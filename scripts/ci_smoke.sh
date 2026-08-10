@@ -80,19 +80,35 @@ need_bin nebula-router
 need_bin nebula-gateway
 need_bin nebula-bff
 
+wait_compose_postgres() {
+  local i
+  for i in $(seq 1 120); do
+    if docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null 2>&1; then
+      return 0
+    fi
+    local health
+    health=$(docker compose -f "$COMPOSE_FILE" ps postgres --format '{{.Health}}' 2>/dev/null || true)
+    if [ "$health" = "healthy" ]; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "--- postgres logs ---" >&2
+  docker compose -f "$COMPOSE_FILE" logs --tail 40 postgres >&2 || true
+  return 1
+}
+
 echo "--- docker compose (etcd + postgres) ---"
+docker compose -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
 docker compose -f "$COMPOSE_FILE" up -d etcd postgres
 for _ in $(seq 1 90); do
-  curl -sf --max-time 3 "$ETCD_ENDPOINT/health" >/dev/null 2>&1 && break
+  if curl -sf --max-time 3 "$ETCD_ENDPOINT/health" >/dev/null 2>&1; then
+    break
+  fi
   sleep 1
 done
 curl -sf --max-time 3 "$ETCD_ENDPOINT/health" >/dev/null || { echo "etcd not healthy"; exit 1; }
-for _ in $(seq 1 90); do
-  timeout 5 docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null 2>&1 && break
-  sleep 1
-done
-timeout 5 docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null \
-  || { echo "postgres not healthy"; exit 1; }
+wait_compose_postgres || { echo "postgres not healthy"; exit 1; }
 ok "etcd + postgres ready"
 
 echo "--- mock engine ---"

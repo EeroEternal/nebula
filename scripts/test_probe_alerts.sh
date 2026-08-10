@@ -41,6 +41,20 @@ wait_alert() {
   return 1
 }
 
+wait_alert_cleared() {
+  local deadline=$((SECONDS + ${1:-120}))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    local etcd_raw bff_raw
+    etcd_raw=$("$ETCDCTL" --endpoints="$ETCD_ENDPOINT" get --prefix /alerts/ --print-value-only 2>/dev/null || true)
+    bff_raw=$(curl -sf -H "Authorization: Bearer $TOKEN" "$BFF/api/v2/alerts" 2>/dev/null || true)
+    if ! echo "$etcd_raw" | grep -q "$SGLANG_UID" && ! echo "$bff_raw" | grep -q "$SGLANG_UID"; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
+
 wait_endpoint_status() {
   local want="$1" deadline=$((SECONDS + ${2:-120}))
   while [ "$SECONDS" -lt "$deadline" ]; do
@@ -142,6 +156,11 @@ if wait_endpoint_status "ready" 180; then
   curl -sf -X POST "$GATEWAY/v1/chat/completions" -H "Content-Type: application/json" \
     -d "{\"model\":\"$SGLANG_UID\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" \
     | grep -q choices && ok "gateway chat after recovery" || bad "gateway chat after recovery"
+  if wait_alert_cleared 120; then
+    ok "alert cleared after recovery"
+  else
+    bad "stale alert after recovery"
+  fi
 else
   bad "auto-recovery timeout"
 fi

@@ -122,22 +122,37 @@ mod budget_tests {
     }
 }
 
+fn engine_probe_alert_key(node_id: &str, model_uid: &str, replica_id: u32) -> String {
+    format!(
+        "/alerts/{}/engine_{}_{}",
+        node_id, model_uid, replica_id
+    )
+}
+
 async fn emit_engine_probe_alert(
     store: &EtcdMetaStore,
     alert: &EngineProbeAlert,
     ttl_ms: u64,
     lease_id: Option<i64>,
 ) -> anyhow::Result<()> {
-    let key = format!(
-        "/alerts/{}/engine_{}_{}",
-        alert.node_id, alert.model_uid, alert.replica_id
-    );
+    let key = engine_probe_alert_key(&alert.node_id, &alert.model_uid, alert.replica_id);
     let bytes = serde_json::to_vec(alert)?;
     if let Some(lease_id) = lease_id {
         let _ = store.put_with_lease(&key, bytes, lease_id).await?;
     } else {
         let _ = store.put(&key, bytes, Some(ttl_ms)).await?;
     }
+    Ok(())
+}
+
+async fn clear_engine_probe_alert(
+    store: &EtcdMetaStore,
+    node_id: &str,
+    model_uid: &str,
+    replica_id: u32,
+) -> anyhow::Result<()> {
+    let key = engine_probe_alert_key(node_id, model_uid, replica_id);
+    let _ = store.delete(&key).await?;
     Ok(())
 }
 
@@ -493,6 +508,8 @@ pub async fn heartbeat_loop(
             };
 
             if healthy {
+                let mut probe_alert_emitted = false;
+
                 if *count > 0 {
                     tracing::info!(
                         model_uid=%target.model_uid,
@@ -548,6 +565,7 @@ pub async fn heartbeat_loop(
                                         &store, &alert, ttl_ms, lease_id,
                                     )
                                     .await;
+                                    probe_alert_emitted = true;
                                 }
                             }
                         }
@@ -577,6 +595,7 @@ pub async fn heartbeat_loop(
                             };
                             let _ =
                                 emit_engine_probe_alert(&store, &alert, ttl_ms, lease_id).await;
+                            probe_alert_emitted = true;
                         }
                         scrape_outcomes.push(ScrapeOutcomeRecord {
                             model_uid: target.model_uid.clone(),
@@ -642,6 +661,16 @@ pub async fn heartbeat_loop(
                             result: err.as_str().to_string(),
                         });
                     }
+                }
+
+                if !probe_alert_emitted {
+                    let _ = clear_engine_probe_alert(
+                        &store,
+                        &node_id,
+                        &target.model_uid,
+                        target.replica_id,
+                    )
+                    .await;
                 }
                 continue;
             }
