@@ -99,6 +99,12 @@ if docker pause "$SGLANG_CONTAINER" 2>/dev/null; then
   else
     bad "BFF alert missing after pause"
   fi
+  model_pause=$(curl -sf -H "Authorization: Bearer $TOKEN" "$BFF/api/v2/models/$SGLANG_UID" || true)
+  if echo "$model_pause" | grep -q '"state":"degraded"'; then
+    ok "BFF model degraded during pause"
+  else
+    bad "BFF model state during pause: $(echo "$model_pause" | head -c 160)"
+  fi
   docker unpause "$SGLANG_CONTAINER" 2>/dev/null || true
   if wait_endpoint_status "ready" 120; then
     ok "recovered after unpause"

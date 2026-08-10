@@ -388,6 +388,23 @@ pub fn compute_aggregated_state(
         return AggregatedModelState::Degraded;
     }
 
+    if total_count > 0 {
+        let failed_count = endpoints
+            .iter()
+            .filter(|ep| ep.status == nebula_common::EndpointStatus::Failed)
+            .count();
+        let unhealthy_count = endpoints
+            .iter()
+            .filter(|ep| ep.status == nebula_common::EndpointStatus::Unhealthy)
+            .count();
+        if failed_count == total_count {
+            return AggregatedModelState::Failed;
+        }
+        if failed_count > 0 || unhealthy_count > 0 {
+            return AggregatedModelState::Degraded;
+        }
+    }
+
     let base_ts = dep.updated_at_ms.max(spec_created_at_ms);
     let elapsed = now_ms().saturating_sub(base_ts);
     if total_count == 0 && elapsed > FAILED_THRESHOLD_MS {
@@ -588,7 +605,12 @@ pub async fn build_model_view(store: &dyn MetaStore, spec: &ModelSpec) -> ModelV
         .count() as u32;
     let unhealthy = endpoints
         .iter()
-        .filter(|ep| ep.status == nebula_common::EndpointStatus::Unhealthy)
+        .filter(|ep| {
+            matches!(
+                ep.status,
+                nebula_common::EndpointStatus::Unhealthy | nebula_common::EndpointStatus::Failed
+            )
+        })
         .count() as u32;
 
     ModelView {
@@ -716,7 +738,12 @@ pub async fn get_model_detail(
         .count() as u32;
     let unhealthy = endpoints
         .iter()
-        .filter(|ep| ep.status == nebula_common::EndpointStatus::Unhealthy)
+        .filter(|ep| {
+            matches!(
+                ep.status,
+                nebula_common::EndpointStatus::Unhealthy | nebula_common::EndpointStatus::Failed
+            )
+        })
         .count() as u32;
 
     let cache_status = if all_caches.is_empty() {
@@ -1857,6 +1884,86 @@ nebula_router_upstream_error_total{kind="connect"} 1
         let text = "nebula_router_requests_total 100\nnebula_router_responses_5xx 10\n";
         let resp = gateway_overview_from_metrics(text, "5m".into()).unwrap();
         assert_eq!(resp.data_source, "router");
+    }
+
+    fn sample_deployment() -> ModelDeployment {
+        ModelDeployment {
+            model_uid: "m1".into(),
+            desired_state: DesiredState::Running,
+            replicas: 1,
+            min_replicas: None,
+            max_replicas: None,
+            node_affinity: None,
+            gpu_affinity: None,
+            image_id: None,
+            image_override_reason: None,
+            config_overrides: None,
+            compat_rule_ids: vec![],
+            version: 1,
+            updated_at_ms: 1_000,
+        }
+    }
+
+    fn sample_placement() -> PlacementPlan {
+        PlacementPlan {
+            request_id: None,
+            model_uid: "m1".into(),
+            model_name: "m1".into(),
+            version: 1,
+            updated_at_ms: 1_000,
+            leader_epoch: 1,
+            assignments: vec![],
+        }
+    }
+
+    fn sample_endpoint(status: nebula_common::EndpointStatus) -> EndpointInfo {
+        EndpointInfo {
+            model_uid: "m1".into(),
+            replica_id: 0,
+            plan_version: 1,
+            node_id: "n1".into(),
+            endpoint_kind: nebula_common::EndpointKind::NativeHttp,
+            api_flavor: "openai".into(),
+            status,
+            last_heartbeat_ms: now_ms(),
+            status_detail: None,
+            grpc_target: None,
+            base_url: Some("http://127.0.0.1:8000".into()),
+        }
+    }
+
+    #[test]
+    fn aggregated_state_failed_when_all_endpoints_failed() {
+        let dep = sample_deployment();
+        let placement = sample_placement();
+        let endpoints = vec![sample_endpoint(nebula_common::EndpointStatus::Failed)];
+        assert_eq!(
+            compute_aggregated_state(
+                Some(&dep),
+                Some(&placement),
+                &endpoints,
+                &[],
+                0,
+            ),
+            AggregatedModelState::Failed
+        );
+    }
+
+    #[test]
+    fn aggregated_state_degraded_when_unhealthy_recovering() {
+        let dep = sample_deployment();
+        let placement = sample_placement();
+        let endpoints = vec![sample_endpoint(nebula_common::EndpointStatus::Unhealthy)];
+        assert_eq!(
+            compute_aggregated_state(
+                Some(&dep),
+                Some(&placement),
+                &endpoints,
+                &[],
+                0,
+            ),
+            AggregatedModelState::Degraded
+        );
     }
 }
 
