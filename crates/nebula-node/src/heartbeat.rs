@@ -728,6 +728,7 @@ pub async fn heartbeat_loop(
                     let mut ep_guard = endpoint.lock().await;
                     if let Some(info) = ep_guard.get_mut(&target.rkey) {
                         info.status = EndpointStatus::Failed;
+                        info.status_detail = Some(reason.clone());
                         let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;
                     }
                     if let Some(request_id) = target.request_id.as_deref() {

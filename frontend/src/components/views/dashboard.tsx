@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Cpu, Activity, AlertTriangle, ArrowUpRight } from "lucide-react"
+import { Cpu, Activity, ArrowUpRight } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import {
@@ -8,9 +8,10 @@ import {
 import {
     BarChart, Bar, LineChart, Line, XAxis, YAxis, ResponsiveContainer, CartesianGrid, Tooltip,
 } from "recharts"
-import { apiGet, v2 } from "@/lib/api"
-import type { AlertsSummary, EndpointStats } from "@/lib/types"
-import { engineAlertLabel, endpointStatusTone, isEngineAlertCritical } from "@/lib/endpoint-status"
+import { apiGet } from "@/lib/api"
+import type { EndpointStats } from "@/lib/types"
+import { endpointStatusTone } from "@/lib/endpoint-status"
+import { EngineAlertsBanner } from "@/components/engine-alerts-banner"
 import { useI18n } from "@/lib/i18n"
 import { useClusterOverview } from "@/hooks/useClusterOverview"
 import { useEngineStats } from "@/hooks/useEngineStats"
@@ -57,49 +58,7 @@ export function DashboardView() {
         }
     }, [overview])
 
-    // Alerts from v2 (disk + engine probe)
-    const [alerts, setAlerts] = useState<AlertsSummary>({ disk: [], engine: [] })
-    const refreshAlerts = useCallback(() => {
-        if (!token) return
-        v2.listAlerts(token)
-            .then(setAlerts)
-            .catch(() => setAlerts({ disk: [], engine: [] }))
-    }, [token])
-
-    useEffect(() => {
-        refreshAlerts()
-        const id = setInterval(refreshAlerts, 30000)
-        return () => clearInterval(id)
-    }, [refreshAlerts])
-
-    const alertBanners = useMemo(() => {
-        const rows: Array<{
-            key: string
-            critical: boolean
-            label: string
-            message: string
-            meta: string
-        }> = []
-        for (const alert of alerts.disk) {
-            rows.push({
-                key: `disk-${alert.node_id}-${alert.alert_type}-${alert.created_at_ms}`,
-                critical: alert.alert_type === 'disk_critical',
-                label: alert.alert_type === 'disk_critical' ? t('dashboard.critical') : t('dashboard.warning'),
-                message: alert.message,
-                meta: alert.node_id,
-            })
-        }
-        for (const alert of alerts.engine) {
-            rows.push({
-                key: `engine-${alert.node_id}-${alert.model_uid}-${alert.replica_id}-${alert.created_at_ms}`,
-                critical: isEngineAlertCritical(alert.alert_type),
-                label: engineAlertLabel(alert.alert_type, t),
-                message: alert.message,
-                meta: `${alert.model_uid} · ${alert.node_id} · r${alert.replica_id}`,
-            })
-        }
-        return rows
-    }, [alerts, t])
+    // Alerts from v2 (disk + engine probe) — shared banner component
 
     // GPU utilization trend data from xtrace
     const [gpuTrend, setGpuTrend] = useState<{ time: string; utilization: number; temperature: number }[]>([])
@@ -189,14 +148,20 @@ export function DashboardView() {
         if (!overview) return []
         return overview.endpoints.map((ep) => {
             let gpuIndex: number | null = null
+            let gpuLabel = "CPU"
             for (const p of overview.placements) {
                 if (p.model_uid === ep.model_uid) {
-                    const a = p.assignments.find((a) => a.node_id === ep.node_id && a.replica_id === ep.replica_id)
-                    if (a?.gpu_index != null) gpuIndex = a.gpu_index
+                    const a = p.assignments.find((a) => a.replica_id === ep.replica_id)
+                    if (a?.gpu_indices?.length) {
+                        gpuLabel = `GPU ${a.gpu_indices.join(",")}`
+                        gpuIndex = a.gpu_indices[0] ?? null
+                    } else if (a?.gpu_index != null) {
+                        gpuIndex = a.gpu_index
+                        gpuLabel = `GPU ${a.gpu_index}`
+                    }
                     break
                 }
             }
-            const gpu = gpuIndex != null ? `GPU ${gpuIndex}` : "CPU"
             let memUsed = ""
             for (const node of overview.nodes) {
                 if (node.node_id === ep.node_id) {
@@ -216,7 +181,7 @@ export function DashboardView() {
                 key: `${ep.model_uid}-${ep.replica_id}`,
                 model: ep.model_uid,
                 node: ep.node_id,
-                gpu,
+                gpu: gpuLabel,
                 memUsed: memUsed || "—",
                 kvPct,
                 pending: es?.pending_requests ?? 0,
@@ -278,23 +243,7 @@ export function DashboardView() {
             </div>
 
             {/* Probe / disk alert banners */}
-            {alertBanners.length > 0 && (
-                <div className="space-y-3">
-                    {alertBanners.map((alert) => (
-                        <div key={alert.key} className={cn(
-                            "flex items-center gap-4 rounded-lg px-5 py-4 text-sm backdrop-blur-md border",
-                            alert.critical ? "bg-destructive/10 border-destructive text-destructive" : "bg-warning/10 border-warning text-warning"
-                        )}>
-                            <AlertTriangle className="h-5 w-5 shrink-0" />
-                            <div className="flex-1 min-w-0">
-                                <span className="font-bold uppercase tracking-wide mr-2">{alert.label}:</span>
-                                <span>{alert.message}</span>
-                            </div>
-                            <div className="font-mono bg-black/20 px-2 py-1 rounded text-xs shrink-0 max-w-[240px] truncate">{alert.meta}</div>
-                        </div>
-                    ))}
-                </div>
-            )}
+            <EngineAlertsBanner token={token ?? undefined} />
 
             {/* Quick Stats Grid */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">

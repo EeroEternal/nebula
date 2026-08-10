@@ -10,7 +10,8 @@ import {
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { cn } from "@/lib/utils"
-import { endpointStatusTone } from "@/lib/endpoint-status"
+import { endpointStatusTone, formatNodeGpu } from "@/lib/endpoint-status"
+import { EngineAlertsBanner } from "@/components/engine-alerts-banner"
 import { v2 } from "@/lib/api"
 import type { ModelDetailView, AggregatedModelState } from "@/lib/types"
 import { useI18n } from "@/lib/i18n"
@@ -122,6 +123,8 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
 
             {error && <p className="text-destructive text-sm bg-destructive/5 rounded-xl px-4 py-2">{error}</p>}
 
+            <EngineAlertsBanner token={token} modelUid={modelUid} />
+
             {/* Info cards row */}
             <div className="grid grid-cols-4 gap-4">
                 <InfoCard label={t('modelDetail.replicas')} value={`${detail.replicas.ready} / ${detail.replicas.desired}`} sub={detail.replicas.unhealthy > 0 ? `${detail.replicas.unhealthy} ${t('models.unhealthy')}` : undefined} />
@@ -180,7 +183,12 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                             {detail.endpoints.map((ep) => (
                                 <TableRow key={`${ep.model_uid}-${ep.replica_id}`}>
                                     <TableCell className="font-mono text-xs">{ep.replica_id}</TableCell>
-                                    <TableCell className="font-mono text-xs">{ep.node_id}</TableCell>
+                                    <TableCell className="font-mono text-xs">
+                                        {formatNodeGpu(
+                                            ep.node_id,
+                                            detail.placement?.assignments.find((a) => a.replica_id === ep.replica_id),
+                                        )}
+                                    </TableCell>
                                     <TableCell className="text-xs">{ep.endpoint_kind}</TableCell>
                                     <TableCell>
                                         <div className="flex flex-col gap-1">

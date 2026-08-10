@@ -382,15 +382,27 @@ impl Engine for SglangEngine {
     ) -> anyhow::Result<()> {
         match &handle.process {
             EngineProcess::DockerContainer { name, .. } => {
-                tracing::warn!(%name, "attempting sglang docker restart");
-                let status = Command::new("docker")
-                    .args(["restart", "-t", "10", name])
-                    .status()
-                    .await?;
-                if !status.success() {
-                    anyhow::bail!("docker restart failed for {name}");
+                if super::container::docker_container_running(name).await {
+                    tracing::warn!(%name, "attempting sglang docker restart");
+                    let status = Command::new("docker")
+                        .args(["restart", "-t", "10", name])
+                        .status()
+                        .await?;
+                    if !status.success() {
+                        anyhow::bail!("docker restart failed for {name}");
+                    }
+                    Ok(())
+                } else {
+                    tracing::warn!(
+                        %name,
+                        model_uid=%ctx.model_uid,
+                        replica_id=ctx.replica_id,
+                        "container missing or stopped; recreating via stop+start"
+                    );
+                    self.stop(handle).await?;
+                    *handle = self.start(ctx.clone()).await?;
+                    Ok(())
                 }
-                Ok(())
             }
             EngineProcess::Child(_) => {
                 tracing::warn!(

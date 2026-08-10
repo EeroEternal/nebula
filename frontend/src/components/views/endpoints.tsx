@@ -1,12 +1,23 @@
 import { Globe, Server, Activity, Shield, Link } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { EngineAlertsBanner } from "@/components/engine-alerts-banner"
 import { useClusterOverview } from "@/hooks/useClusterOverview"
+import { useAuthStore } from "@/store/useAuthStore"
 import { cn } from "@/lib/utils"
-import { endpointStatusTone } from "@/lib/endpoint-status"
+import { endpointStatusTone, formatNodeGpu } from "@/lib/endpoint-status"
 
 export function EndpointsView() {
     const { data: overview } = useClusterOverview()
+    const { token } = useAuthStore()
+
+    const assignmentFor = (modelUid: string, replicaId: number) => {
+        for (const p of overview?.placements ?? []) {
+            if (p.model_uid !== modelUid) continue
+            return p.assignments.find((a) => a.replica_id === replicaId) ?? null
+        }
+        return null
+    }
 
     return (
         <div className="space-y-8 animate-in fade-in duration-500">
@@ -19,6 +30,8 @@ export function EndpointsView() {
                     </p>
                 </div>
             </div>
+
+            <EngineAlertsBanner token={token ?? undefined} />
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
@@ -78,7 +91,9 @@ export function EndpointsView() {
                                     <TableCell>
                                         <div className="flex items-center gap-2">
                                             <Server className="h-3.5 w-3.5 text-muted-foreground" />
-                                            <span className="text-[11px] font-mono font-bold text-foreground uppercase">{ep.node_id}</span>
+                                            <span className="text-[11px] font-mono font-bold text-foreground uppercase">
+                                                {formatNodeGpu(ep.node_id, assignmentFor(ep.model_uid, ep.replica_id))}
+                                            </span>
                                         </div>
                                     </TableCell>
                                     <TableCell>
