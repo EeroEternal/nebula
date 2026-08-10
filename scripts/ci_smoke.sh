@@ -53,7 +53,11 @@ cleanup() {
   for pid in "${PIDS[@]:-}"; do
     kill "$pid" 2>/dev/null || true
   done
-  wait 2>/dev/null || true
+  sleep 1
+  for pid in "${PIDS[@]:-}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  docker compose -f "$COMPOSE_FILE" down >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -76,13 +80,9 @@ need_bin nebula-gateway
 need_bin nebula-bff
 
 echo "--- docker compose (etcd + postgres) ---"
-docker compose -f "$COMPOSE_FILE" up -d etcd postgres
-for _ in $(seq 1 60); do
-  curl -sf "$ETCD_ENDPOINT/health" >/dev/null 2>&1 && break
-  sleep 1
-done
+docker compose -f "$COMPOSE_FILE" up -d --wait etcd postgres
 curl -sf "$ETCD_ENDPOINT/health" >/dev/null || { echo "etcd not healthy"; exit 1; }
-ok "etcd ready"
+ok "etcd + postgres ready"
 
 echo "--- mock engine ---"
 python3 "$ROOT/scripts/mock_openai_engine.py" "$MOCK_PORT" 127.0.0.1 &
@@ -136,9 +136,9 @@ PIDS+=("$!")
   --xtrace-auth-mode internal >"$ROOT/logs/ci-bff.log" 2>&1 &
 PIDS+=("$!")
 
-wait_http "$ROUTER/healthz" "router" 60 || true
-wait_http "$GATEWAY/healthz" "gateway" 60 || true
-wait_http "$BFF/api/healthz" "bff" 90 || true
+wait_http "$ROUTER/healthz" "router" 30 || true
+wait_http "$GATEWAY/healthz" "gateway" 30 || true
+wait_http "$BFF/api/healthz" "bff" 60 || true
 
 echo "--- gateway inference ---"
 for model in "$MODEL_UID" "$SERVED_NAME"; do

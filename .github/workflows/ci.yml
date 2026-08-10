@@ -24,6 +24,7 @@ jobs:
     name: stack smoke (mock engine)
     runs-on: ubuntu-latest
     needs: test
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
