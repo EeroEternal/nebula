@@ -64,6 +64,19 @@ chat_once() {
   echo ""
 }
 
+completion_once() {
+  local model="$1" label="$2"
+  echo ""
+  echo "=== $label (model=$model) ==="
+  local resp
+  resp=$(curl_auth -X POST "$GATEWAY/v1/completions" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$model\",\"prompt\":\"Say hi in one short sentence.\",\"max_tokens\":32}" \
+    2>&1) || { echo "FAIL: $resp" >&2; return 1; }
+  echo "$resp" | head -c 500
+  echo ""
+}
+
 echo "=== etcd endpoints ==="
 "$ETCDCTL" --endpoints="$ETCD_ENDPOINT" get --prefix /endpoints/ 2>/dev/null || true
 
@@ -82,6 +95,7 @@ chat_once "$VLLM_MODEL" "Qwen vLLM (model_uid)"
 chat_once "$SGLANG_MODEL" "Qwen SGLang (model_uid)"
 chat_once "$VLLM_SERVED" "Qwen vLLM (served_model_name)"
 chat_once "$SGLANG_SERVED" "Qwen SGLang (served_model_name)"
+completion_once "$VLLM_SERVED" "Qwen vLLM /v1/completions"
 
 echo ""
 echo "=== Probe stack ==="

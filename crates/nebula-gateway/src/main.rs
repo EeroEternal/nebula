@@ -157,6 +157,7 @@ async fn main() {
         .route("/v1/responses", get(not_implemented).post(create_responses))
         .route("/v1/messages", post(create_anthropic_messages))
         .route("/v1/chat/completions", post(proxy_post))
+        .route("/v1/completions", post(proxy_post))
         .route("/v1/embeddings", post(proxy_post))
         .route("/v1/rerank", post(proxy_post))
         .route("/v1/models", get(list_models))
