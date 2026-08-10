@@ -16,6 +16,7 @@ GATEWAY="${GATEWAY:-http://127.0.0.1:8081}"
 ROUTER="${ROUTER:-http://127.0.0.1:18081}"
 BFF="${BFF:-http://127.0.0.1:18090}"
 RUN_CANCEL_SSE="${RUN_CANCEL_SSE:-1}"
+CURL_MAX="${CURL_MAX:-30}"
 
 PIDS=()
 pass=0
@@ -40,7 +41,7 @@ etcdctl_cmd() {
 wait_http() {
   local url="$1" label="$2" deadline=$((SECONDS + ${3:-60}))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if curl -sf "$url" >/dev/null 2>&1; then
+    if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -82,15 +83,15 @@ need_bin nebula-bff
 echo "--- docker compose (etcd + postgres) ---"
 docker compose -f "$COMPOSE_FILE" up -d etcd postgres
 for _ in $(seq 1 90); do
-  curl -sf "$ETCD_ENDPOINT/health" >/dev/null 2>&1 && break
+  curl -sf --max-time 3 "$ETCD_ENDPOINT/health" >/dev/null 2>&1 && break
   sleep 1
 done
-curl -sf "$ETCD_ENDPOINT/health" >/dev/null || { echo "etcd not healthy"; exit 1; }
+curl -sf --max-time 3 "$ETCD_ENDPOINT/health" >/dev/null || { echo "etcd not healthy"; exit 1; }
 for _ in $(seq 1 90); do
-  docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null 2>&1 && break
+  timeout 5 docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null 2>&1 && break
   sleep 1
 done
-docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null \
+timeout 5 docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null \
   || { echo "postgres not healthy"; exit 1; }
 ok "etcd + postgres ready"
 
@@ -138,31 +139,32 @@ env NEBULA_AUTH_DISABLED=1 "$BIN/nebula-gateway" \
   --bff-url "$BFF" >"$ROOT/logs/ci-gateway.log" 2>&1 &
 PIDS+=("$!")
 
-"$BIN/nebula-bff" \
+env OBSERVE_AUTH_MODE=internal "$BIN/nebula-bff" \
   --listen-addr 127.0.0.1:18090 \
   --etcd-endpoint "$ETCD_ENDPOINT" \
   --router-url "$ROUTER" \
   --database-url postgresql://postgres:postgres@127.0.0.1:5432/nebula \
-  --xtrace-auth-mode internal >"$ROOT/logs/ci-bff.log" 2>&1 &
+  >"$ROOT/logs/ci-bff.log" 2>&1 &
 PIDS+=("$!")
 
+sleep 5
 wait_http "$ROUTER/healthz" "router" 30 || true
 wait_http "$GATEWAY/healthz" "gateway" 30 || true
 wait_http "$BFF/api/healthz" "bff" 60 || true
 
 echo "--- gateway inference ---"
 for model in "$MODEL_UID" "$SERVED_NAME"; do
-  resp=$(curl -sf -X POST "$GATEWAY/v1/chat/completions" -H "Content-Type: application/json" \
+  resp=$(curl -sf --max-time "$CURL_MAX" -X POST "$GATEWAY/v1/chat/completions" -H "Content-Type: application/json" \
     -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":8}" || true)
   echo "$resp" | grep -q mock && ok "chat model=$model" || bad "chat model=$model: $(echo "$resp" | head -c 120)"
 done
 
-comp=$(curl -sf -X POST "$GATEWAY/v1/completions" -H "Content-Type: application/json" \
+comp=$(curl -sf --max-time "$CURL_MAX" -X POST "$GATEWAY/v1/completions" -H "Content-Type: application/json" \
   -d "{\"model\":\"$SERVED_NAME\",\"prompt\":\"hi\",\"max_tokens\":8}" || true)
 echo "$comp" | grep -q mock && ok "completions" || bad "completions: $(echo "$comp" | head -c 120)"
 
 echo "--- BFF console APIs ---"
-TOKEN=$(curl -sf -X POST "$BFF/api/auth/login" -H "Content-Type: application/json" \
+TOKEN=$(curl -sf --max-time "$CURL_MAX" -X POST "$BFF/api/auth/login" -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin123"}' | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])" || true)
 if [ -n "$TOKEN" ]; then
   ok "BFF login"
@@ -187,4 +189,9 @@ fi
 
 echo ""
 echo "========== Summary: $pass passed, $fail failed =========="
+if [ "$fail" -ne 0 ]; then
+  for f in ci-router ci-gateway ci-bff; do
+    [ -f "$ROOT/logs/$f.log" ] && echo "--- $f.log ---" && tail -20 "$ROOT/logs/$f.log" || true
+  done
+fi
 [ "$fail" -eq 0 ]
