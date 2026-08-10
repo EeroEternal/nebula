@@ -18,8 +18,10 @@ fi
 
 VLLM_UID="${VLLM_UID:-qwen15_moe_vllm}"
 VLLM_MODEL="${VLLM_MODEL:-qwen15_moe_vllm}"
+VLLM_SERVED="${VLLM_SERVED:-qwen15-moe-vllm}"
 SGLANG_UID="${SGLANG_UID:-qwen15_moe_sglang}"
 SGLANG_MODEL="${SGLANG_MODEL:-qwen15_moe_sglang}"
+SGLANG_SERVED="${SGLANG_SERVED:-qwen15-moe-sglang}"
 WAIT_SECS="${WAIT_SECS:-900}"
 POLL_SECS="${POLL_SECS:-15}"
 
@@ -76,8 +78,10 @@ wait_endpoint "$SGLANG_UID" 0 || true
 
 echo ""
 echo "=== Gateway inference ==="
-chat_once "$VLLM_MODEL" "Qwen vLLM"
-chat_once "$SGLANG_MODEL" "Qwen SGLang"
+chat_once "$VLLM_MODEL" "Qwen vLLM (model_uid)"
+chat_once "$SGLANG_MODEL" "Qwen SGLang (model_uid)"
+chat_once "$VLLM_SERVED" "Qwen vLLM (served_model_name)"
+chat_once "$SGLANG_SERVED" "Qwen SGLang (served_model_name)"
 
 echo ""
 echo "=== Probe stack ==="

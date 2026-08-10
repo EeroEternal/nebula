@@ -87,6 +87,11 @@ fi
 echo "--- 11. GPU snapshot ---"
 nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null | head -8 || bad "nvidia-smi"
 
+if [ "${RUN_PROBE_ALERTS:-0}" = "1" ] && [ -x "$SCRIPT_DIR/test_probe_alerts.sh" ]; then
+  echo "--- 12. probe alerts ---"
+  if "$SCRIPT_DIR/test_probe_alerts.sh"; then note "probe alerts smoke"; else bad "probe alerts smoke"; fi
+fi
+
 echo ""
 echo "========== Summary: $pass passed, $fail failed =========="
 [ "$fail" -eq 0 ]

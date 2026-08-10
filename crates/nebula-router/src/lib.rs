@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use nebula_common::{EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext};
+use nebula_common::{EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext, ModelSpec};
 
 pub mod strategy;
 
@@ -52,6 +52,10 @@ pub struct Router {
     model_names: DashMap<String, String>,
     /// model_uid → model_name (reverse mapping)
     model_uids_to_names: DashMap<String, String>,
+    /// model_uid → OpenAI model id sent to the engine (`--served-model-name` when set).
+    engine_model_ids: DashMap<String, String>,
+    /// Registered alias strings per model_uid (for cleanup on spec update/delete).
+    model_alias_keys: DashMap<String, Vec<String>>,
     /// model_uid → latest PlacementPlan.version
     plan_versions: DashMap<String, u64>,
     route_stale_stats_dropped_total: AtomicU64,
@@ -102,6 +106,8 @@ impl Router {
             strategy,
             model_names: DashMap::new(),
             model_uids_to_names: DashMap::new(),
+            engine_model_ids: DashMap::new(),
+            model_alias_keys: DashMap::new(),
             plan_versions: DashMap::new(),
             route_stale_stats_dropped_total: AtomicU64::new(0),
             route_circuit_skipped_total: AtomicU64::new(0),
@@ -220,6 +226,71 @@ impl Router {
             .insert(model_name.to_string(), model_uid.to_string());
         self.model_uids_to_names
             .insert(model_uid.to_string(), model_name.to_string());
+        if !self.engine_model_ids.contains_key(model_uid) {
+            self.engine_model_ids
+                .insert(model_uid.to_string(), model_name.to_string());
+        }
+    }
+
+    fn register_model_alias(&self, model_uid: &str, alias: &str) {
+        if alias.is_empty() || alias == model_uid {
+            return;
+        }
+        self.model_names
+            .insert(alias.to_string(), model_uid.to_string());
+        self.model_alias_keys
+            .entry(model_uid.to_string())
+            .or_default()
+            .push(alias.to_string());
+    }
+
+    /// Sync aliases from `/models/{uid}/spec` (model_name, served_model_name, model_path).
+    pub fn register_model_spec(&self, spec: &ModelSpec) {
+        self.clear_model_mappings(&spec.model_uid);
+        self.set_model_mapping(&spec.model_uid, &spec.model_name);
+
+        let engine_id = spec
+            .config
+            .as_ref()
+            .and_then(|c| c.served_model_name.as_deref())
+            .unwrap_or(spec.model_name.as_str());
+        self.engine_model_ids
+            .insert(spec.model_uid.clone(), engine_id.to_string());
+        if engine_id != spec.model_name {
+            self.register_model_alias(&spec.model_uid, engine_id);
+        }
+
+        if let Some(path) = spec.model_path.as_deref() {
+            self.register_model_alias(&spec.model_uid, path);
+            if let Some(base) = path.rsplit('/').next() {
+                if !base.is_empty() && base != path {
+                    self.register_model_alias(&spec.model_uid, base);
+                }
+            }
+        }
+    }
+
+    /// Remove all name aliases registered for a model (spec deleted).
+    pub fn clear_model_mappings(&self, model_uid: &str) {
+        if let Some((_, keys)) = self.model_alias_keys.remove(model_uid) {
+            for key in keys {
+                if let Some(entry) = self.model_names.get(&key) {
+                    if entry.value() == model_uid {
+                        self.model_names.remove(&key);
+                    }
+                }
+            }
+        }
+        self.model_uids_to_names.remove(model_uid);
+        self.engine_model_ids.remove(model_uid);
+    }
+
+    /// OpenAI `model` field to send to the engine after routing.
+    pub fn get_engine_model_name(&self, model_uid: &str) -> Option<String> {
+        self.engine_model_ids
+            .get(model_uid)
+            .map(|v| v.clone())
+            .or_else(|| self.get_model_name(model_uid))
     }
 
     /// Resolve an input model string to a model_uid.
@@ -573,5 +644,54 @@ mod plan_version_tests {
             router.route_with_plan_version(&ctx, "m1", 1).unwrap_err(),
             RouteError::NoEndpoint
         ));
+    }
+}
+
+#[cfg(test)]
+mod model_alias_tests {
+    use super::*;
+    use nebula_common::{ModelConfig, ModelSource, ModelSpec};
+
+    fn sample_spec(uid: &str, name: &str, served: Option<&str>, path: Option<&str>) -> ModelSpec {
+        ModelSpec {
+            model_uid: uid.into(),
+            model_name: name.into(),
+            model_source: ModelSource::Local,
+            model_path: path.map(|s| s.into()),
+            engine_type: Some("vllm".into()),
+            docker_image: None,
+            config: served.map(|s| ModelConfig {
+                served_model_name: Some(s.into()),
+                ..Default::default()
+            }),
+            labels: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            created_by: None,
+        }
+    }
+
+    #[test]
+    fn resolve_served_model_name_and_engine_rewrite() {
+        let router = Router::new();
+        router.register_model_spec(&sample_spec(
+            "qwen15_moe_vllm",
+            "Qwen/Qwen1.5-MoE-A2.7B-Chat",
+            Some("qwen15-moe-vllm"),
+            Some("/home/bodesi/models/Qwen1.5-MoE-A2.7B-Chat"),
+        ));
+
+        assert_eq!(
+            router.resolve_model("qwen15-moe-vllm"),
+            "qwen15_moe_vllm"
+        );
+        assert_eq!(
+            router.resolve_model("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
+            "qwen15_moe_vllm"
+        );
+        assert_eq!(
+            router.get_engine_model_name("qwen15_moe_vllm").as_deref(),
+            Some("qwen15-moe-vllm")
+        );
     }
 }

@@ -20,14 +20,42 @@ use crate::util::now_ms;
 
 /// Endpoint heartbeat timeout: if last_heartbeat_ms is older than this, consider it dead.
 /// Keep this generous to avoid reclaiming assignments during cold starts.
-const ENDPOINT_TIMEOUT_MS: u64 = 300_000;
+pub(crate) const ENDPOINT_TIMEOUT_MS: u64 = 300_000;
+
+/// Whether a placement assignment should be kept during reconcile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssignmentDisposition {
+    Keep,
+    RemoveStale,
+}
+
+/// Classify an assignment's endpoint for reconcile (unit-tested).
+pub(crate) fn assignment_disposition(
+    ep: Option<&EndpointInfo>,
+    now_ms: u64,
+) -> AssignmentDisposition {
+    match ep {
+        Some(ep) => {
+            if ep.status == EndpointStatus::Failed {
+                AssignmentDisposition::RemoveStale
+            } else if ep.status == EndpointStatus::Unhealthy {
+                AssignmentDisposition::Keep
+            } else if now_ms.saturating_sub(ep.last_heartbeat_ms) > ENDPOINT_TIMEOUT_MS {
+                AssignmentDisposition::RemoveStale
+            } else {
+                AssignmentDisposition::Keep
+            }
+        }
+        None => AssignmentDisposition::Keep,
+    }
+}
+
+/// Reconcile interval.
+const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Startup grace period for assignments with no endpoint yet.
 /// Large-model cold starts (download + compile + graph capture) can exceed minutes.
 const STARTUP_GRACE_MS: u64 = 900_000;
-
-/// Reconcile interval.
-const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// KV cache usage fraction above which we consider scaling up.
 const SCALE_UP_KV_THRESHOLD: f64 = 0.80;
@@ -163,43 +191,35 @@ async fn reconcile_once(
 
         for assignment in &plan.assignments {
             let key = (plan.model_uid.clone(), assignment.replica_id);
-            match endpoints.get(&key) {
-                Some(ep) => {
-                    let age = now.saturating_sub(ep.last_heartbeat_ms);
-                    if ep.status == EndpointStatus::Failed {
+            match assignment_disposition(endpoints.get(&key), now) {
+                AssignmentDisposition::Keep => {
+                    healthy_assignments.push(assignment.clone());
+                }
+                AssignmentDisposition::RemoveStale => {
+                    let ep = endpoints.get(&key);
+                    if ep.is_some_and(|e| e.status == EndpointStatus::Failed) {
                         warn!(
                             model_uid=%plan.model_uid,
                             replica_id=assignment.replica_id,
                             "endpoint failed, removing assignment for replacement"
                         );
-                        stale_replica_ids.push(assignment.replica_id);
-                        stale_assignments.push(assignment.clone());
-                        metrics
-                            .unhealthy_endpoints_total
-                            .fetch_add(1, Ordering::Relaxed);
-                    } else if ep.status == EndpointStatus::Unhealthy {
-                        // Keep assignment while node attempts local recovery on the same replica.
-                        healthy_assignments.push(assignment.clone());
-                    } else if age > ENDPOINT_TIMEOUT_MS {
+                    } else {
+                        let age = ep
+                            .map(|e| now.saturating_sub(e.last_heartbeat_ms))
+                            .unwrap_or(0);
                         warn!(
                             model_uid=%plan.model_uid,
                             replica_id=assignment.replica_id,
                             age_ms=age,
-                            status=?ep.status,
+                            status=?ep.map(|e| &e.status),
                             "endpoint heartbeat timed out, removing assignment"
                         );
-                        stale_replica_ids.push(assignment.replica_id);
-                        stale_assignments.push(assignment.clone());
-                        metrics
-                            .unhealthy_endpoints_total
-                            .fetch_add(1, Ordering::Relaxed);
-                    } else {
-                        healthy_assignments.push(assignment.clone());
                     }
-                }
-                None => {
-                    // Keep assignment while node registers or recovers the endpoint.
-                    healthy_assignments.push(assignment.clone());
+                    stale_replica_ids.push(assignment.replica_id);
+                    stale_assignments.push(assignment.clone());
+                    metrics
+                        .unhealthy_endpoints_total
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -595,4 +615,54 @@ fn compute_desired_replicas(
 
     // No change needed
     current.clamp(min_replicas, max_replicas)
+}
+
+#[cfg(test)]
+mod assignment_tests {
+    use super::*;
+    use nebula_common::{EndpointInfo, EndpointKind};
+
+    fn sample_ep(status: EndpointStatus, last_heartbeat_ms: u64) -> EndpointInfo {
+        EndpointInfo {
+            model_uid: "m".into(),
+            replica_id: 0,
+            plan_version: 1,
+            node_id: "n1".into(),
+            endpoint_kind: EndpointKind::NativeHttp,
+            api_flavor: "openai".into(),
+            status,
+            last_heartbeat_ms,
+            status_detail: None,
+            grpc_target: None,
+            base_url: Some("http://127.0.0.1:10824".into()),
+        }
+    }
+
+    #[test]
+    fn unhealthy_keeps_assignment() {
+        let now = 1_000_000;
+        let ep = sample_ep(EndpointStatus::Unhealthy, now - 5_000);
+        assert_eq!(
+            assignment_disposition(Some(&ep), now),
+            AssignmentDisposition::Keep
+        );
+    }
+
+    #[test]
+    fn failed_removes_assignment() {
+        let now = 1_000_000;
+        let ep = sample_ep(EndpointStatus::Failed, now - 5_000);
+        assert_eq!(
+            assignment_disposition(Some(&ep), now),
+            AssignmentDisposition::RemoveStale
+        );
+    }
+
+    #[test]
+    fn missing_endpoint_keeps_assignment() {
+        assert_eq!(
+            assignment_disposition(None, 1_000_000),
+            AssignmentDisposition::Keep
+        );
+    }
 }

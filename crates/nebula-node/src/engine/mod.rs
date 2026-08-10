@@ -50,6 +50,8 @@ pub enum ScrapeError {
     Unreachable,
     Timeout,
     ParseFailed,
+    /// Engine does not expose Prometheus /metrics (e.g. SGLang build without metrics).
+    NotAvailable,
 }
 
 impl ScrapeError {
@@ -58,6 +60,7 @@ impl ScrapeError {
             Self::Unreachable => "unreachable",
             Self::Timeout => "timeout",
             Self::ParseFailed => "parse_failed",
+            Self::NotAvailable => "unsupported",
         }
     }
 }

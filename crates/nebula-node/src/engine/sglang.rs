@@ -480,13 +480,23 @@ pub async fn scrape_sglang_stats(
 ) -> super::ScrapeResult {
     let url = format!("{}/metrics", base_url.trim_end_matches('/'));
     let text = match http.get(&url).send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::debug!(error=%e, %base_url, "failed to read sglang metrics body");
-                return Err(super::ScrapeError::ParseFailed);
+        Ok(resp) => {
+            if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                tracing::debug!(%base_url, "sglang /metrics not exposed");
+                return Err(super::ScrapeError::NotAvailable);
             }
-        },
+            if !resp.status().is_success() {
+                tracing::debug!(status=%resp.status(), %base_url, "sglang metrics HTTP error");
+                return Err(super::ScrapeError::Unreachable);
+            }
+            match resp.text().await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::debug!(error=%e, %base_url, "failed to read sglang metrics body");
+                    return Err(super::ScrapeError::ParseFailed);
+                }
+            }
+        }
         Err(e) => {
             tracing::debug!(error=%e, %base_url, "failed to scrape sglang metrics");
             if e.is_timeout() {

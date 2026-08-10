@@ -129,7 +129,7 @@ pub async fn proxy_chat_completions(
             // Rewrite only the model string for the engine — no full JSON DOM.
             let model_name = st
                 .router
-                .get_model_name(&model_uid)
+                .get_engine_model_name(&model_uid)
                 .unwrap_or_else(|| raw_model.clone());
             let body_bytes =
                 nebula_common::rewrite_json_model_field(&body_bytes, &model_name)

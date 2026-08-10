@@ -169,3 +169,66 @@ pub async fn stats_sync_loop(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
+
+pub async fn models_sync_loop(
+    store: EtcdMetaStore,
+    router: Arc<nebula_router::Router>,
+) -> anyhow::Result<()> {
+    use nebula_common::ModelSpec;
+
+    loop {
+        let (items, snap_rev) = match store.list_prefix_snapshot("/models/").await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error=%e, "failed to list model specs, will retry");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        for (key, v, _rev) in &items {
+            if !key.ends_with("/spec") {
+                continue;
+            }
+            if let Ok(spec) = serde_json::from_slice::<ModelSpec>(v) {
+                router.register_model_spec(&spec);
+            }
+        }
+
+        let mut stream = match store.watch_prefix("/models/", Some(snap_rev)).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error=%e, "failed to watch model specs, will resync");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        while let Some(ev) = stream.next().await {
+            if !ev.key.ends_with("/spec") {
+                continue;
+            }
+            let model_uid = ev
+                .key
+                .strip_prefix("/models/")
+                .and_then(|rest| rest.strip_suffix("/spec"))
+                .unwrap_or("")
+                .to_string();
+            match ev.value {
+                Some(v) => {
+                    if let Ok(spec) = serde_json::from_slice::<ModelSpec>(&v) {
+                        router.register_model_spec(&spec);
+                    }
+                }
+                None => {
+                    if !model_uid.is_empty() {
+                        router.clear_model_mappings(&model_uid);
+                    }
+                }
+            }
+        }
+
+        tracing::warn!("model specs watch stream ended, full resync");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
