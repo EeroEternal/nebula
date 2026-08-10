@@ -40,6 +40,14 @@ pub async fn inspect_docker_container(name: &str) -> Option<DockerContainerState
     })
 }
 
+/// True when the container exists and Docker reports it as running.
+pub async fn docker_container_running(name: &str) -> bool {
+    matches!(
+        inspect_docker_container(name).await,
+        Some(DockerContainerState { running: true, .. })
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

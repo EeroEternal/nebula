@@ -23,3 +23,16 @@ export function engineAlertLabel(alertType: string, t: (key: string) => string):
     default: return alertType
   }
 }
+
+/** Format node + GPU assignment for endpoint/placement rows. */
+export function formatNodeGpu(
+  nodeId: string,
+  assignment?: { gpu_index?: number | null; gpu_indices?: number[] | null } | null,
+): string {
+  const indices = assignment?.gpu_indices?.length
+    ? assignment.gpu_indices.join(',')
+    : assignment?.gpu_index != null
+      ? String(assignment.gpu_index)
+      : null
+  return indices ? `${nodeId} · GPU ${indices}` : nodeId
+}

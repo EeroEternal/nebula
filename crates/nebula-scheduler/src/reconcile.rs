@@ -159,21 +159,37 @@ async fn reconcile_once(
         // Identify healthy vs stale assignments
         let mut healthy_assignments = Vec::new();
         let mut stale_replica_ids = Vec::new();
+        let mut stale_assignments = Vec::new();
 
         for assignment in &plan.assignments {
             let key = (plan.model_uid.clone(), assignment.replica_id);
             match endpoints.get(&key) {
                 Some(ep) => {
                     let age = now.saturating_sub(ep.last_heartbeat_ms);
-                    if age > ENDPOINT_TIMEOUT_MS || ep.status == EndpointStatus::Unhealthy {
+                    if ep.status == EndpointStatus::Failed {
+                        warn!(
+                            model_uid=%plan.model_uid,
+                            replica_id=assignment.replica_id,
+                            "endpoint failed, removing assignment for replacement"
+                        );
+                        stale_replica_ids.push(assignment.replica_id);
+                        stale_assignments.push(assignment.clone());
+                        metrics
+                            .unhealthy_endpoints_total
+                            .fetch_add(1, Ordering::Relaxed);
+                    } else if ep.status == EndpointStatus::Unhealthy {
+                        // Keep assignment while node attempts local recovery on the same replica.
+                        healthy_assignments.push(assignment.clone());
+                    } else if age > ENDPOINT_TIMEOUT_MS {
                         warn!(
                             model_uid=%plan.model_uid,
                             replica_id=assignment.replica_id,
                             age_ms=age,
                             status=?ep.status,
-                            "endpoint stale/unhealthy, removing assignment"
+                            "endpoint heartbeat timed out, removing assignment"
                         );
                         stale_replica_ids.push(assignment.replica_id);
+                        stale_assignments.push(assignment.clone());
                         metrics
                             .unhealthy_endpoints_total
                             .fetch_add(1, Ordering::Relaxed);
@@ -238,6 +254,7 @@ async fn reconcile_once(
                     plan,
                     deficit,
                     default_port,
+                    &stale_assignments,
                     &mut new_assignments,
                 )
                 .await;
@@ -347,6 +364,7 @@ async fn add_replacement_replicas_from_plan(
     plan: &PlacementPlan,
     deficit: u32,
     default_port: u16,
+    stale_templates: &[nebula_common::PlacementAssignment],
     new_assignments: &mut Vec<nebula_common::PlacementAssignment>,
 ) {
     let (mut used_ports, mut used_gpus) = list_used_resources(store).await.unwrap_or_default();
@@ -394,8 +412,54 @@ async fn add_replacement_replicas_from_plan(
         created_at_ms: 0,
     };
 
+    let mut used_replica_ids: std::collections::HashSet<u32> =
+        new_assignments.iter().map(|a| a.replica_id).collect();
+    let mut next_new_id = max_existing_id.saturating_add(1);
+
     for i in 0..deficit {
-        let new_replica_id = max_existing_id + 1 + i;
+        if let Some(stale) = stale_templates.get(i as usize) {
+            let port = if used_ports.contains(&stale.port) {
+                allocate_port(default_port, &used_ports)
+            } else {
+                stale.port
+            };
+            used_ports.insert(port);
+
+            if let Some(indices) = stale.effective_gpu_indices() {
+                let entry = used_gpus.entry(stale.node_id.clone()).or_default();
+                for idx in indices {
+                    entry.insert(idx);
+                }
+            }
+
+            new_assignments.push(nebula_common::PlacementAssignment {
+                replica_id: stale.replica_id,
+                node_id: stale.node_id.clone(),
+                engine_config_path: stale.engine_config_path.clone(),
+                port,
+                gpu_index: stale.gpu_index,
+                gpu_indices: stale.gpu_indices.clone(),
+                extra_args: stale.extra_args.clone().or(extra_args.clone()),
+                engine_type: stale.engine_type.clone().or(engine_type.clone()),
+                docker_image: stale.docker_image.clone().or(docker_image.clone()),
+            });
+            used_replica_ids.insert(stale.replica_id);
+
+            info!(
+                model_uid=%plan.model_uid,
+                replica_id=stale.replica_id,
+                node_id=%stale.node_id,
+                "replaced assignment reusing stale replica placement"
+            );
+            continue;
+        }
+
+        while used_replica_ids.contains(&next_new_id) {
+            next_new_id += 1;
+        }
+        let new_replica_id = next_new_id;
+        used_replica_ids.insert(new_replica_id);
+        next_new_id += 1;
 
         match select_node_and_gpus(store, &dummy_req, &used_gpus).await {
             Ok((node_id, gpu_indices)) => {
