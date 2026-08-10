@@ -12,7 +12,10 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://localhost:18090',
+      '/api': {
+        target: process.env.VITE_BFF_PROXY_TARGET || 'http://127.0.0.1:18090',
+        changeOrigin: true,
+      },
     },
   },
 })

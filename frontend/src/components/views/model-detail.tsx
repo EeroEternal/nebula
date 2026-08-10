@@ -113,6 +113,11 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                             <Square className="h-4 w-4 mr-1" /> {t('models.stopService')}
                         </Button>
                     )}
+                    {detail.state === "degraded" && (
+                        <Button variant="outline" size="sm" className="rounded-xl" onClick={() => act(() => v2.stopModel(modelUid, token))} disabled={acting}>
+                            <Square className="h-4 w-4 mr-1" /> {t('models.stopService')}
+                        </Button>
+                    )}
                     {(detail.state === "stopped" || detail.state === "failed") && (
                         <Button variant="destructive" size="sm" className="rounded-xl" onClick={() => act(() => v2.deleteModel(modelUid, token))} disabled={acting}>
                             <Trash2 className="h-4 w-4 mr-1" /> {t('common.delete')}

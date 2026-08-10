@@ -12,7 +12,7 @@ interface EngineAlertsBannerProps {
   pollMs?: number
 }
 
-export function EngineAlertsBanner({ token, modelUid, pollMs = 30000 }: EngineAlertsBannerProps) {
+export function EngineAlertsBanner({ token, modelUid, pollMs = 10000 }: EngineAlertsBannerProps) {
   const { t } = useI18n()
   const [alerts, setAlerts] = useState<AlertsSummary>({ disk: [], engine: [] })
 
