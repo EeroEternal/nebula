@@ -80,8 +80,18 @@ need_bin nebula-gateway
 need_bin nebula-bff
 
 echo "--- docker compose (etcd + postgres) ---"
-docker compose -f "$COMPOSE_FILE" up -d --wait etcd postgres
+docker compose -f "$COMPOSE_FILE" up -d etcd postgres
+for _ in $(seq 1 90); do
+  curl -sf "$ETCD_ENDPOINT/health" >/dev/null 2>&1 && break
+  sleep 1
+done
 curl -sf "$ETCD_ENDPOINT/health" >/dev/null || { echo "etcd not healthy"; exit 1; }
+for _ in $(seq 1 90); do
+  docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null 2>&1 && break
+  sleep 1
+done
+docker compose -f "$COMPOSE_FILE" exec -T postgres pg_isready -U postgres -d nebula >/dev/null \
+  || { echo "postgres not healthy"; exit 1; }
 ok "etcd + postgres ready"
 
 echo "--- mock engine ---"

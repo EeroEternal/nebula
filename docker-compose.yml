@@ -26,10 +26,11 @@ services:
     ports:
       - "2379:2379"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:2379/health"]
+      test: ["CMD", "etcdctl", "endpoint", "health"]
       interval: 5s
-      timeout: 3s
-      retries: 5
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   gateway:
     build:
