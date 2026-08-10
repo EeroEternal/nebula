@@ -22,20 +22,19 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_text(self, status: int, body: bytes, content_type: str = "text/plain") -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
         if self.path.split("?", 1)[0] in ("/health", "/healthz"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"ok")
+            self._send_text(200, b"ok")
             return
         if self.path.split("?", 1)[0] == "/metrics":
-            body = b"# mock metrics unavailable\n"
-            self.send_response(404)
-            self.send_header("Content-Type", "text/plain")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send_text(404, b"# mock metrics unavailable\n")
             return
         self.send_response(404)
         self.end_headers()
