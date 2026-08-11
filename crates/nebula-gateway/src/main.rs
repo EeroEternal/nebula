@@ -39,7 +39,8 @@ use crate::metrics::{metrics_handler, track_requests};
 use crate::platform_auth::build_gateway_auth;
 use crate::platform_v1::{
     legacy_deprecation_middleware, platform_audit_logs, platform_create_model,
-    platform_get_deployment, platform_get_model, platform_get_operation, platform_health_summary,
+    platform_evaluate_slo, platform_get_canary, platform_get_deployment, platform_get_model,
+    platform_get_operation, platform_get_slo, platform_health_summary, platform_list_canaries,
     platform_list_models, platform_list_nodes, platform_list_replicas, platform_load_model,
     platform_operation_events, platform_put_deployment, platform_scale_deployment,
     platform_stop_model,
@@ -190,6 +191,10 @@ async fn main() {
         .route("/operations/:operation_id/events", get(platform_operation_events))
         .route("/health/summary", get(platform_health_summary))
         .route("/audit-logs", get(platform_audit_logs))
+        .route("/models/:model_uid/slo/evaluation", get(platform_evaluate_slo))
+        .route("/models/:model_uid/slo", get(platform_get_slo))
+        .route("/canaries", get(platform_list_canaries))
+        .route("/canaries/:canary_id", get(platform_get_canary))
         .with_state(st.clone());
 
     let secure_routes = Router::new()

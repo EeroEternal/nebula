@@ -16,6 +16,7 @@
 | 控制台会话 / SSO | BFF | `/api/auth/*` | Postgres；Scheduler 不碰 |
 | 声明式模型管理 | BFF | `/api/v2/models/*` | 写 etcd Deployment/Spec；与 Gateway 共享 `nebula-control` |
 | Control API v1（机机） | Gateway | `/platform/v1/*` | 集成主契约；Operation + API Key |
+| 治理读（SLO / Canary） | Gateway | `/platform/v1/models/…/slo`、`/canaries` | 只读；写仍 BFF |
 | 观测面板聚合 | BFF | `/api/v2/observability/*` | |
 | 运维只读快照 | BFF 优先 | `/api/overview` 等 | Gateway 遗留 `/v1/admin/cluster/status` 只读保留，新功能不扩 |
 | 镜像注册 | BFF | `/api/images/*` 与 `/api/v2/...` | **禁止** Gateway 再扩 images 写 API |

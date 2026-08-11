@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use nebula_common::{
-    default_compatibility_rules, evaluate_slo, CapacitySnapshot, DiagnosticEvent, ModelSlo,
+    default_compatibility_rules, CapacitySnapshot, DiagnosticEvent, ModelSlo,
     NodeStatus, PlacementPlan, PlacementRejectReason, SloEvaluation, DesiredState,
     CompatibilityRule,
 };
@@ -310,64 +310,7 @@ pub fn evaluate_slo_from_router_metrics(
     slo: &ModelSlo,
     metrics_text: &str,
 ) -> SloEvaluation {
-    use crate::service::{normalize_zero, parse_histogram_quantile_filtered, parse_metric_sum};
-    let window_secs = match slo.window.as_str() {
-        "5m" => 300.0,
-        "15m" => 900.0,
-        "1h" => 3600.0,
-        "6h" => 21600.0,
-        "24h" | "1d" => 86400.0,
-        _ => 900.0,
-    };
-    let req = parse_metric_sum(metrics_text, "nebula_router_requests_total");
-    let err5 = parse_metric_sum(metrics_text, "nebula_router_responses_5xx");
-    // Abort is intentionally NOT subtracted into the error budget view.
-    let _abort = parse_metric_sum(metrics_text, "nebula_router_requests_aborted_total");
-    let availability = if req > 0.0 {
-        Some(1.0 - (err5 / req))
-    } else {
-        None
-    };
-    let request_rate = if window_secs > 0.0 {
-        Some(req / window_secs)
-    } else {
-        None
-    };
-    let model = Some(slo.model_uid.as_str());
-    let ttft = {
-        let s = parse_histogram_quantile_filtered(
-            metrics_text,
-            "nebula_route_ttft_seconds",
-            0.95,
-            model,
-        );
-        if s > 0.0 {
-            Some(normalize_zero(s * 1000.0))
-        } else {
-            None
-        }
-    };
-    let latency = {
-        let s = parse_histogram_quantile_filtered(
-            metrics_text,
-            "nebula_route_latency_seconds",
-            0.95,
-            model,
-        );
-        if s > 0.0 {
-            Some(normalize_zero(s * 1000.0))
-        } else {
-            None
-        }
-    };
-    evaluate_slo(
-        slo,
-        availability,
-        ttft,
-        latency,
-        request_rate,
-        now_ms(),
-    )
+    nebula_control::evaluate_slo_from_router_metrics(slo, metrics_text)
 }
 
 pub async fn list_diagnostic_events(

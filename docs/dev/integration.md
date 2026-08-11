@@ -232,6 +232,8 @@ Base：`http://<gateway-host>:8081/platform/v1`
 
 推理响应会回显 `x-nebula-request-id`；可选请求头 `x-nebula-replica-id` 固定 Router 选路到指定副本。
 
+**治理读（I4，只读）：** `GET /models/{uid}/slo`、`GET …/slo/evaluation`、`GET /canaries`（可选 `?model_uid=`）、`GET /canaries/{id}`。SLO/Canary 写操作仍走控制台 BFF。
+
 **示例：一步部署**
 
 ```bash

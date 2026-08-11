@@ -23,7 +23,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP / EngineShim → Phase 2（有需求再开） |
 | **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能；选型向导属 Phase 1 |
 | **K8s** | K0–K3 | K8s / HAMi 执行面 | ⏸ | 与 Phase 正交；有集群虚拟化客户再开；见 [`../dev/k8s.md`](../dev/k8s.md) |
-| **Integration** | I0–I3 | Control API / 对外暴露 | ✅ I1–I3 | 见 [`../dev/integration-plan.md`](../dev/integration-plan.md) |
+| **Integration** | I0–I4 | Control API / 对外暴露 | ✅ | 见 [`../dev/integration-plan.md`](../dev/integration-plan.md) |
 
 原则：不阻塞日常推理；不破坏 L0 主轴；智能/重治理不进推理热路径。
 

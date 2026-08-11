@@ -16,6 +16,10 @@ required_paths=(
   "/platform/v1/operations/{operation_id}/events"
   "/platform/v1/health/summary"
   "/platform/v1/audit-logs"
+  "/platform/v1/models/{model_uid}/slo"
+  "/platform/v1/models/{model_uid}/slo/evaluation"
+  "/platform/v1/canaries"
+  "/platform/v1/canaries/{canary_id}"
 )
 
 missing=()
