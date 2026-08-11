@@ -4,8 +4,8 @@
 > **基线：** Nebula v1.4.0 · Gateway 默认 `:8081`  
 > **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，不提供兼容层。  
 > **相关：** 安装见 [`../manual/deployment.md`](../manual/deployment.md)；错误码见 [`contracts.md`](./contracts.md)；架构见 [`../arch/architecture.md`](../arch/architecture.md)。  
-> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0 ✅**；I1–I3 拟议）。  
-> **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（I0 现状；legacy 已标 deprecated）。
+> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0 ✅**；**I1.1–I1.4 ✅**；I1.5 API Key ⏸；I2–I3 拟议）。  
+> **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（`/platform/v1` 为主；legacy Admin 已标 deprecated）。
 
 ---
 
@@ -16,21 +16,21 @@
 | 交互 | 谁发起 | 入口 | 频率 |
 |------|--------|------|------|
 | **推理** | 上层 / 业务 | Gateway `POST /v1/*` | 高 |
-| **编排** | 上层平台 | Gateway `POST/GET/PUT/DELETE /v1/admin/*` | 低 |
+| **编排** | 上层平台 | Gateway `/platform/v1/*`（推荐）；legacy `/v1/admin/*` | 低 |
 | **节点执行** | 运维 / 平台下发 | 各 GPU 机器跑 `nebula-node` | 常驻 |
 
 Router、Scheduler、etcd **不对上层暴露**。上层不要直连 `:18081` Router 或 `:2379` etcd。
 
 ```
 上层平台 / 业务
-    │  Bearer token（同一套 NEBULA_AUTH_TOKENS）
-    ├─ POST /v1/chat/completions …     推理
-    └─ POST /v1/admin/models/load …    部署 / 扩缩 / 查状态
+    │  Bearer token（NEBULA_AUTH_TOKENS）
+    ├─ POST /v1/chat/completions …          推理
+    └─ /platform/v1/models|nodes|operations 编排
            │
            ▼
     Gateway :8081 ──► Router ──► vLLM / SGLang
            │
-           └── 写 /deployments/ ──► Scheduler ──► Node（各机 agent）
+           └── nebula-control 写 /deployments/ ──► Scheduler ──► Node
 ```
 
 **BFF（`:18090`）** 面向控制台网页，鉴权是 Postgres 登录会话，**不是**平台集成的推荐路径（见 §8）。
@@ -179,21 +179,21 @@ Gateway 对外稳定 JSON 映射见 [`contracts.md`](./contracts.md) C3（502 �
 
 ## 5. 控制 API（编排）
 
-Base：`http://<gateway-host>:8081/v1/admin`  
-所需角色：见各接口说明（多为 `operator`，读操作为 `viewer`）。
+**推荐 Base：** `http://<gateway-host>:8081/platform/v1`  
+**Legacy Base（deprecated）：** `http://<gateway-host>:8081/v1/admin`  
+所需角色：读 `viewer`，写 `operator`。写路径与控制台共享 `nebula-control`（含兼容矩阵校验）。
 
 ### 5.1 部署模型
 
-`POST /v1/admin/models/load`
+`POST /platform/v1/models/{model_uid}/deploy`
 
-写入 `/models/{model_uid}/spec` 与 `/deployments/{model_uid}`；Scheduler 异步 reconcile 生成 `/placements/`；Node 启引擎并注册 `/endpoints/`。
+写入 `/models/{model_uid}/spec` 与 `/deployments/{model_uid}`；返回 `operation_id`。Scheduler 异步 reconcile；Node 启引擎并注册 `/endpoints/`。也可用 `PUT …/deployment`（已有 spec 时）或先 `POST /platform/v1/models` 再 PUT deployment。
 
-**请求体**（`ModelLoadRequest`）：
+**请求体**（`DeployBody`，uid 取自路径）：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `model_uid` | string | 是 | 全局唯一 ID |
-| `model_name` | string | 是 | 对外名 / HF ID，如 `Qwen/Qwen2.5-7B-Instruct` |
+| `model_name` | string | 否 | 缺省则用已有 spec；新建必须有或路径外另 POST models |
 | `replicas` | u32 | 否 | 默认 1 |
 | `node_id` | string | 否 | 节点亲和；须与 `nebula-node --node-id` 一致 |
 | `gpu_index` | u32 | 否 | 单卡（legacy） |
@@ -216,11 +216,10 @@ Base：`http://<gateway-host>:8081/v1/admin`
 **示例：指定节点与 GPU**
 
 ```bash
-curl -s -X POST http://127.0.0.1:8081/v1/admin/models/load \
+curl -s -X POST http://127.0.0.1:8081/platform/v1/models/qwen3-prod/deploy \
   -H "Authorization: Bearer platform-ctrl" \
   -H "Content-Type: application/json" \
   -d '{
-    "model_uid": "qwen3-prod",
     "model_name": "Qwen/Qwen3-8B",
     "replicas": 1,
     "node_id": "gpu-node-01",
@@ -237,44 +236,43 @@ curl -s -X POST http://127.0.0.1:8081/v1/admin/models/load \
 
 ```json
 {
-  "request_id": "qwen3-prod",
-  "model_uid": "qwen3-prod",
-  "status": "running_desired",
-  "path": "deployments"
+  "deployment": { "model_uid": "qwen3-prod", "desired_state": "running", "replicas": 1 },
+  "operation_id": "op_…",
+  "status": "succeeded"
 }
 ```
 
-表示**期望已写入**，非引擎已 ready。须轮询 §5.5 直到 endpoint `status: "ready"`。
+表示**期望已写入**（operation `succeeded`），非引擎已 ready。用 `GET /platform/v1/operations/{operation_id}` 回看；用 `GET /platform/v1/models/{uid}/replicas` 轮询直到 `status: "ready"`。
 
-**注意：** Gateway Admin **不做**兼容矩阵校验（与控制台 BFF 不同），见 §10.3。
-
-**语义：** `node_id` / `gpu_indices` 为**部署级亲和**（整次 deployment 的约束）。多副本默认同策略下由 Scheduler 选位；**不是** per-replica 独立 `replica_config` 数组。
+**语义：** `node_id` / `gpu_indices` 为**部署级亲和**。多副本默认同策略下由 Scheduler 选位。
 
 ### 5.2 扩缩容
 
-`PUT /v1/admin/models/requests/:id/scale`
-
-`:id` 为 `model_uid`（或 legacy `model_requests` id，Gateway 会解析）。
+`PUT /platform/v1/models/{model_uid}/scale`
 
 ```bash
-curl -s -X PUT http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod/scale \
+curl -s -X PUT http://127.0.0.1:8081/platform/v1/models/qwen3-prod/scale \
   -H "Authorization: Bearer platform-ctrl" \
   -H "Content-Type: application/json" \
   -d '{"replicas": 2}'
 ```
 
-响应含 `old_replicas` / `new_replicas`。缩容时 Nebula 对旧副本做 drain（先不接新请求再停），见架构文档。
+缩容时 Nebula 对旧副本做 drain（先不接新请求再停）。
 
 ### 5.3 停止
 
-`DELETE /v1/admin/models/requests/:id`
+`POST /platform/v1/models/{model_uid}/stop`
 
 将 deployment `desired_state` 置为 `stopped`，Scheduler / Node 回收副本。
 
 ```bash
-curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
+curl -s -X POST http://127.0.0.1:8081/platform/v1/models/qwen3-prod/stop \
   -H "Authorization: Bearer platform-ctrl"
 ```
+
+### 5.3b Legacy Admin（deprecated）
+
+仍可用：`POST /v1/admin/models/load`、`PUT …/requests/:id/scale`、`DELETE …/requests/:id`。新集成请改用 `/platform/v1`。
 
 ### 5.4 副本 Drain（运维）
 
@@ -286,37 +284,31 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 将指定 endpoint 标为 `draining`，用于上线前摘流或缩容配合。
 
-### 5.5 集群状态（集成轮询）
+### 5.5 运行态轮询（推荐）
 
-`GET /v1/admin/cluster/status`（viewer+）
+```bash
+# 节点 inventory
+curl -s http://127.0.0.1:8081/platform/v1/nodes \
+  -H "Authorization: Bearer platform-ctrl"
 
-返回 `ClusterStatus`：
-
-```json
-{
-  "nodes": [ { "node_id": "...", "gpus": [...], "last_heartbeat_ms": ... } ],
-  "endpoints": [ {
-    "model_uid": "qwen3-prod",
-    "replica_id": 0,
-    "node_id": "gpu-node-01",
-    "status": "ready",
-    "base_url": "http://127.0.0.1:10814",
-    "plan_version": 1
-  } ],
-  "placements": [ { "model_uid": "...", "assignments": [...] } ],
-  "model_requests": []
-}
+# 某模型副本
+curl -s http://127.0.0.1:8081/platform/v1/models/qwen3-prod/replicas \
+  -H "Authorization: Bearer platform-ctrl"
 ```
+
+`replicas` 项含 `status`、`node_id`、`base_url`（编排可读）、`plan_version`。
 
 **集成就绪判定：**
 
 1. 目标 `node_id` 出现在 `nodes` 且心跳新鲜；
-2. 存在 `endpoints` 条目：`model_uid` 匹配且 `status == "ready"`；
-3. `placements.assignments` 中 replica 数与期望 `replicas` 一致（可选交叉校验）。
+2. 存在 replica：`status == "ready"`；
+3. （可选）再对账 placement；日常不必解析 placement JSON。
 
 `endpoint.status` 枚举：`starting` | `ready` | `unhealthy` | `draining` | `failed`。
 
-### 5.6 其他 Admin 接口
+Legacy：`GET /v1/admin/cluster/status` 仍返回整包 `ClusterStatus`（deprecated）。
+
+### 5.6 其他 Admin 接口（legacy / 运维）
 
 | 方法 | 路径 | 角色 | 说明 |
 |------|------|------|------|
@@ -335,15 +327,16 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 ```
 1. 平台在 GPU 机器安装并启动 nebula-node（--node-id 与平台 nodeId 一致）
-2. POST /v1/admin/models/load（可选 node_id、gpu_indices）
-3. 循环 GET /v1/admin/cluster/status 直到 ready endpoint
-4. 业务 POST /v1/chat/completions（model = model_name）
-5. 需要下线：DELETE /v1/admin/models/requests/{model_uid}
+2. POST /platform/v1/models/{uid}/deploy（可选 node_id、gpu_indices）
+3. 可选：GET /platform/v1/operations/{operation_id}
+4. 循环 GET /platform/v1/models/{uid}/replicas 直到 ready
+5. 业务 POST /v1/chat/completions（model = model_name）
+6. 需要下线：POST /platform/v1/models/{uid}/stop
 ```
 
 **超时建议：** 首次部署含模型下载，可能数分钟至数十分钟；轮询间隔 2–5s，总超时由平台按模型大小配置。
 
-**幂等：** 对同一 `model_uid` 重复 `load` 会更新 spec / deployment 并 bump version，Scheduler 重新 reconcile。
+**幂等：** 对同一 `model_uid` 重复 deploy 会更新 spec / deployment 并 bump version，Scheduler 重新 reconcile。
 
 ---
 
@@ -395,15 +388,14 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 | 推理 | `POST /v1/chat/completions` 等 §4 所列 | Gateway 鉴权 → Router 选路 → 引擎 Passthrough |
 | 推理 | `POST /v1/messages`、`POST /v1/responses` | Gateway 协议适配后走同一路由 |
 | 推理 | `GET /v1/models` | 读 etcd placement，OpenAI 列表形状 |
-| 编排 | `POST /v1/admin/models/load` | 写 spec + deployment |
-| 编排 | `PUT …/scale`、`DELETE …/requests/:id` | 改副本 / 停止 |
-| 编排 | `GET /v1/admin/cluster/status` | 节点 + endpoint + placement 快照 |
-| 编排 | `POST /v1/admin/endpoints/drain` | 副本摘流 |
-| 鉴权 | `NEBULA_AUTH_TOKENS` + `Authorization: Bearer` | 推理与 Admin 共用 |
+| 编排 | `POST /platform/v1/models/{uid}/deploy` 等 | 写 spec + deployment（`nebula-control`） |
+| 编排 | `GET /platform/v1/nodes`、`…/replicas`、`…/operations/{id}` | 运行态 / Operation |
+| 编排 | `POST /v1/admin/endpoints/drain` | 副本摘流（legacy 运维） |
+| 鉴权 | `NEBULA_AUTH_TOKENS` + `Authorization: Bearer` | 推理与 Control 共用 |
 | 追踪 | `traceparent` + ExecutionContext header | Gateway→Router inject/extract |
 | 多租户 | `NEBULA_MULTI_TENANT=1` + `token:role:tenant_id` | 可选 |
 
-`admin/models/load` 写入的 `node_id` / `gpu_indices` 会进入 deployment；Scheduler `planner.rs` 读取 `node_affinity` / `gpu_affinity` 生成 placement（需 Scheduler 进程在跑）。
+`deploy` / `PUT deployment` 写入的 `node_id` / `gpu_indices` 会进入 deployment；Scheduler `planner.rs` 读取 `node_affinity` / `gpu_affinity` 生成 placement（需 Scheduler 进程在跑）。
 
 ### 10.2 运行前提（缺一则集成失败）
 
@@ -415,19 +407,19 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 | **etcd 可达** | 部署与状态查询均失败 |
 | **生产开启鉴权**（勿用 `NEBULA_AUTH_DISABLED`） | 裸奔，非集成契约 |
 
-首次部署常含模型下载，ready 可能需数分钟；须轮询 `cluster/status`，不能假设 `load` 响应即 ready。
+首次部署常含模型下载，ready 可能需数分钟；须轮询 `/platform/v1/models/{uid}/replicas`，不能假设 deploy 响应即 ready。
 
 ### 10.3 与控制台（BFF）的行为差异
 
-平台走 Gateway Admin 时，下列行为**与控制台页面不完全相同**，集成方需知晓：
+平台走 Gateway `/platform/v1` 时，**写路径与控制台同源**（`nebula-control`，含兼容矩阵）。差异主要在鉴权与人机能力：
 
-| 项 | Gateway Admin | 控制台（BFF `/api/v2/*`） |
-|----|---------------|---------------------------|
-| **Gateway Admin** | **走 `nebula-control`（与 BFF 同源）** | 部署前校验引擎/GPU/镜像 |
+| 项 | Gateway `/platform/v1` | 控制台（BFF `/api/v2/*`） |
+|----|------------------------|---------------------------|
+| **写路径** | `nebula-control` | 同 |
 | **鉴权** | `NEBULA_AUTH_TOKENS` | Postgres 登录 session |
-| **失败时机** | 不兼容配置可能到 Node 启引擎时才失败 | 部署请求可能被 BFF 直接拒绝 |
+| **选型 / Benchmark UI** | 不暴露（Tier D） | 控制台治理页 |
 
-若平台需要兼容门禁，当前应自行在调用前做规则校验，或后续在 Gateway Admin 补同等校验（产品排期项）。
+I1.5 Postgres API Key 就绪前，机机与人机仍是两套凭证。
 
 ### 10.4 接口级 caveat
 

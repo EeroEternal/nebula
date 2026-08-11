@@ -1,11 +1,12 @@
 openapi: 3.0.3
 info:
-  title: Nebula Control API (current)
+  title: Nebula Control API
   description: |
-    I0 snapshot of machine-facing control routes on Gateway.
-    Stable `/platform/v1` is planned in I1; legacy `/v1/admin/*` remains during deprecation.
+    Machine-facing control routes on Gateway.
+    Preferred path: `/platform/v1/*` (I1 Tier A).
+    Legacy `/v1/admin/*` remains during deprecation.
     See docs/dev/integration.md and docs/dev/integration-plan.md.
-  version: 0.1.0-i0
+  version: 0.2.0-i1
 
 servers:
   - url: http://127.0.0.1:8081
@@ -15,6 +16,169 @@ security:
   - bearerAuth: []
 
 paths:
+  /platform/v1/models:
+    get:
+      summary: List model specs
+      operationId: platformListModels
+      tags: [Control]
+      responses:
+        '200':
+          description: '{ "models": [ModelSpec, ...] }'
+        '401':
+          $ref: '#/components/responses/Error'
+    post:
+      summary: Create or update ModelSpec (does not start replicas)
+      operationId: platformUpsertModel
+      tags: [Control]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertModelSpecRequest'
+      responses:
+        '200':
+          description: Spec written + operation_id
+        '400':
+          $ref: '#/components/responses/Error'
+
+  /platform/v1/models/{model_uid}:
+    get:
+      summary: Get model spec
+      operationId: platformGetModel
+      tags: [Control]
+      parameters:
+        - $ref: '#/components/parameters/ModelUid'
+      responses:
+        '200':
+          description: ModelSpec
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /platform/v1/models/{model_uid}/deployment:
+    get:
+      summary: Get deployment desired state
+      operationId: platformGetDeployment
+      tags: [Control]
+      parameters:
+        - $ref: '#/components/parameters/ModelUid'
+      responses:
+        '200':
+          description: ModelDeployment
+        '404':
+          $ref: '#/components/responses/Error'
+    put:
+      summary: Upsert running deployment expectation
+      operationId: platformPutDeployment
+      tags: [Control]
+      parameters:
+        - $ref: '#/components/parameters/ModelUid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartDeploymentRequest'
+      responses:
+        '200':
+          description: Deployment + operation_id
+        '400':
+          $ref: '#/components/responses/Error'
+
+  /platform/v1/models/{model_uid}/deploy:
+    post:
+      summary: Deploy model (spec upsert + running desired; same as Admin load)
+      operationId: platformDeployModel
+      tags: [Control]
+      parameters:
+        - $ref: '#/components/parameters/ModelUid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeployBody'
+      responses:
+        '200':
+          description: Deployment + operation_id
+        '400':
+          $ref: '#/components/responses/Error'
+
+  /platform/v1/models/{model_uid}/stop:
+    post:
+      summary: Stop model (desired_state=stopped)
+      operationId: platformStopModel
+      tags: [Control]
+      parameters:
+        - $ref: '#/components/parameters/ModelUid'
+      responses:
+        '200':
+          description: Deployment + operation_id
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /platform/v1/models/{model_uid}/scale:
+    put:
+      summary: Scale replicas
+      operationId: platformScaleModel
+      tags: [Control]
+      parameters:
+        - $ref: '#/components/parameters/ModelUid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [replicas]
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Deployment + operation_id
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /platform/v1/models/{model_uid}/replicas:
+    get:
+      summary: List runtime replicas (endpoints)
+      operationId: platformListReplicas
+      tags: [Control]
+      parameters:
+        - $ref: '#/components/parameters/ModelUid'
+      responses:
+        '200':
+          description: '{ "replicas": [EndpointInfo, ...] }'
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /platform/v1/nodes:
+    get:
+      summary: List node inventory
+      operationId: platformListNodes
+      tags: [Control]
+      responses:
+        '200':
+          description: '{ "nodes": [NodeStatus, ...] }'
+
+  /platform/v1/operations/{operation_id}:
+    get:
+      summary: Get control operation status
+      operationId: platformGetOperation
+      tags: [Control]
+      parameters:
+        - name: operation_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ControlOperation
+        '404':
+          $ref: '#/components/responses/Error'
+
   /v1/admin/models/load:
     post:
       summary: Deploy or update model (legacy)
@@ -83,11 +247,12 @@ paths:
   /v1/admin/cluster/status:
     get:
       summary: Cluster snapshot (nodes, endpoints, placements)
+      deprecated: true
       operationId: adminClusterStatus
       tags: [Control Legacy]
       responses:
         '200':
-          description: ClusterStatus JSON
+          description: Prefer /platform/v1/nodes and /platform/v1/models/{uid}/replicas
 
   /v1/chat/completions:
     post:
@@ -106,9 +271,83 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-      description: NEBULA_AUTH_TOKENS entry (token:role[:tenant_id])
+      description: NEBULA_AUTH_TOKENS entry (token:role[:tenant_id]); Viewer read / Operator write
+
+  parameters:
+    ModelUid:
+      name: model_uid
+      in: path
+      required: true
+      schema:
+        type: string
 
   schemas:
+    UpsertModelSpecRequest:
+      type: object
+      required: [model_uid, model_name]
+      properties:
+        model_uid:
+          type: string
+        model_name:
+          type: string
+        model_path:
+          type: string
+        engine_type:
+          type: string
+        docker_image:
+          type: string
+        config:
+          type: object
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+
+    StartDeploymentRequest:
+      type: object
+      properties:
+        replicas:
+          type: integer
+        min_replicas:
+          type: integer
+        max_replicas:
+          type: integer
+        node_id:
+          type: string
+        gpu_indices:
+          type: array
+          items:
+            type: integer
+        config_overrides:
+          type: object
+        image_id:
+          type: string
+        image_override_reason:
+          type: string
+
+    DeployBody:
+      type: object
+      properties:
+        model_name:
+          type: string
+        replicas:
+          type: integer
+          default: 1
+        node_id:
+          type: string
+        gpu_index:
+          type: integer
+        gpu_indices:
+          type: array
+          items:
+            type: integer
+        engine_type:
+          type: string
+        docker_image:
+          type: string
+        config:
+          type: object
+
     ModelLoadRequest:
       type: object
       required: [model_uid, model_name]

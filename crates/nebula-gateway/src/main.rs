@@ -6,6 +6,7 @@ mod engine;
 mod handlers;
 mod interface;
 mod metrics;
+mod platform;
 mod protocol_adapt;
 mod proxy_common;
 mod responses;
@@ -33,6 +34,11 @@ use crate::handlers::{
     list_models, not_implemented, proxy_post, proxy_v2,
 };
 use crate::metrics::{metrics_handler, track_requests};
+use crate::platform::{
+    create_or_update_model, deploy_model, get_deployment, get_model, get_operation, list_models as platform_list_models,
+    list_nodes, list_replicas, put_deployment, scale_model as platform_scale_model,
+    stop_model as platform_stop_model,
+};
 use crate::state::AppState;
 use crate::util::read_engine_env_file;
 use nebula_common::auth::parse_auth_from_env;
@@ -154,6 +160,21 @@ async fn main() {
         .route("/v2/migrate", any(proxy_v2))
         .with_state(st.clone());
 
+    let platform_routes = Router::new()
+        .route("/models", get(platform_list_models).post(create_or_update_model))
+        .route("/models/:model_uid", get(get_model))
+        .route(
+            "/models/:model_uid/deployment",
+            get(get_deployment).put(put_deployment),
+        )
+        .route("/models/:model_uid/deploy", post(deploy_model))
+        .route("/models/:model_uid/stop", post(platform_stop_model))
+        .route("/models/:model_uid/scale", put(platform_scale_model))
+        .route("/models/:model_uid/replicas", get(list_replicas))
+        .route("/nodes", get(list_nodes))
+        .route("/operations/:operation_id", get(get_operation))
+        .with_state(st.clone());
+
     let secure_routes = Router::new()
         .route("/v1/responses", get(not_implemented).post(create_responses))
         .route("/v1/messages", post(create_anthropic_messages))
@@ -163,6 +184,7 @@ async fn main() {
         .route("/v1/rerank", post(proxy_post))
         .route("/v1/models", get(list_models))
         .nest("/v1/admin", admin_routes)
+        .nest("/platform/v1", platform_routes)
         .layer(middleware::from_fn_with_state(
             st.clone(),
             audit::audit_middleware,

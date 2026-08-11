@@ -1,6 +1,6 @@
 # Nebula 对外暴露与集成 API 优化计划
 
-> **状态：** 拟议（2026-08-11）· 基线 v1.4.0  
+> **状态：** I0 ✅ · I1.1–I1.4 ✅（2026-08-12）· I1.5 / I2–I3 拟议 · 基线 v1.4.0  
 > **视角：** 以 Nebula 控制面自身分层（[`../arch/vision.md`](../arch/vision.md) L0–L4）决定**暴露什么、不暴露什么**；不围绕某一类客户场景定制。  
 > **当前契约：** [`integration.md`](./integration.md)  
 > **关系：** 补充 [`plan.md`](./plan.md) / [`../arch/roadmap.md`](../arch/roadmap.md)；与第三方推理产品 **无兼容要求**。
@@ -114,16 +114,16 @@ Internal    Router / Scheduler / etcd       永不对外
 
 **目的：** Nebula 控制面的 **正式对外契约**。
 
-| ID | 交付 | 验收 |
+| ID | 交付 | 状态 |
 |----|------|------|
-| I1.1 | `GET/POST /platform/v1/models` … | ModelSpec 资源化 |
-| I1.2 | `GET/PUT …/models/{uid}/deployment`；`POST …/stop` | 部署期望与 Tier A 字段对齐 |
-| I1.3 | `GET …/models/{uid}/replicas`；`GET /platform/v1/nodes` | 运行态 / inventory 只读 |
-| I1.4 | `POST` 变更 → `operation_id`；`GET /platform/v1/operations/{id}` | 集成方不读 placement JSON |
-| I1.5 | **API Key**（Postgres）；scope：`inference` / `control` / `admin` | 替代纯 env token 的长期方案；env token 可保留兼容 |
-| I1.6 | 废弃 `/v1/admin/models/load`、`/v1/admin/v2/*` 代理 | 文档与 OpenAPI 只认 `/platform/v1` |
+| I1.1 | `GET/POST /platform/v1/models` … | ✅ |
+| I1.2 | `GET/PUT …/models/{uid}/deployment`；`POST …/stop` / `deploy` / `scale` | ✅ |
+| I1.3 | `GET …/models/{uid}/replicas`；`GET /platform/v1/nodes` | ✅ |
+| I1.4 | 写操作返回 `operation_id`；`GET /platform/v1/operations/{id}`（期望写入成功即 `succeeded`） | ✅ 最小 |
+| I1.5 | **API Key**（Postgres）；scope：`inference` / `control` / `admin` | ⏸ 仍用 `NEBULA_AUTH_TOKENS` |
+| I1.6 | 废弃文档指向 `/platform/v1`；legacy Admin 标 deprecated | ✅ |
 
-**Inference：** 仍 `/v1/*`；与 Control 共享 Key 或分 scope。
+**Inference：** 仍 `/v1/*`；与 Control 共享 env token（I1.5 前）。
 
 ---
 

@@ -14,7 +14,8 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 
 | Key 前缀 | 写者 | 消费者 | 生命周期 |
 |----------|------|--------|----------|
-| `/models/…/spec`、`/deployments/` | BFF（主） | Scheduler | 持久；Deployment 唯一期望写入口 |
+| `/models/…/spec`、`/deployments/` | BFF + Gateway（均经 `nebula-control`） | Scheduler | 持久；Deployment 唯一期望语义；禁止旁路双实现 |
+| `/operations/{id}` | Gateway（via nebula-control） | 集成方经 Gateway 读 | 持久小对象；期望写入成功即终态；非热路径 |
 | `/placements/` | Scheduler（CAS） | Node、Router | 持久；`plan_version` |
 | `/endpoints/`、`/stats/`、`/capabilities/` | Node | Router、Scheduler、BFF | **lease** |
 | `/nodes/…/status` | Node | Scheduler、BFF | **lease** |

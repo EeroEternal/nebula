@@ -104,7 +104,8 @@ graph BT
 |-----|------|----|------|
 | `/nodes/{node_id}/status` | `NodeStatus` | A | 心跳（lease） |
 | `/models/{model_uid}/spec` | `ModelSpec` | A | 规格 |
-| `/deployments/{model_uid}` | `ModelDeployment` | A | 声明期望（主写：BFF） |
+| `/deployments/{model_uid}` | `ModelDeployment` | A | 声明期望（BFF + Gateway `/platform/v1`，共享 `nebula-control`） |
+| `/operations/{operation_id}` | `ControlOperation` | A | 机机编排结果追踪（Gateway 写；小、最新值） |
 | `/placements/{model_uid}` | `PlacementPlan` | A | CAS；`plan_version` |
 | `/endpoints/…` `/stats/…` `/capabilities/…` | 运行时 | A | Node 写（lease） |
 | `/images/{id}` | `EngineImage` | A | 镜像注册；Node watch |
@@ -140,9 +141,10 @@ graph BT
 |------|------|
 | `/v1/chat/completions`、`/v1/responses` | ✅ |
 | `/v1/embeddings` / `rerank`、`/v1/models` | ✅ |
+| Gateway `/platform/v1/models|nodes|operations` | ✅ I1.1–I1.4 |
 | BFF `/api/v2/compat|slos|benchmarks|canaries|selection|tenants|pricing` | ✅ |
 
-控制台写路径走 BFF；Gateway `/v1/admin/*` 写接口不扩新双实现（见 [`ownership.md`](../dev/ownership.md)）。
+控制台写路径走 BFF；机机编排走 Gateway `/platform/v1`；二者共享 `nebula-control`（见 [`ownership.md`](../dev/ownership.md)）。legacy `/v1/admin/*` 不扩新双实现。
 
 可观测三平面（设计见 [`../manual/module.md`](../manual/module.md)「监控与日志」）：
 
