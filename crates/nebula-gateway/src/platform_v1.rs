@@ -19,8 +19,9 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use nebula_control::{
-    cluster_counts, create_model, create_operation, etcd_health, get_model, get_model_deployment,
-    get_operation, list_models, list_nodes, list_replicas, load_model, scale_model, start_model,
+    cluster_counts, create_model, create_operation, etcd_health, evaluate_slo_from_router_metrics,
+    filter_canaries_by_model, get_canary, get_model, get_model_deployment, get_operation, get_slo,
+    list_canaries, list_models, list_nodes, list_replicas, load_model, scale_model, start_model,
     stop_model, ComponentHealth, ComponentStatus, CreateModelRequest, HealthSummary, OperationKind,
     OperationStatus, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
 };
@@ -399,6 +400,89 @@ pub async fn platform_operation_events(
     Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CanariesQuery {
+    pub model_uid: Option<String>,
+}
+
+async fn fetch_router_metrics(st: &AppState) -> String {
+    let url = format!("{}/metrics", st.router_base_url.trim_end_matches('/'));
+    match st.http.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => resp.text().await.unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+pub async fn platform_get_slo(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(model_uid): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+    match get_slo(&*st.store, &model_uid).await {
+        Ok(Some(slo)) => (StatusCode::OK, Json(slo)).into_response(),
+        Ok(None) => control_error(ServiceError::NotFound(format!(
+            "slo for model '{model_uid}' not found"
+        ))),
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_evaluate_slo(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(model_uid): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+    let slo = match get_slo(&*st.store, &model_uid).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return control_error(ServiceError::NotFound(format!(
+                "slo for model '{model_uid}' not found"
+            )));
+        }
+        Err(e) => return control_error(e),
+    };
+    let metrics = fetch_router_metrics(&st).await;
+    let evaluation = evaluate_slo_from_router_metrics(&slo, &metrics);
+    (StatusCode::OK, Json(evaluation)).into_response()
+}
+
+pub async fn platform_list_canaries(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Query(query): Query<CanariesQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+    match list_canaries(&*st.store).await {
+        Ok(canaries) => {
+            let filtered = filter_canaries_by_model(canaries, query.model_uid.as_deref());
+            (StatusCode::OK, Json(json!({ "canaries": filtered }))).into_response()
+        }
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_get_canary(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(canary_id): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+    match get_canary(&*st.store, &canary_id).await {
+        Ok(canary) => (StatusCode::OK, Json(canary)).into_response(),
+        Err(e) => control_error(e),
+    }
 }
 
 pub fn apply_legacy_deprecation_headers(headers: &mut HeaderMap) {

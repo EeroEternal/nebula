@@ -157,6 +157,21 @@ Tier C 治理读 API（SLO 状态、Canary 阶段）若要做，在 I3 之后单
 
 ---
 
+### I4 — 治理读 API（Tier C 只读）
+
+**目的：** 集成方可观测 SLO / Canary 状态，写操作仍走控制台 BFF。
+
+| ID | 交付 | 验收 | 状态 |
+|----|------|------|------|
+| I4.1 | `GET /platform/v1/models/{uid}/slo` | ModelSlo 只读 | ✅ |
+| I4.2 | `GET …/slo/evaluation` | Router 指标实时评估 | ✅ |
+| I4.3 | `GET /platform/v1/canaries`（`?model_uid=`） | Canary 列表 | ✅ |
+| I4.4 | `GET /platform/v1/canaries/{id}` | 单条 Canary | ✅ |
+
+写路径（SLO CRUD、Canary promote/rollback）留在 BFF `/api/v2/*`。
+
+---
+
 ## 6. 总体顺序
 
 ```text
@@ -164,7 +179,7 @@ I0  单一 control service + compat + 错误/OpenAPI
  └─ I1  /platform/v1（Tier A）
       └─ I2  按需 Tier C（SSE → replica pin → 异构放置 → webhook）
            └─ I3  health / 审计 / 幂等 / v1 冻结
-                └─ I4? 治理读 API（另批）
+                └─ I4  治理读 API（SLO / Canary 只读）✅
 ```
 
 I0 阻塞 I1。I2 各项独立排期，**不**作为 v1 完成前提。

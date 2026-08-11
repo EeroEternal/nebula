@@ -6,7 +6,7 @@ info:
     Stable contract: `/platform/v1/*` (I1).
     Legacy `/v1/admin/*` is deprecated — responses include `Deprecation: true`.
     See docs/dev/integration.md and docs/dev/integration-plan.md.
-  version: 1.1.0-i2-i3
+  version: 1.2.0-i4
 
 servers:
   - url: http://127.0.0.1:8081
@@ -198,6 +198,57 @@ paths:
       responses:
         '200':
           description: Audit traces from xtrace
+
+  /platform/v1/models/{model_uid}/slo:
+    get:
+      summary: Model SLO definition
+      operationId: platformGetSlo
+      tags: [Platform v1 Governance]
+      parameters:
+        - $ref: '#/components/parameters/modelUid'
+      responses:
+        '200':
+          description: ModelSlo
+
+  /platform/v1/models/{model_uid}/slo/evaluation:
+    get:
+      summary: Live SLO evaluation from Router metrics
+      operationId: platformEvaluateSlo
+      tags: [Platform v1 Governance]
+      parameters:
+        - $ref: '#/components/parameters/modelUid'
+      responses:
+        '200':
+          description: SloEvaluation
+
+  /platform/v1/canaries:
+    get:
+      summary: List canary releases
+      operationId: platformListCanaries
+      tags: [Platform v1 Governance]
+      parameters:
+        - name: model_uid
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CanaryRelease list
+
+  /platform/v1/canaries/{canary_id}:
+    get:
+      summary: Get canary release
+      operationId: platformGetCanary
+      tags: [Platform v1 Governance]
+      parameters:
+        - name: canary_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: CanaryRelease
 
   /v1/admin/models/load:
     post:
