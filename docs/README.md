@@ -44,3 +44,4 @@
 | [`dev/stats.md`](dev/stats.md) | 引擎状态数据格式 |
 | [`dev/unigateway.md`](dev/unigateway.md) | 接口层规范（UG 协议适配 + C5 tooling 门控） |
 | [`dev/ha/report.md`](dev/ha/report.md) | 高可用验收报告 |
+| [`dev/hw/phase0-pro6000.md`](dev/hw/phase0-pro6000.md) | Phase 0 真机（pro6000 / RTX PRO 6000）验证摘要 |
