@@ -4,8 +4,8 @@
 > **基线：** Nebula v1.4.0 · Gateway 默认 `:8081`  
 > **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，不提供兼容层。  
 > **相关：** 安装见 [`../manual/deployment.md`](../manual/deployment.md)；错误码见 [`contracts.md`](./contracts.md)；架构见 [`../arch/architecture.md`](../arch/architecture.md)。  
-> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0 ✅**；I1–I3 拟议）。  
-> **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（I0 现状；legacy 已标 deprecated）。
+> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0 ✅ · I1 ✅**；I2–I3 拟议）。  
+> **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（I1 `/platform/v1`；legacy 已标 deprecated）。
 
 ---
 
@@ -16,7 +16,7 @@
 | 交互 | 谁发起 | 入口 | 频率 |
 |------|--------|------|------|
 | **推理** | 上层 / 业务 | Gateway `POST /v1/*` | 高 |
-| **编排** | 上层平台 | Gateway `POST/GET/PUT/DELETE /v1/admin/*` | 低 |
+| **编排** | 上层平台 | Gateway `/platform/v1/*`（推荐）或 legacy `/v1/admin/*` | 低 |
 | **节点执行** | 运维 / 平台下发 | 各 GPU 机器跑 `nebula-node` | 常驻 |
 
 Router、Scheduler、etcd **不对上层暴露**。上层不要直连 `:18081` Router 或 `:2379` etcd。
@@ -25,7 +25,8 @@ Router、Scheduler、etcd **不对上层暴露**。上层不要直连 `:18081` R
 上层平台 / 业务
     │  Bearer token（同一套 NEBULA_AUTH_TOKENS）
     ├─ POST /v1/chat/completions …     推理
-    └─ POST /v1/admin/models/load …    部署 / 扩缩 / 查状态
+    └─ POST /platform/v1/models/load …    部署 / 扩缩 / 查状态（推荐）
+    └─ legacy POST /v1/admin/models/load …（deprecated）
            │
            ▼
     Gateway :8081 ──► Router ──► vLLM / SGLang
@@ -122,6 +123,30 @@ curl -s http://<gateway>:8081/v1/admin/whoami \
 - 租户身份由 token 第三段绑定（`token:role:tenant_id`），**不可**用客户端 header 伪造。
 - Gateway 读 etcd `/tenants/{id}` 做配额准入；拒绝时 header `x-nebula-deny-code` + JSON 错误体（见 [`contracts.md`](./contracts.md) C3）。
 
+### 3.5 Postgres API Key（可选，I1）
+
+设置 `NEBULA_PLATFORM_DB_URL`（或与 BFF 共用 `NEBULA_BFF_DATABASE_URL`）后，Gateway 启动时自动建表 `platform_api_keys`，Bearer token 除 env 映射外也可查库。
+
+| scope | 允许路径 |
+|-------|----------|
+| `inference` | `/v1/*`（不含 `/v1/admin`） |
+| `control` | `/platform/v1/*` 与 legacy `/v1/admin/*` |
+| `admin` | 全部受保护路径 |
+
+Key 以 SHA-256 哈希存储。插入示例（需自行生成随机 secret）：
+
+```sql
+INSERT INTO platform_api_keys (name, key_hash, role, scopes)
+VALUES (
+  'platform-ctrl',
+  encode(sha256('your-secret-key'::bytea), 'hex'),
+  'operator',
+  ARRAY['inference','control']
+);
+```
+
+也可运行 `scripts/platform_api_key.sh create --name platform-ctrl --role operator --scopes inference,control`。
+
 ---
 
 ## 4. 推理 API（热路径）
@@ -179,10 +204,55 @@ Gateway 对外稳定 JSON 映射见 [`contracts.md`](./contracts.md) C3（502 �
 
 ## 5. 控制 API（编排）
 
-Base：`http://<gateway-host>:8081/v1/admin`  
-所需角色：见各接口说明（多为 `operator`，读操作为 `viewer`）。
+**推荐：** `/platform/v1/*`（I1 正式契约，OpenAPI [`openapi-control.yaml`](./openapi-control.yaml)）。  
+**Legacy：** `/v1/admin/*` 仍可用但响应带 `Deprecation: true`，见 §5.2。
 
-### 5.1 部署模型
+所需角色：读 `viewer`，写 `operator`；与推理面共用 Bearer token 或 Postgres API Key（§3.5）。
+
+### 5.1 Platform v1（推荐）
+
+Base：`http://<gateway-host>:8081/platform/v1`
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET/POST | `/models` | 列出 / 创建 `ModelSpec` |
+| POST | `/models/load` | 一步 upsert spec + 启动 deployment（compat 校验） |
+| GET | `/models/{uid}` | 读 spec |
+| GET/PUT | `/models/{uid}/deployment` | 读 / 写 deployment 期望 |
+| POST | `/models/{uid}/deployment/scale` | 扩缩容 |
+| POST | `/models/{uid}/stop` | 停止 |
+| GET | `/models/{uid}/replicas` | 运行副本（含 `status`、`node_id`、`base_url`） |
+| GET | `/nodes` | 节点 inventory |
+| GET | `/operations/{id}` | 异步操作状态（`ready_replicas` / `succeeded`） |
+
+写操作返回 **202** + `operation_id`；轮询 `GET /operations/{id}` 直到 `status: succeeded`（或 `failed`），无需解析 placement JSON。
+
+**示例：一步部署**
+
+```bash
+curl -s -X POST http://127.0.0.1:8081/platform/v1/models/load \
+  -H "Authorization: Bearer platform-ctrl" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model_uid": "qwen3-prod",
+    "model_name": "Qwen/Qwen3-8B",
+    "replicas": 1,
+    "node_id": "gpu-node-01",
+    "gpu_indices": [0],
+    "engine_type": "vllm"
+  }'
+# {"operation_id":"op_…","model_uid":"qwen3-prod","status":"pending"}
+
+curl -s http://127.0.0.1:8081/platform/v1/operations/op_… \
+  -H "Authorization: Bearer platform-ctrl"
+# {"status":"running","ready_replicas":0,"desired_replicas":1,…}
+```
+
+### 5.2 Legacy Admin（deprecated）
+
+Base：`http://<gateway-host>:8081/v1/admin`
+
+#### 部署模型
 
 `POST /v1/admin/models/load`
 
@@ -335,10 +405,10 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 ```
 1. 平台在 GPU 机器安装并启动 nebula-node（--node-id 与平台 nodeId 一致）
-2. POST /v1/admin/models/load（可选 node_id、gpu_indices）
-3. 循环 GET /v1/admin/cluster/status 直到 ready endpoint
+2. POST /platform/v1/models/load（可选 node_id、gpu_indices）
+3. 轮询 GET /platform/v1/operations/{id} 直到 succeeded；或 GET …/replicas 直到 ready
 4. 业务 POST /v1/chat/completions（model = model_name）
-5. 需要下线：DELETE /v1/admin/models/requests/{model_uid}
+5. 需要下线：POST /platform/v1/models/{uid}/stop
 ```
 
 **超时建议：** 首次部署含模型下载，可能数分钟至数十分钟；轮询间隔 2–5s，总超时由平台按模型大小配置。

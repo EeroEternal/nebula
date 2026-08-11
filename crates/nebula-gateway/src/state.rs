@@ -5,7 +5,7 @@ use nebula_common::DualWriteEmitter;
 use nebula_meta::EtcdMetaStore;
 
 use crate::audit::AuditWriter;
-use crate::auth::AuthConfig;
+use crate::platform_auth::GatewayAuth;
 use crate::engine::EngineClient;
 use crate::metrics::Metrics;
 
@@ -16,7 +16,7 @@ pub struct AppState {
     pub router_base_url: String,
     pub http: reqwest::Client,
     pub store: Arc<EtcdMetaStore>,
-    pub auth: AuthConfig,
+    pub auth: GatewayAuth,
     pub metrics: Arc<Metrics>,
     pub dual_write: DualWriteEmitter,
     pub max_request_body_bytes: usize,
@@ -28,8 +28,8 @@ pub struct AppState {
     pub tenant_admission: TenantAdmission,
 }
 
-impl AsRef<AuthConfig> for AppState {
-    fn as_ref(&self) -> &AuthConfig {
-        &self.auth
+impl AsRef<nebula_common::auth::AuthConfig> for AppState {
+    fn as_ref(&self) -> &nebula_common::auth::AuthConfig {
+        &self.auth.env
     }
 }
