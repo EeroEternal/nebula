@@ -452,64 +452,17 @@ async fn load_model_with_request(st: AppState, req: Option<ModelLoadRequest>) ->
         }
     };
 
-    let model_uid = req.model_uid.clone();
-    let replicas = req.replicas.max(1);
-    let config = req.config.clone();
-    let node_id = req.node_id.clone();
-    let gpu_indices = req
-        .gpu_indices
-        .clone()
-        .or_else(|| req.gpu_index.map(|i| vec![i]));
-
-    let create = crate::service::CreateModelRequest {
-        model_name: req.model_name,
-        model_uid: Some(model_uid.clone()),
-        model_source: None,
-        model_path: None,
-        engine_type: req.engine_type,
-        docker_image: req.docker_image,
-        config: config.clone(),
-        labels: None,
-        auto_start: Some(true),
-        replicas: Some(replicas),
-        node_id: node_id.clone(),
-        gpu_indices: gpu_indices.clone(),
-    };
-
-    match crate::service::create_model(&*st.store, "legacy-load".into(), create).await {
-        Ok(spec) => (
+    match nebula_control::load_model(&*st.store, "legacy-load", req).await {
+        Ok(dep) => (
             StatusCode::OK,
             Json(json!({
-                "request_id": spec.model_uid,
-                "model_uid": spec.model_uid,
+                "request_id": dep.model_uid,
+                "model_uid": dep.model_uid,
                 "status": "running_desired",
                 "path": "deployments",
             })),
         )
             .into_response(),
-        Err(crate::service::ServiceError::Conflict(_)) => {
-            let start = crate::service::StartModelRequest {
-                replicas: Some(replicas),
-                config_overrides: config,
-                node_id,
-                gpu_indices,
-                image_id: None,
-                image_override_reason: None,
-            };
-            match crate::service::start_model(&*st.store, &model_uid, start).await {
-                Ok(dep) => (
-                    StatusCode::OK,
-                    Json(json!({
-                        "request_id": dep.model_uid,
-                        "model_uid": dep.model_uid,
-                        "status": "running_desired",
-                        "path": "deployments",
-                    })),
-                )
-                    .into_response(),
-                Err(e) => e.into_response(),
-            }
-        }
         Err(e) => e.into_response(),
     }
 }

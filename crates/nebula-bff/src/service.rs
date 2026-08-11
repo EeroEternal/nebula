@@ -18,74 +18,14 @@ use nebula_common::{
 use nebula_meta::MetaStore;
 
 // ---------------------------------------------------------------------------
-// Service Errors & IntoResponse
+// Service Errors & shared control-plane re-exports
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, thiserror::Error)]
-pub enum ServiceError {
-    #[error("Etcd error: {0}")]
-    Etcd(#[from] anyhow::Error),
-
-    #[error("Serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
-
-    #[error("{0}")]
-    NotFound(String),
-
-    #[error("{0}")]
-    Conflict(String),
-
-    #[error("{0}")]
-    BadRequest(String),
-
-    #[error("Unauthorized")]
-    Unauthorized,
-
-    #[error("Internal error: {0}")]
-    Internal(String),
-
-    #[error("Upstream error: {0}")]
-    Upstream(String),
-}
-
-impl IntoResponse for ServiceError {
-    fn into_response(self) -> Response {
-        let (status, code, message) = match self {
-            ServiceError::Etcd(ref e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "etcd_error",
-                e.to_string(),
-            ),
-            ServiceError::Serialization(ref e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "serialization_error",
-                e.to_string(),
-            ),
-            ServiceError::NotFound(msg) => (StatusCode::NOT_FOUND, "not_found", msg),
-            ServiceError::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg),
-            ServiceError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
-            ServiceError::Unauthorized => (
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "Unauthorized".to_string(),
-            ),
-            ServiceError::Internal(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error", msg)
-            }
-            ServiceError::Upstream(msg) => (StatusCode::BAD_GATEWAY, "upstream_error", msg),
-        };
-
-        let body = json!({
-            "error": {
-                "code": code,
-                "message": message,
-                "request_id": format!("req_{}", Uuid::new_v4()),
-            }
-        });
-
-        (status, Json(body)).into_response()
-    }
-}
+pub use nebula_control::{
+    get_model_deployment, get_model_spec, now_ms, put_model_deployment, put_model_spec, scale_model,
+    start_model, stop_model, ScaleDeploymentRequest as ScaleModelRequest, ServiceError,
+    StartDeploymentRequest as StartModelRequest,
+};
 
 // ---------------------------------------------------------------------------
 // Domain Structs & Views
@@ -204,23 +144,6 @@ pub struct UpdateModelRequest {
 }
 
 #[derive(Deserialize)]
-pub struct StartModelRequest {
-    pub replicas: Option<u32>,
-    pub config_overrides: Option<ModelConfig>,
-    pub node_id: Option<String>,
-    pub gpu_indices: Option<Vec<u32>>,
-    #[serde(default)]
-    pub image_id: Option<String>,
-    #[serde(default)]
-    pub image_override_reason: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct ScaleModelRequest {
-    pub replicas: u32,
-}
-
-#[derive(Deserialize)]
 pub struct DeployTemplateRequest {
     pub model_uid: Option<String>,
     pub replicas: Option<u32>,
@@ -275,13 +198,6 @@ pub struct ListModelsQuery {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
 
 pub fn generate_model_uid(model_name: &str) -> String {
     let uid: String = model_name
@@ -418,26 +334,6 @@ pub fn compute_aggregated_state(
 // Etcd DB Operations Helpers
 // ---------------------------------------------------------------------------
 
-pub async fn get_model_spec(
-    store: &dyn MetaStore,
-    model_uid: &str,
-) -> Result<ModelSpec, ServiceError> {
-    match store.get(&format!("/models/{model_uid}/spec")).await? {
-        Some((data, _)) => serde_json::from_slice(&data).map_err(Into::into),
-        None => Err(ServiceError::NotFound("model not found".to_string())),
-    }
-}
-
-pub async fn get_model_deployment(
-    store: &dyn MetaStore,
-    model_uid: &str,
-) -> Result<Option<ModelDeployment>, ServiceError> {
-    match store.get(&format!("/deployments/{model_uid}")).await? {
-        Some((data, _)) => Ok(Some(serde_json::from_slice(&data)?)),
-        None => Ok(None),
-    }
-}
-
 pub async fn get_model_template(
     store: &dyn MetaStore,
     id: &str,
@@ -446,30 +342,6 @@ pub async fn get_model_template(
         Some((data, _)) => serde_json::from_slice(&data).map_err(Into::into),
         None => Err(ServiceError::NotFound("template not found".to_string())),
     }
-}
-
-pub async fn put_model_spec(
-    store: &dyn MetaStore,
-    model_uid: &str,
-    spec: &ModelSpec,
-) -> Result<(), ServiceError> {
-    let val = serde_json::to_vec(spec)?;
-    store
-        .put(&format!("/models/{model_uid}/spec"), val, None)
-        .await?;
-    Ok(())
-}
-
-pub async fn put_model_deployment(
-    store: &dyn MetaStore,
-    model_uid: &str,
-    dep: &ModelDeployment,
-) -> Result<(), ServiceError> {
-    let val = serde_json::to_vec(dep)?;
-    store
-        .put(&format!("/deployments/{model_uid}"), val, None)
-        .await?;
-    Ok(())
 }
 
 pub async fn put_model_template(
@@ -536,22 +408,21 @@ pub async fn create_model(
     put_model_spec(store, &uid, &spec).await?;
 
     if req.auto_start.unwrap_or(false) {
-        let deployment = ModelDeployment {
-            model_uid: uid.clone(),
-            desired_state: DesiredState::Running,
-            replicas: req.replicas.unwrap_or(1),
-            min_replicas: None,
-            max_replicas: None,
-            node_affinity: req.node_id,
-            gpu_affinity: req.gpu_indices,
-            config_overrides: None,
-            image_id: None,
-            image_override_reason: None,
-            compat_rule_ids: vec![],
-            version: 1,
-            updated_at_ms: now,
-        };
-        put_model_deployment(store, &uid, &deployment).await?;
+        start_model(
+            store,
+            &uid,
+            StartModelRequest {
+                replicas: req.replicas,
+                min_replicas: None,
+                max_replicas: None,
+                config_overrides: None,
+                node_id: req.node_id,
+                gpu_indices: req.gpu_indices,
+                image_id: None,
+                image_override_reason: None,
+            },
+        )
+        .await?;
     }
 
     Ok(spec)
@@ -880,142 +751,6 @@ pub async fn delete_model(store: &dyn MetaStore, model_uid: &str) -> Result<usiz
     Ok(queued_gc_nodes)
 }
 
-pub async fn start_model(
-    store: &dyn MetaStore,
-    model_uid: &str,
-    req: StartModelRequest,
-) -> Result<ModelDeployment, ServiceError> {
-    // Verify spec exists and engine/config are still valid before scheduling.
-    let spec = get_model_spec(store, model_uid).await?;
-    let effective_config = req
-        .config_overrides
-        .as_ref()
-        .or(spec.config.as_ref());
-    ensure_engine_config(spec.engine_type.as_deref(), effective_config)?;
-
-    let image_id = req
-        .image_id
-        .clone()
-        .or_else(|| spec.docker_image.clone());
-    let compat_ids = crate::compat_slo::validate_deploy_compat(
-        store,
-        spec.engine_type.as_deref().unwrap_or("vllm"),
-        None,
-        image_id.as_deref(),
-        spec.docker_image.as_deref(),
-        req.node_id.as_deref(),
-        req.image_override_reason.as_deref(),
-    )
-    .await?;
-
-    let now = now_ms();
-    let deployment = match get_model_deployment(store, model_uid).await? {
-        Some(mut dep) => {
-            dep.desired_state = DesiredState::Running;
-            if let Some(r) = req.replicas {
-                dep.replicas = r;
-            }
-            if req.config_overrides.is_some() {
-                dep.config_overrides = req.config_overrides;
-            }
-            if req.node_id.is_some() {
-                dep.node_affinity = req.node_id;
-            }
-            if req.gpu_indices.is_some() {
-                dep.gpu_affinity = req.gpu_indices;
-            }
-            if req.image_id.is_some() {
-                dep.image_id = req.image_id;
-            } else if dep.image_id.is_none() {
-                dep.image_id = image_id.clone();
-            }
-            if req.image_override_reason.is_some() {
-                dep.image_override_reason = req.image_override_reason;
-            }
-            dep.compat_rule_ids = compat_ids;
-            dep.version += 1;
-            dep.updated_at_ms = now;
-            dep
-        }
-        None => ModelDeployment {
-            model_uid: model_uid.to_string(),
-            desired_state: DesiredState::Running,
-            replicas: req.replicas.unwrap_or(1),
-            min_replicas: None,
-            max_replicas: None,
-            node_affinity: req.node_id,
-            gpu_affinity: req.gpu_indices,
-            config_overrides: req.config_overrides,
-            image_id,
-            image_override_reason: req.image_override_reason,
-            compat_rule_ids: compat_ids,
-            version: 1,
-            updated_at_ms: now,
-        },
-    };
-
-    put_model_deployment(store, model_uid, &deployment).await?;
-    Ok(deployment)
-}
-
-pub async fn stop_model(
-    store: &dyn MetaStore,
-    model_uid: &str,
-) -> Result<ModelDeployment, ServiceError> {
-    // Verify spec exists
-    get_model_spec(store, model_uid).await?;
-
-    let now = now_ms();
-    let deployment = match get_model_deployment(store, model_uid).await? {
-        Some(mut dep) => {
-            dep.desired_state = DesiredState::Stopped;
-            dep.version += 1;
-            dep.updated_at_ms = now;
-            dep
-        }
-        None => ModelDeployment {
-            model_uid: model_uid.to_string(),
-            desired_state: DesiredState::Stopped,
-            replicas: 0,
-            min_replicas: None,
-            max_replicas: None,
-            node_affinity: None,
-            gpu_affinity: None,
-            config_overrides: None,
-            image_id: None,
-            image_override_reason: None,
-            compat_rule_ids: vec![],
-            version: 1,
-            updated_at_ms: now,
-        },
-    };
-
-    put_model_deployment(store, model_uid, &deployment).await?;
-    Ok(deployment)
-}
-
-pub async fn scale_model(
-    store: &dyn MetaStore,
-    model_uid: &str,
-    req: ScaleModelRequest,
-) -> Result<ModelDeployment, ServiceError> {
-    let mut dep = match get_model_deployment(store, model_uid).await? {
-        Some(d) => d,
-        None => {
-            return Err(ServiceError::NotFound(
-                "deployment not found (model may not be started)".to_string(),
-            ))
-        }
-    };
-
-    dep.replicas = req.replicas;
-    dep.version += 1;
-    dep.updated_at_ms = now_ms();
-
-    put_model_deployment(store, model_uid, &dep).await?;
-    Ok(dep)
-}
-
 // ---------------------------------------------------------------------------
 // Template CRUD
 // ---------------------------------------------------------------------------
@@ -1158,22 +893,21 @@ pub async fn deploy_template(
 
     put_model_spec(store, &uid, &spec).await?;
 
-    let deployment = ModelDeployment {
-        model_uid: uid.clone(),
-        desired_state: DesiredState::Running,
-        replicas: req.replicas.unwrap_or(tpl.default_replicas),
-        min_replicas: None,
-        max_replicas: None,
-        node_affinity: req.node_id,
-        gpu_affinity: req.gpu_indices,
-        config_overrides: req.config_overrides,
-        image_id: None,
-        image_override_reason: None,
-        compat_rule_ids: vec![],
-        version: 1,
-        updated_at_ms: now,
-    };
-    put_model_deployment(store, &uid, &deployment).await?;
+    start_model(
+        store,
+        &uid,
+        StartModelRequest {
+            replicas: Some(req.replicas.unwrap_or(tpl.default_replicas)),
+            min_replicas: None,
+            max_replicas: None,
+            config_overrides: req.config_overrides,
+            node_id: req.node_id,
+            gpu_indices: req.gpu_indices,
+            image_id: None,
+            image_override_reason: None,
+        },
+    )
+    .await?;
 
     Ok(spec)
 }
