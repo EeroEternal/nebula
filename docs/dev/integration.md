@@ -227,8 +227,17 @@ Base：`http://<gateway-host>:8081/platform/v1`
 | GET | `/operations/{id}/events` | SSE 推送 operation 状态（替代轮询） |
 | GET | `/health/summary` | 控制面健康摘要 |
 | GET | `/audit-logs` | 审计只读（admin；需 xtrace） |
+| GET/POST/DELETE | `/webhooks` | Operation 事件 Webhook 订阅（需 Postgres） |
 
-写操作返回 **202** + `operation_id`；可轮询 `GET /operations/{id}` 或订阅 SSE 直到 `succeeded`。支持 `Idempotency-Key` 请求头（24h 内同 key + 同 body 返回同一 `operation_id`）。
+写操作返回 **202** + `operation_id`；可轮询 `GET /operations/{id}`、订阅 SSE，或配置 **Webhook**（见下）直到 `succeeded`。支持 `Idempotency-Key` 请求头（24h 内同 key + 同 body 返回同一 `operation_id`）。
+
+**异构放置（I2.4）：** 写 deployment 时可选 `replica_specs` 数组，长度须等于 `replicas`；每项可指定 `node_id`、`gpu_indices`、`config_overrides`、`image_id`。未指定字段继承 deployment 级 `node_id` / `gpu_indices`。Scheduler 按序 reconcile 为 per-replica `PlacementAssignment`。
+
+**Operation Webhook（I2.5）：**
+
+- **单次回调：** 写请求体 `callback_url`（HTTPS），或 `POST …/stop` 时使用请求头 `X-Nebula-Callback-Url`。
+- **持久订阅：** `POST /platform/v1/webhooks` 注册 `{ "name", "url", "secret" }`（需 `NEBULA_PLATFORM_DB_URL`）；Operation 状态变更时 POST 全量 `Operation` JSON，带 `X-Nebula-Signature: sha256=…`（HMAC-SHA256）。
+- 交付为 best-effort，不阻塞 Operation 完成。
 
 推理响应会回显 `x-nebula-request-id`；可选请求头 `x-nebula-replica-id` 固定 Router 选路到指定副本。
 
@@ -522,7 +531,7 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 | 项 | 现状 |
 |----|------|
 | **指定 replica 推理** | 可选：请求头 `x-nebula-replica-id` 固定 Router 选路；默认仍自动负载均衡 + `x-session-id` 亲和 |
-| **Per-replica 异构放置** | 部署级 `node_id` / `gpu_indices`；多副本跨不同节点需多次单副本部署或等产品扩展（I2.4） |
+| **Per-replica 异构放置** | 支持：`replica_specs[]`（长度 = `replicas`），每项独立 `node_id` / `gpu_indices` |
 | **BFF 机机 API** | 无；集成统一走 Gateway `/platform/v1` |
 | **纳管外部已有推理集群** | 非产品承诺路径 |
 | **训练 / 云 API 聚合** | 不在 Nebula 范围 |

@@ -19,10 +19,11 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use nebula_control::{
-    cluster_counts, create_model, create_operation, etcd_health, evaluate_slo_from_router_metrics,
-    filter_canaries_by_model, get_canary, get_model, get_model_deployment, get_operation, get_slo,
-    list_canaries, list_models, list_nodes, list_replicas, load_model, scale_model, start_model,
-    stop_model, ComponentHealth, ComponentStatus, CreateModelRequest, HealthSummary, OperationKind,
+    callback_url_from_scale, callback_url_from_start, cluster_counts, create_model, create_operation,
+    etcd_health, evaluate_slo_from_router_metrics, filter_canaries_by_model, get_canary,
+    get_model, get_model_deployment, get_operation, get_slo, list_canaries, list_models,
+    list_nodes, list_replicas, load_model, scale_model, start_model, stop_model, ComponentHealth,
+    ComponentStatus, CreateModelRequest, HealthSummary, OperationKind, OperationOptions,
     OperationStatus, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
 };
 
@@ -60,10 +61,25 @@ async fn finish_write(
     body: &[u8],
     op: nebula_control::Operation,
 ) -> Response {
+    crate::platform_webhooks::spawn_operation_webhooks(
+        st.http.clone(),
+        st.store.clone(),
+        st.auth.webhooks.clone(),
+        ctx.principal.clone(),
+        op.operation_id.clone(),
+        op.callback_url.clone(),
+    );
     if let Err(e) = record_idempotency(&st.store, &ctx.principal, headers, path, body, &op).await {
         return control_error(e);
     }
     operation_accepted(op)
+}
+
+fn callback_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-nebula-callback-url")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
 }
 
 pub async fn platform_health_summary(
@@ -218,11 +234,21 @@ pub async fn platform_put_deployment(
             return control_error(ServiceError::BadRequest(format!("invalid json: {e}")));
         }
     };
+    let callback_url = callback_url_from_start(&req);
     match start_model(&*st.store, &model_uid, req).await {
-        Ok(dep) => match create_operation(&*st.store, OperationKind::Deploy, &dep).await {
-            Ok(op) => finish_write(&st, &ctx, &headers, &path, &body, op).await,
-            Err(e) => control_error(e),
-        },
+        Ok(dep) => {
+            match create_operation(
+                &*st.store,
+                OperationKind::Deploy,
+                &dep,
+                OperationOptions { callback_url },
+            )
+            .await
+            {
+                Ok(op) => finish_write(&st, &ctx, &headers, &path, &body, op).await,
+                Err(e) => control_error(e),
+            }
+        }
         Err(e) => control_error(e),
     }
 }
@@ -243,11 +269,24 @@ pub async fn platform_stop_model(
         Ok(None) => {}
         Err(e) => return control_error(e),
     }
+    let callback_url = callback_from_headers(&headers);
+    if let Err(e) = nebula_control::validate_callback_url(callback_url.as_deref()) {
+        return control_error(e);
+    }
     match stop_model(&*st.store, &model_uid).await {
-        Ok(dep) => match create_operation(&*st.store, OperationKind::Stop, &dep).await {
-            Ok(op) => finish_write(&st, &ctx, &headers, &path, body, op).await,
-            Err(e) => control_error(e),
-        },
+        Ok(dep) => {
+            match create_operation(
+                &*st.store,
+                OperationKind::Stop,
+                &dep,
+                OperationOptions { callback_url },
+            )
+            .await
+            {
+                Ok(op) => finish_write(&st, &ctx, &headers, &path, body, op).await,
+                Err(e) => control_error(e),
+            }
+        }
         Err(e) => control_error(e),
     }
 }
@@ -274,11 +313,21 @@ pub async fn platform_scale_deployment(
             return control_error(ServiceError::BadRequest(format!("invalid json: {e}")));
         }
     };
+    let callback_url = callback_url_from_scale(&req);
     match scale_model(&*st.store, &model_uid, req).await {
-        Ok(dep) => match create_operation(&*st.store, OperationKind::Scale, &dep).await {
-            Ok(op) => finish_write(&st, &ctx, &headers, &path, &body, op).await,
-            Err(e) => control_error(e),
-        },
+        Ok(dep) => {
+            match create_operation(
+                &*st.store,
+                OperationKind::Scale,
+                &dep,
+                OperationOptions { callback_url },
+            )
+            .await
+            {
+                Ok(op) => finish_write(&st, &ctx, &headers, &path, &body, op).await,
+                Err(e) => control_error(e),
+            }
+        }
         Err(e) => control_error(e),
     }
 }
@@ -305,10 +354,19 @@ pub async fn platform_load_model(
         }
     };
     match load_model(&*st.store, &ctx.principal, req).await {
-        Ok(dep) => match create_operation(&*st.store, OperationKind::Deploy, &dep).await {
-            Ok(op) => finish_write(&st, &ctx, &headers, path, &body, op).await,
-            Err(e) => control_error(e),
-        },
+        Ok((dep, callback_url)) => {
+            match create_operation(
+                &*st.store,
+                OperationKind::Deploy,
+                &dep,
+                OperationOptions { callback_url },
+            )
+            .await
+            {
+                Ok(op) => finish_write(&st, &ctx, &headers, path, &body, op).await,
+                Err(e) => control_error(e),
+            }
+        }
         Err(e) => control_error(e),
     }
 }

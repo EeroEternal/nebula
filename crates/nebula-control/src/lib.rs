@@ -12,8 +12,8 @@ pub mod store;
 
 pub use compat::{list_compat_rules, validate_deploy_compat};
 pub use deploy::{
-    load_model, scale_model, start_model, stop_model, ScaleDeploymentRequest,
-    StartDeploymentRequest,
+    callback_url_from_scale, callback_url_from_start, load_model, scale_model, start_model,
+    stop_model, validate_callback_url, ScaleDeploymentRequest, StartDeploymentRequest,
 };
 pub use error::ServiceError;
 pub use governance::{
@@ -24,7 +24,8 @@ pub use idempotency::{get_idempotency, hash_body, put_idempotency, IdempotencyRe
 pub use inventory::{list_endpoints, list_nodes, list_replicas, NodeInventory, ReplicaView};
 pub use models::{create_model, get_model, list_models, CreateModelRequest};
 pub use operation::{
-    create_operation, get_operation, Operation, OperationKind, OperationResponse, OperationStatus,
+    create_operation, get_operation, Operation, OperationKind, OperationOptions, OperationResponse,
+    OperationStatus,
 };
 pub use router_metrics::evaluate_slo_from_router_metrics;
 pub use store::{

@@ -148,6 +148,7 @@ impl ApiKeyStore {
 pub struct GatewayAuth {
     pub env: AuthConfig,
     pub api_keys: Option<Arc<ApiKeyStore>>,
+    pub webhooks: Option<Arc<crate::platform_webhooks::WebhookStore>>,
 }
 
 impl AsRef<AuthConfig> for GatewayAuth {
@@ -158,22 +159,39 @@ impl AsRef<AuthConfig> for GatewayAuth {
 
 pub async fn build_gateway_auth() -> GatewayAuth {
     let env = parse_auth_from_env();
-    let api_keys = match std::env::var("NEBULA_PLATFORM_DB_URL")
+    let (api_keys, webhooks) = match std::env::var("NEBULA_PLATFORM_DB_URL")
         .or_else(|_| std::env::var("NEBULA_BFF_DATABASE_URL"))
     {
-        Ok(url) if !url.trim().is_empty() => match ApiKeyStore::connect(&url).await {
-            Ok(store) => {
-                tracing::info!("platform API key store enabled (Postgres)");
-                Some(Arc::new(store))
-            }
-            Err(e) => {
-                tracing::error!(error=%e, "failed to connect platform API key database");
-                None
-            }
-        },
-        _ => None,
+        Ok(url) if !url.trim().is_empty() => {
+            let api_keys = match ApiKeyStore::connect(&url).await {
+                Ok(store) => {
+                    tracing::info!("platform API key store enabled (Postgres)");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    tracing::error!(error=%e, "failed to connect platform API key database");
+                    None
+                }
+            };
+            let webhooks = match crate::platform_webhooks::WebhookStore::connect(&url).await {
+                Ok(store) => {
+                    tracing::info!("platform webhook store enabled (Postgres)");
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    tracing::error!(error=%e, "failed to connect platform webhook database");
+                    None
+                }
+            };
+            (api_keys, webhooks)
+        }
+        _ => (None, None),
     };
-    GatewayAuth { env, api_keys }
+    GatewayAuth {
+        env,
+        api_keys,
+        webhooks,
+    }
 }
 
 fn extract_bearer(req: &Request<Body>) -> Option<String> {

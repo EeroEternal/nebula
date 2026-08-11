@@ -28,6 +28,11 @@ pub enum OperationStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct OperationOptions {
+    pub callback_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
     pub operation_id: String,
@@ -39,6 +44,8 @@ pub struct Operation {
     pub ready_replicas: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
@@ -52,6 +59,7 @@ pub async fn create_operation(
     store: &dyn MetaStore,
     kind: OperationKind,
     deployment: &ModelDeployment,
+    opts: OperationOptions,
 ) -> Result<Operation, ServiceError> {
     let now = now_ms();
     let operation_id = format!("op_{}", Uuid::new_v4());
@@ -68,6 +76,7 @@ pub async fn create_operation(
         },
         ready_replicas: 0,
         message: None,
+        callback_url: opts.callback_url,
         created_at_ms: now,
         updated_at_ms: now,
     };

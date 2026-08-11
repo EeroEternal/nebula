@@ -327,26 +327,42 @@ pub async fn build_plan_from_deployment(
     mut used_gpus: HashMap<String, HashSet<u32>>,
 ) -> anyhow::Result<PlacementPlan> {
     let replicas = deployment.replicas.max(1);
-
-    // Merge config: spec.config as base, deployment.config_overrides on top
-    let merged_config = merge_config(spec.config.as_ref(), deployment.config_overrides.as_ref());
-    let extra_args = merged_config
-        .as_ref()
-        .and_then(|c| build_extra_args_from_config(spec.engine_type.as_deref(), c));
-
     let mut assignments = Vec::with_capacity(replicas as usize);
 
     for replica_id in 0..replicas {
-        // Node/GPU selection: respect affinity overrides from deployment
-        let image_ref = deployment
-            .image_id
-            .as_deref()
+        let replica_spec = deployment
+            .replica_specs
+            .as_ref()
+            .and_then(|specs| specs.get(replica_id as usize));
+
+        let merged_config = {
+            let base = merge_config(spec.config.as_ref(), deployment.config_overrides.as_ref());
+            merge_config(
+                base.as_ref(),
+                replica_spec.and_then(|s| s.config_overrides.as_ref()),
+            )
+        };
+        let extra_args = merged_config
+            .as_ref()
+            .and_then(|c| build_extra_args_from_config(spec.engine_type.as_deref(), c));
+
+        let node_affinity = replica_spec
+            .and_then(|s| s.node_id.as_deref())
+            .or(deployment.node_affinity.as_deref());
+        let gpu_affinity = replica_spec
+            .and_then(|s| s.gpu_indices.as_deref())
+            .or(deployment.gpu_affinity.as_deref());
+
+        let image_ref = replica_spec
+            .and_then(|s| s.image_id.as_deref())
+            .or(deployment.image_id.as_deref())
             .or(spec.docker_image.as_deref());
+
         let (node_id, gpu_indices) = select_node_and_gpus_for_deployment(
             store,
             &merged_config,
-            deployment.node_affinity.as_deref(),
-            deployment.gpu_affinity.as_deref(),
+            node_affinity,
+            gpu_affinity,
             &used_gpus,
             image_ref,
         )
@@ -371,9 +387,9 @@ pub async fn build_plan_from_deployment(
             gpu_indices,
             extra_args.clone(),
             spec.engine_type.clone(),
-            deployment
-                .image_id
-                .clone()
+            replica_spec
+                .and_then(|s| s.image_id.clone())
+                .or_else(|| deployment.image_id.clone())
                 .or_else(|| spec.docker_image.clone()),
         ));
     }

@@ -7,7 +7,7 @@ info:
     Legacy `/v1/admin/*` is deprecated — responses include `Deprecation: true`
     and `Sunset: Thu, 11 Feb 2027 23:59:59 GMT` (removal target v1.6.0).
     See docs/dev/integration.md and docs/dev/integration-plan.md.
-  version: 1.2.0-i4
+  version: 1.3.0-i6
 
 servers:
   - url: http://127.0.0.1:8081
@@ -251,6 +251,43 @@ paths:
         '200':
           description: CanaryRelease
 
+  /platform/v1/webhooks:
+    get:
+      summary: List webhook subscriptions
+      operationId: platformListWebhooks
+      tags: [Platform v1]
+      responses:
+        '200':
+          description: WebhookSubscription list
+    post:
+      summary: Create webhook subscription
+      operationId: platformCreateWebhook
+      tags: [Platform v1]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookRequest'
+      responses:
+        '201':
+          description: WebhookSubscription created
+
+  /platform/v1/webhooks/{webhook_id}:
+    delete:
+      summary: Revoke webhook subscription
+      operationId: platformDeleteWebhook
+      tags: [Platform v1]
+      parameters:
+        - name: webhook_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Revoked
+
   /v1/admin/models/load:
     post:
       summary: Deploy or update model (legacy)
@@ -403,8 +440,57 @@ components:
           type: array
           items:
             type: integer
+        replica_specs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReplicaPlacementSpec'
         config_overrides:
           type: object
+        callback_url:
+          type: string
+          format: uri
+          description: HTTPS webhook for this Operation only
+
+    ReplicaPlacementSpec:
+      type: object
+      properties:
+        node_id:
+          type: string
+        gpu_indices:
+          type: array
+          items:
+            type: integer
+        config_overrides:
+          type: object
+        image_id:
+          type: string
+
+    CreateWebhookRequest:
+      type: object
+      required: [name, url, secret]
+      properties:
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+        secret:
+          type: string
+          minLength: 16
+
+    WebhookSubscription:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+        principal:
+          type: string
+        created_at_ms:
+          type: integer
 
     OperationAccepted:
       type: object

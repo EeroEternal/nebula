@@ -453,7 +453,7 @@ async fn load_model_with_request(st: AppState, req: Option<ModelLoadRequest>) ->
     };
 
     match nebula_control::load_model(&*st.store, "legacy-load", req).await {
-        Ok(dep) => (
+        Ok((dep, _)) => (
             StatusCode::OK,
             Json(json!({
                 "request_id": dep.model_uid,

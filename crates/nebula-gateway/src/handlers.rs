@@ -936,7 +936,7 @@ pub async fn admin_load_model(
     }
 
     match nebula_control::load_model(&*st.store, &ctx.principal, req).await {
-        Ok(deployment) => {
+        Ok((deployment, _)) => {
             let body = json!({
                 "request_id": deployment.model_uid,
                 "model_uid": deployment.model_uid,
@@ -987,6 +987,7 @@ pub async fn admin_scale_request(
         &model_uid,
         nebula_control::ScaleDeploymentRequest {
             replicas: body.replicas,
+            callback_url: None,
         },
     )
     .await

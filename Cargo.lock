@@ -1480,6 +1480,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "hmac",
  "http",
  "nebula-common",
  "nebula-control",
