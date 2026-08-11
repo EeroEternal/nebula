@@ -21,11 +21,13 @@
 | Recommend（`model_name`=deployment uid） | PASS（confidence=low，样本=1） |
 | `phase0_slo_burn` 离线可用性评估 | PASS（双引擎 `compliant`，5xx=0） |
 | `phase0_tenant_isolation` | PASS（A 限流 429 / B 隔离 / ACL 403） |
-| abort 契约（`test_cancel_sse` / 主动断流） | FAIL（`nebula_router_requests_aborted_total` 未 +1） |
-| BFF `slos/*/evaluate` 的 ttft/latency | 部分（availability 有；ttft_p95/latency_p95 缺，尽管 Router 已暴露 histogram） |
+| abort 契约（`test_cancel_sse` / 主动断流） | FAIL → 已修脚本（硬关 TCP）；Router 路径本身可用 |
+| BFF `slos/*/evaluate` 的 ttft/latency | FAIL → 根因：多 `model_uid` histogram 未按 `le` 合并；已修解析 + 按模型过滤 |
 | 生产 etcd 三节点切入 | ⏸ |
 | Prometheus 告警实触发 | ⏸ |
 
 ## 结论
 
-pro6000 上 **Gateway→Router→双引擎** 主路径与 **多租户隔离** 已通过；控制面可滚动升级且复用引擎。遗留：abort 计数未涨、BFF evaluate 未吃到 TTFT histogram、生产 etcd HA 与告警实触发仍待维护窗。
+pro6000 上 **Gateway→Router→双引擎** 主路径与 **多租户隔离** 已通过；控制面可滚动升级且复用引擎。
+
+跟进（同 PR）：histogram 分位数合并 + 按 `model_uid` 过滤；`test_cancel_sse.sh` 改为中途硬关连接。生产 etcd HA 与告警实触发仍待维护窗。

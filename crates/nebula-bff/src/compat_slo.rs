@@ -303,11 +303,14 @@ pub async fn delete_slo(store: &dyn MetaStore, model_uid: &str) -> Result<(), Se
 }
 
 /// Evaluate SLO using Router metrics text. Low/no traffic → insufficient_data.
+///
+/// Histograms are filtered by `slo.model_uid` so multi-model scrapes do not
+/// collapse to a bogus zero quantile (see `parse_histogram_quantile_filtered`).
 pub fn evaluate_slo_from_router_metrics(
     slo: &ModelSlo,
     metrics_text: &str,
 ) -> SloEvaluation {
-    use crate::service::{normalize_zero, parse_histogram_quantile, parse_metric_sum};
+    use crate::service::{normalize_zero, parse_histogram_quantile_filtered, parse_metric_sum};
     let window_secs = match slo.window.as_str() {
         "5m" => 300.0,
         "15m" => 900.0,
@@ -330,8 +333,14 @@ pub fn evaluate_slo_from_router_metrics(
     } else {
         None
     };
+    let model = Some(slo.model_uid.as_str());
     let ttft = {
-        let s = parse_histogram_quantile(metrics_text, "nebula_route_ttft_seconds", 0.95);
+        let s = parse_histogram_quantile_filtered(
+            metrics_text,
+            "nebula_route_ttft_seconds",
+            0.95,
+            model,
+        );
         if s > 0.0 {
             Some(normalize_zero(s * 1000.0))
         } else {
@@ -339,7 +348,12 @@ pub fn evaluate_slo_from_router_metrics(
         }
     };
     let latency = {
-        let s = parse_histogram_quantile(metrics_text, "nebula_route_latency_seconds", 0.95);
+        let s = parse_histogram_quantile_filtered(
+            metrics_text,
+            "nebula_route_latency_seconds",
+            0.95,
+            model,
+        );
         if s > 0.0 {
             Some(normalize_zero(s * 1000.0))
         } else {
@@ -447,3 +461,58 @@ pub async fn list_diagnostic_events(
 
 /// Re-export for callers that need the reject type.
 pub type DeployReject = PlacementRejectReason;
+
+#[cfg(test)]
+mod slo_eval_tests {
+    use super::*;
+    use nebula_common::ModelSlo;
+
+    #[test]
+    fn evaluate_reads_per_model_histogram_with_siblings() {
+        let slo = ModelSlo {
+            model_uid: "a".into(),
+            availability_target: Some(0.99),
+            ttft_p95_ms: Some(2000.0),
+            tpot_p95_ms: None,
+            latency_p95_ms: Some(30000.0),
+            throughput_tps: None,
+            window: "15m".into(),
+            exclude_abort_from_error_budget: true,
+            exclude_drain_from_error_budget: true,
+            notes: None,
+            updated_at_ms: 1,
+        };
+        // Enough traffic for request_rate >= 0.1 over 15m (90+ req).
+        let text = r#"
+nebula_router_requests_total 120
+nebula_router_responses_5xx 0
+nebula_router_requests_aborted_total 0
+nebula_route_ttft_seconds_bucket{model_uid="a",le="0.05"} 10
+nebula_route_ttft_seconds_bucket{model_uid="a",le="+Inf"} 10
+nebula_route_ttft_seconds_bucket{model_uid="b",le="0.05"} 10
+nebula_route_ttft_seconds_bucket{model_uid="b",le="+Inf"} 10
+nebula_route_latency_seconds_bucket{model_uid="a",le="0.5"} 100
+nebula_route_latency_seconds_bucket{model_uid="a",le="+Inf"} 100
+nebula_route_latency_seconds_bucket{model_uid="b",le="0.5"} 100
+nebula_route_latency_seconds_bucket{model_uid="b",le="+Inf"} 100
+"#;
+        let ev = evaluate_slo_from_router_metrics(&slo, text);
+        assert_ne!(
+            ev.status,
+            nebula_common::SloComplianceStatus::InsufficientData,
+            "{ev:?}"
+        );
+        let ttft = ev
+            .samples
+            .iter()
+            .find(|s| s.name == "ttft_p95")
+            .and_then(|s| s.value);
+        let lat = ev
+            .samples
+            .iter()
+            .find(|s| s.name == "latency_p95")
+            .and_then(|s| s.value);
+        assert_eq!(ttft, Some(50.0), "0.05s -> 50ms");
+        assert_eq!(lat, Some(500.0), "0.5s -> 500ms");
+    }
+}
