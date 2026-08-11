@@ -136,8 +136,8 @@ Internal    Router / Scheduler / etcd       永不对外
 | I2.1 | Operation **SSE** `…/operations/{id}/events` | 异步 reconcile 天然有阶段 | 建议做；替代轮询 | ✅ |
 | I2.2 | 推理响应回显 `x-nebula-request-id` / trace | 已有 ExecutionContext + OTel | 建议做；低成本 | ✅ |
 | I2.3 | **`x-nebula-replica-id`** 固定 Router 选路 | Router 扩展；默认仍自动负载均衡 | 可选；显式 opt-in | ✅ |
-| I2.4 | Deployment **`replicas[]` 放置明细** | 对齐 `PlacementAssignment` | 仅当「多副本异构落位」产品承诺时做 |
-| I2.5 | Webhook 订阅 | Operation 事件外推 | 有企业集成需求时做 |
+| I2.4 | Deployment **`replica_specs[]` 放置明细** | 对齐 `PlacementAssignment` | 多副本异构落位 | ✅ |
+| I2.5 | Webhook 订阅 + `callback_url` | Operation 事件外推 | Postgres 订阅 + 单次回调 | ✅ |
 
 **原则：** v1 集成不依赖 I2；I2 不改变 Tier A 冻结语义。
 
@@ -182,7 +182,7 @@ Tier C 治理读 API（SLO 状态、Canary 阶段）若要做，在 I3 之后单
 | I5.2 | `integration.md` 与 I2/I4 实现对齐 | replica pin、compat、治理读 API | ✅ |
 | I5.3 | CHANGELOG + `versions/v1.5.0.md` | I0–I4 集成面发布说明 | ✅ |
 
-I2.4 / I2.5 仍按需排期，不阻塞 v1.5 发布。
+I2.4 / I2.5 已完成；Integration 计划全部交付。
 
 ---
 
@@ -191,7 +191,7 @@ I2.4 / I2.5 仍按需排期，不阻塞 v1.5 发布。
 ```text
 I0  单一 control service + compat + 错误/OpenAPI
  └─ I1  /platform/v1（Tier A）
-      └─ I2  按需 Tier C（SSE → replica pin → 异构放置 → webhook）
+      └─ I2  按需 Tier C（SSE → replica pin → 异构放置 → webhook）✅
            └─ I3  health / 审计 / 幂等 / v1 冻结
                 └─ I4  治理读 API（SLO / Canary 只读）✅
                      └─ I5  Legacy sunset + v1.5 发布说明 ✅

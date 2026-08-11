@@ -41,6 +41,14 @@ pub struct ModelLoadRequest {
     /// Docker image override for the engine. If set, takes precedence over node CLI config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_image: Option<String>,
+
+    /// Per-replica placement; length must equal `replicas` when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replica_specs: Option<Vec<crate::model_deployment::ReplicaPlacementSpec>>,
+
+    /// One-shot webhook URL for the async Operation lifecycle (HTTPS recommended).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
 }
 
 fn default_replicas() -> u32 {

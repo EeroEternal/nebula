@@ -175,6 +175,7 @@ mod tests {
             max_replicas: None,
             node_affinity: None,
             gpu_affinity: None,
+            replica_specs: None,
             config_overrides: None,
             image_id: None,
             image_override_reason: None,

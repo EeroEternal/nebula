@@ -397,6 +397,7 @@ pub fn draft_from_candidate(
         max_replicas: None,
         node_affinity: None,
         gpu_affinity: None,
+        replica_specs: None,
         config_overrides: Some(ModelConfig {
             tensor_parallel_size: Some(1),
             gpu_memory_utilization: None,

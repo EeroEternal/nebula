@@ -11,8 +11,11 @@ The format is based on Keep a Changelog.
 ### Added
 - **Control API `/platform/v1/*` (I1):** ModelSpec CRUD, deployment load/scale/stop, replicas/nodes inventory, async Operations, Postgres API Key auth (`control` / `inference` / `admin` scope).
 - **Integration I2:** Operation SSE (`GET …/operations/{id}/events`), inference `x-nebula-request-id` echo, optional `x-nebula-replica-id` replica pin.
+- **Integration I2.4:** Per-replica heterogeneous placement via `replica_specs[]` on deployment.
+- **Integration I2.5:** Operation webhooks — `callback_url` on write requests + `GET/POST/DELETE /platform/v1/webhooks` subscriptions (Postgres, HMAC signature).
 - **Integration I3:** `GET /platform/v1/health/summary`, audit-logs read API, `Idempotency-Key` on Control POST, OpenAPI contract CI.
 - **Integration I4:** Governance read API — `GET …/models/{uid}/slo`, `…/slo/evaluation`, `GET /canaries`.
+- **Integration I5:** Legacy Admin `Sunset` header (2027-02-11, removal v1.6.0).
 - **`nebula-control` crate (I0):** Single write path for Gateway Admin and BFF; unified compat matrix and C3 errors.
 
 ### Changed

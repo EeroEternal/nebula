@@ -47,7 +47,7 @@ pub use model_cache::{
     AlertType, DiskAlert, DownloadPhase, DownloadProgress, EngineAlertType, EngineProbeAlert,
     ModelCacheEntry, NodeDiskStatus,
 };
-pub use model_deployment::{DesiredState, ModelDeployment};
+pub use model_deployment::{DesiredState, ModelDeployment, ReplicaPlacementSpec, validate_replica_specs};
 pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};
 pub use model_template::{ModelTemplate, TemplateCategory, TemplateSource};

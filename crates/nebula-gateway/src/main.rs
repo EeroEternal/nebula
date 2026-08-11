@@ -9,6 +9,7 @@ mod metrics;
 mod platform_auth;
 mod platform_idempotency;
 mod platform_v1;
+mod platform_webhooks;
 mod protocol_adapt;
 mod proxy_common;
 mod responses;
@@ -44,6 +45,9 @@ use crate::platform_v1::{
     platform_list_models, platform_list_nodes, platform_list_replicas, platform_load_model,
     platform_operation_events, platform_put_deployment, platform_scale_deployment,
     platform_stop_model,
+};
+use crate::platform_webhooks::{
+    platform_create_webhook, platform_delete_webhook, platform_list_webhooks,
 };
 use crate::state::AppState;
 use crate::util::read_engine_env_file;
@@ -195,6 +199,8 @@ async fn main() {
         .route("/models/:model_uid/slo", get(platform_get_slo))
         .route("/canaries", get(platform_list_canaries))
         .route("/canaries/:canary_id", get(platform_get_canary))
+        .route("/webhooks", get(platform_list_webhooks).post(platform_create_webhook))
+        .route("/webhooks/:webhook_id", axum::routing::delete(platform_delete_webhook))
         .with_state(st.clone());
 
     let secure_routes = Router::new()
