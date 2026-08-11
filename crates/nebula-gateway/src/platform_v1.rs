@@ -485,10 +485,19 @@ pub async fn platform_get_canary(
     }
 }
 
+/// RFC 8594 sunset for legacy `/v1/admin/*` (removal target v1.6.0).
+pub const LEGACY_ADMIN_SUNSET: &str = "Thu, 11 Feb 2027 23:59:59 GMT";
+
 pub fn apply_legacy_deprecation_headers(headers: &mut HeaderMap) {
     headers.insert(
         "Deprecation",
         "true".parse().expect("valid header value"),
+    );
+    headers.insert(
+        "Sunset",
+        LEGACY_ADMIN_SUNSET
+            .parse()
+            .expect("valid header value"),
     );
     headers.insert(
         "Link",
@@ -505,4 +514,18 @@ pub async fn legacy_deprecation_middleware(
     let mut resp = next.run(req).await;
     apply_legacy_deprecation_headers(resp.headers_mut());
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_deprecation_headers_include_sunset() {
+        let mut headers = HeaderMap::new();
+        apply_legacy_deprecation_headers(&mut headers);
+        assert_eq!(headers.get("Deprecation").unwrap(), "true");
+        assert_eq!(headers.get("Sunset").unwrap(), LEGACY_ADMIN_SUNSET);
+        assert!(headers.get("Link").unwrap().to_str().unwrap().contains("/platform/v1/models"));
+    }
 }

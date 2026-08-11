@@ -6,6 +6,22 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-11
+
+### Added
+- **Control API `/platform/v1/*` (I1):** ModelSpec CRUD, deployment load/scale/stop, replicas/nodes inventory, async Operations, Postgres API Key auth (`control` / `inference` / `admin` scope).
+- **Integration I2:** Operation SSE (`GET …/operations/{id}/events`), inference `x-nebula-request-id` echo, optional `x-nebula-replica-id` replica pin.
+- **Integration I3:** `GET /platform/v1/health/summary`, audit-logs read API, `Idempotency-Key` on Control POST, OpenAPI contract CI.
+- **Integration I4:** Governance read API — `GET …/models/{uid}/slo`, `…/slo/evaluation`, `GET /canaries`.
+- **`nebula-control` crate (I0):** Single write path for Gateway Admin and BFF; unified compat matrix and C3 errors.
+
+### Changed
+- Legacy `/v1/admin/*` responses include `Deprecation: true`, `Sunset: Thu, 11 Feb 2027 23:59:59 GMT`, and `Link` successor-version header; removal target v1.6.0.
+- OpenAPI [`docs/dev/openapi-control.yaml`](docs/dev/openapi-control.yaml) documents `/platform/v1` as the stable contract.
+
+### Deprecated
+- `/v1/admin/models/load`, `/v1/admin/v2/*` BFF proxy — use `/platform/v1/*` instead.
+
 ## [1.4.0] - 2026-07-14
 
 ### Added

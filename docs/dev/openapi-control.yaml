@@ -4,7 +4,8 @@ info:
   description: |
     Machine-facing control routes on Gateway `:8081`.
     Stable contract: `/platform/v1/*` (I1).
-    Legacy `/v1/admin/*` is deprecated — responses include `Deprecation: true`.
+    Legacy `/v1/admin/*` is deprecated — responses include `Deprecation: true`
+    and `Sunset: Thu, 11 Feb 2027 23:59:59 GMT` (removal target v1.6.0).
     See docs/dev/integration.md and docs/dev/integration-plan.md.
   version: 1.2.0-i4
 

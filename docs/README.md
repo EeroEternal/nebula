@@ -1,6 +1,6 @@
 # Nebula 文档索引
 
-当前发布：**[v1.4.0](versions/v1.4.0.md)**。
+当前发布：**[v1.4.0](versions/v1.4.0.md)**。下一版本：**[v1.5.0](versions/v1.5.0.md)**（集成 Control API）。
 
 ## 产品与运维（`manual/`）
 
@@ -17,7 +17,8 @@
 
 | 文档 | 说明 |
 |------|------|
-| [`versions/v1.4.0.md`](versions/v1.4.0.md) | 当前版本更新说明 |
+| [`versions/v1.5.0.md`](versions/v1.5.0.md) | v1.5.0 集成 Control API |
+| [`versions/v1.4.0.md`](versions/v1.4.0.md) | v1.4.0 更新说明 |
 | [`versions/v1.3.0.md`](versions/v1.3.0.md) / [`v1.1.0.md`](versions/v1.1.0.md) / [`v0.2.0.md`](versions/v0.2.0.md) | 历史版本说明 |
 
 ## 架构与工程
