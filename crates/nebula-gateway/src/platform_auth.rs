@@ -44,9 +44,7 @@ impl ApiKeyScope {
     fn allows_path(self, path: &str) -> bool {
         match self {
             ApiKeyScope::Admin => true,
-            ApiKeyScope::Control => {
-                path.starts_with("/platform/v1") || path.starts_with("/v1/admin")
-            }
+            ApiKeyScope::Control => path.starts_with("/platform/v1"),
             ApiKeyScope::Inference => {
                 path.starts_with("/v1/")
                     && !path.starts_with("/v1/admin")

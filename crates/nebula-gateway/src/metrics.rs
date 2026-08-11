@@ -6,10 +6,7 @@ use axum::{
     http::Request,
     middleware::Next,
     response::{IntoResponse, Response},
-    Extension,
 };
-
-use crate::auth::{require_role, AuthContext, Role};
 use crate::state::AppState;
 
 #[derive(Debug, Default)]
@@ -201,25 +198,6 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         )],
         body,
     )
-}
-
-pub async fn admin_metrics(
-    State(st): State<AppState>,
-    Extension(ctx): Extension<AuthContext>,
-) -> impl IntoResponse {
-    if let Some(resp) = require_role(&st.metrics, &ctx, Role::Viewer) {
-        return resp;
-    }
-    let body = render_metrics(&st.metrics);
-    (
-        axum::http::StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        body,
-    )
-        .into_response()
 }
 
 pub async fn track_requests(

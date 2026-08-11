@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::{
     middleware,
-    routing::{any, get, post, put},
+    routing::{get, post, put},
     Router,
 };
 use clap::Parser;
@@ -30,21 +30,17 @@ use crate::args::Args;
 use crate::audit::AuditWriter;
 use crate::engine::{EngineClient, OpenAIEngineClient};
 use crate::handlers::{
-    admin_audit_logs, admin_cluster_status, admin_delete_image, admin_delete_request,
-    admin_drain_endpoint, admin_get_image, admin_list_image_status, admin_list_images,
-    admin_list_requests, admin_load_model, admin_logs, admin_logs_stream, admin_put_image,
-    admin_scale_request, admin_whoami, create_anthropic_messages, create_responses, healthz,
-    list_models, proxy_post, proxy_v2,
+    create_anthropic_messages, create_responses, healthz, list_models, proxy_post,
 };
 use crate::metrics::{metrics_handler, track_requests};
 use crate::platform_auth::build_gateway_auth;
 use crate::platform_v1::{
-    legacy_deprecation_middleware, platform_audit_logs, platform_create_model,
+    platform_audit_logs, platform_cluster_status, platform_create_model, platform_drain_replica,
     platform_evaluate_slo, platform_get_canary, platform_get_deployment, platform_get_model,
     platform_get_operation, platform_get_slo, platform_health_summary, platform_list_canaries,
     platform_list_models, platform_list_nodes, platform_list_replicas, platform_load_model,
     platform_operation_events, platform_put_deployment, platform_scale_deployment,
-    platform_stop_model,
+    platform_stop_model, platform_whoami,
 };
 use crate::platform_webhooks::{
     platform_create_webhook, platform_delete_webhook, platform_list_webhooks,
@@ -128,55 +124,10 @@ async fn main() {
         tenant_admission: nebula_common::TenantAdmission::new(),
     };
 
-    let admin_routes = Router::new()
-        .route("/models/load", post(admin_load_model))
-        .route("/models/requests", get(admin_list_requests))
-        .route(
-            "/models/requests/:id",
-            post(admin_delete_request).delete(admin_delete_request),
-        )
-        .route("/cluster/status", get(admin_cluster_status))
-        .route("/whoami", get(admin_whoami))
-        .route("/metrics", get(metrics::admin_metrics))
-        .route("/logs", get(admin_logs))
-        .route("/logs/stream", get(admin_logs_stream))
-        .route("/models/requests/:id/scale", put(admin_scale_request))
-        .route("/endpoints/drain", post(admin_drain_endpoint))
-        .route("/audit-logs", get(admin_audit_logs))
-        // Image registry
-        .route("/images", get(admin_list_images))
-        .route(
-            "/images/:id",
-            get(admin_get_image)
-                .put(admin_put_image)
-                .delete(admin_delete_image),
-        )
-        .route("/images/status", get(admin_list_image_status))
-        // v2 proxy routes (forwarded to BFF)
-        .route("/v2/models", any(proxy_v2))
-        .route("/v2/models/:model_uid", any(proxy_v2))
-        .route("/v2/models/:model_uid/start", any(proxy_v2))
-        .route("/v2/models/:model_uid/stop", any(proxy_v2))
-        .route("/v2/models/:model_uid/scale", any(proxy_v2))
-        .route("/v2/models/:model_uid/save-as-template", any(proxy_v2))
-        .route("/v2/templates", any(proxy_v2))
-        .route("/v2/templates/:id", any(proxy_v2))
-        .route("/v2/templates/:id/deploy", any(proxy_v2))
-        .route("/v2/nodes/:node_id/cache", any(proxy_v2))
-        .route("/v2/nodes/:node_id/disk", any(proxy_v2))
-        .route("/v2/cache/summary", any(proxy_v2))
-        .route("/v2/alerts", any(proxy_v2))
-        .route("/v2/migrate", any(proxy_v2))
-        .layer(middleware::from_fn(legacy_deprecation_middleware))
-        .with_state(st.clone());
-
     let platform_routes = Router::new()
         .route("/models", get(platform_list_models).post(platform_create_model))
         .route("/models/load", post(platform_load_model))
-        .route(
-            "/models/:model_uid",
-            get(platform_get_model),
-        )
+        .route("/models/:model_uid", get(platform_get_model))
         .route(
             "/models/:model_uid/deployment",
             get(platform_get_deployment).put(platform_put_deployment),
@@ -186,14 +137,14 @@ async fn main() {
             post(platform_scale_deployment),
         )
         .route("/models/:model_uid/stop", post(platform_stop_model))
-        .route(
-            "/models/:model_uid/replicas",
-            get(platform_list_replicas),
-        )
+        .route("/models/:model_uid/replicas", get(platform_list_replicas))
         .route("/nodes", get(platform_list_nodes))
         .route("/operations/:operation_id", get(platform_get_operation))
         .route("/operations/:operation_id/events", get(platform_operation_events))
         .route("/health/summary", get(platform_health_summary))
+        .route("/cluster/status", get(platform_cluster_status))
+        .route("/whoami", get(platform_whoami))
+        .route("/replicas/drain", post(platform_drain_replica))
         .route("/audit-logs", get(platform_audit_logs))
         .route("/models/:model_uid/slo/evaluation", get(platform_evaluate_slo))
         .route("/models/:model_uid/slo", get(platform_get_slo))
@@ -211,7 +162,6 @@ async fn main() {
         .route("/v1/embeddings", post(proxy_post))
         .route("/v1/rerank", post(proxy_post))
         .route("/v1/models", get(list_models))
-        .nest("/v1/admin", admin_routes)
         .nest("/platform/v1", platform_routes)
         .layer(middleware::from_fn_with_state(
             st.clone(),

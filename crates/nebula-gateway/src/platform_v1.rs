@@ -4,10 +4,9 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::{
-    body::{Body, Bytes},
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    middleware::Next,
     response::{
         sse::{Event, KeepAlive},
         IntoResponse, Response, Sse,
@@ -20,11 +19,12 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use nebula_control::{
     callback_url_from_scale, callback_url_from_start, cluster_counts, create_model, create_operation,
-    etcd_health, evaluate_slo_from_router_metrics, filter_canaries_by_model, get_canary,
-    get_model, get_model_deployment, get_operation, get_slo, list_canaries, list_models,
-    list_nodes, list_replicas, load_model, scale_model, start_model, stop_model, ComponentHealth,
-    ComponentStatus, CreateModelRequest, HealthSummary, OperationKind, OperationOptions,
-    OperationStatus, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
+    drain_replica, etcd_health, evaluate_slo_from_router_metrics, filter_canaries_by_model,
+    get_canary, get_cluster_status, get_model, get_model_deployment, get_operation, get_slo,
+    list_canaries, list_models, list_nodes, list_replicas, load_model, scale_model, start_model,
+    stop_model, ComponentHealth, ComponentStatus, CreateModelRequest, DrainReplicaRequest,
+    HealthSummary, OperationKind, OperationOptions, OperationStatus, ScaleDeploymentRequest,
+    ServiceError, StartDeploymentRequest,
 };
 
 use crate::audit::{fetch_audit_logs, AuditLogQuery};
@@ -543,47 +543,46 @@ pub async fn platform_get_canary(
     }
 }
 
-/// RFC 8594 sunset for legacy `/v1/admin/*` (removal target v1.6.0).
-pub const LEGACY_ADMIN_SUNSET: &str = "Thu, 11 Feb 2027 23:59:59 GMT";
-
-pub fn apply_legacy_deprecation_headers(headers: &mut HeaderMap) {
-    headers.insert(
-        "Deprecation",
-        "true".parse().expect("valid header value"),
-    );
-    headers.insert(
-        "Sunset",
-        LEGACY_ADMIN_SUNSET
-            .parse()
-            .expect("valid header value"),
-    );
-    headers.insert(
-        "Link",
-        "</platform/v1/models>; rel=\"successor-version\""
-            .parse()
-            .expect("valid header value"),
-    );
+pub async fn platform_whoami(Extension(ctx): Extension<AuthContext>) -> impl IntoResponse {
+    let role = match ctx.role {
+        Role::Admin => "admin",
+        Role::Operator => "operator",
+        Role::Viewer => "viewer",
+    };
+    (
+        StatusCode::OK,
+        Json(json!({
+            "principal": ctx.principal,
+            "role": role,
+            "tenant_id": ctx.tenant_id,
+        })),
+    )
+        .into_response()
 }
 
-pub async fn legacy_deprecation_middleware(
-    req: axum::http::Request<Body>,
-    next: Next,
-) -> Response {
-    let mut resp = next.run(req).await;
-    apply_legacy_deprecation_headers(resp.headers_mut());
-    resp
+pub async fn platform_cluster_status(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+    match get_cluster_status(&*st.store).await {
+        Ok(status) => (StatusCode::OK, Json(status)).into_response(),
+        Err(e) => control_error(e),
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn legacy_deprecation_headers_include_sunset() {
-        let mut headers = HeaderMap::new();
-        apply_legacy_deprecation_headers(&mut headers);
-        assert_eq!(headers.get("Deprecation").unwrap(), "true");
-        assert_eq!(headers.get("Sunset").unwrap(), LEGACY_ADMIN_SUNSET);
-        assert!(headers.get("Link").unwrap().to_str().unwrap().contains("/platform/v1/models"));
+pub async fn platform_drain_replica(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(body): Json<DrainReplicaRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_write(&ctx, &st) {
+        return resp;
+    }
+    match drain_replica(&*st.store, &body.model_uid, body.replica_id).await {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => control_error(e),
     }
 }

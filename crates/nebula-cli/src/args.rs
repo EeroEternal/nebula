@@ -12,6 +12,14 @@ pub struct Args {
     )]
     pub gateway_url: String,
 
+    /// BFF URL (console API for templates, cache, v2 model CRUD)
+    #[arg(
+        long,
+        env = "NEBULA_BFF_URL",
+        default_value = "http://127.0.0.1:18090"
+    )]
+    pub bff_url: String,
+
     /// Gateway API token (Authorization: Bearer)
     #[arg(long, env = "NEBULA_GATEWAY_TOKEN")]
     pub token: Option<String>,
@@ -75,7 +83,7 @@ pub enum Command {
         #[arg(long, default_value_t = 2048)]
         max_tokens: u32,
     },
-    /// Scale model replicas (legacy v1)
+    /// Scale model replicas (uses platform API; id is model_uid)
     Scale {
         /// Model request ID
         #[arg(long)]
@@ -162,7 +170,7 @@ pub enum ModelCommand {
         #[arg(long)]
         replicas: u32,
     },
-    /// Load a new model (legacy v1 API)
+    /// Load a new model (platform control API)
     Load {
         /// User-facing model name
         #[arg(long)]

@@ -137,7 +137,7 @@ curl http://127.0.0.1:8081/metrics
 
 #### Control API 鉴权（可选）
 
-为 `/v1/admin/*` 与推理 API 开启鉴权时，设置以下环境变量：
+为 `/platform/v1/*` 与推理 API 开启鉴权时，设置以下环境变量：
 
 ```bash
 # token:role 或以 token:role:tenant_id 绑定租户，逗号分隔；role 为 admin/operator/viewer
@@ -154,14 +154,14 @@ export NEBULA_AUTH_RATE_LIMIT_PER_MINUTE=120
 
 ```bash
 curl -H "Authorization: Bearer devtoken" \
-  http://127.0.0.1:8081/v1/admin/cluster/status
+  http://127.0.0.1:8081/platform/v1/health/summary
 ```
 
 查看网关日志（tail 200 行）：
 
 ```bash
 curl -H "Authorization: Bearer devtoken" \
-  "http://127.0.0.1:8081/v1/admin/logs?lines=200"
+  http://127.0.0.1:8081/platform/v1/cluster/status
 ```
 
 控制台前端默认走 BFF（`:18090` / `npm run dev` → `:5173`），治理页可维护租户、兼容矩阵、SLO 与 Benchmark。
