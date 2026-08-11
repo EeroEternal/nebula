@@ -1,7 +1,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{body::Body, extract::State, http::Request, middleware::Next, response::Response};
+use axum::{
+    body::Body,
+    extract::State,
+    http::Request,
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use chrono::Utc;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -190,4 +196,67 @@ pub struct AuditLogQuery {
     pub user_id: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+}
+
+pub async fn fetch_audit_logs(
+    st: &AppState,
+    query: &AuditLogQuery,
+) -> Result<serde_json::Value, Response> {
+    let (xtrace_url, xtrace_token) = match (&st.xtrace_url, &st.xtrace_token) {
+        (Some(u), Some(t)) => (u.clone(), t.clone()),
+        _ => {
+            return Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"error": "audit logging not configured (xtrace not set)"})),
+            )
+                .into_response());
+        }
+    };
+
+    let mut params = vec![("tags[]", "audit".to_string())];
+    if let Some(p) = query.page {
+        params.push(("page", p.to_string()));
+    }
+    params.push(("limit", query.limit.unwrap_or(50).min(200).to_string()));
+    if let Some(u) = &query.user_id {
+        params.push(("userId", u.clone()));
+    }
+    if let Some(f) = &query.from {
+        params.push(("fromTimestamp", f.clone()));
+    }
+    if let Some(t) = &query.to {
+        params.push(("toTimestamp", t.clone()));
+    }
+
+    let base = xtrace_url.trim_end_matches('/');
+    let qs = params
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join("&");
+    let url = format!("{base}/api/public/traces?{qs}");
+
+    let resp = match st.http.get(&url).bearer_auth(&xtrace_token).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({"error": format!("xtrace request failed: {}", e)})),
+            )
+                .into_response());
+        }
+    };
+
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return Err((
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({"error": format!("xtrace parse error: {}", e)})),
+            )
+                .into_response());
+        }
+    };
+
+    Ok(body)
 }

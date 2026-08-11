@@ -1,6 +1,8 @@
 pub mod compat;
 pub mod deploy;
 pub mod error;
+pub mod health;
+pub mod idempotency;
 pub mod inventory;
 pub mod models;
 pub mod operation;
@@ -12,7 +14,9 @@ pub use deploy::{
     StartDeploymentRequest,
 };
 pub use error::ServiceError;
-pub use inventory::{list_nodes, list_replicas, NodeInventory, ReplicaView};
+pub use health::{cluster_counts, etcd_health, ClusterCounts, ComponentHealth, ComponentStatus, HealthSummary};
+pub use idempotency::{get_idempotency, hash_body, put_idempotency, IdempotencyRecord};
+pub use inventory::{list_endpoints, list_nodes, list_replicas, NodeInventory, ReplicaView};
 pub use models::{create_model, get_model, list_models, CreateModelRequest};
 pub use operation::{
     create_operation, get_operation, Operation, OperationKind, OperationResponse, OperationStatus,

@@ -4,7 +4,7 @@
 > **基线：** Nebula v1.4.0 · Gateway 默认 `:8081`  
 > **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，不提供兼容层。  
 > **相关：** 安装见 [`../manual/deployment.md`](../manual/deployment.md)；错误码见 [`contracts.md`](./contracts.md)；架构见 [`../arch/architecture.md`](../arch/architecture.md)。  
-> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0 ✅ · I1 ✅**；I2–I3 拟议）。  
+> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0–I3 ✅**）。  
 > **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（I1 `/platform/v1`；legacy 已标 deprecated）。
 
 ---
@@ -224,8 +224,13 @@ Base：`http://<gateway-host>:8081/platform/v1`
 | GET | `/models/{uid}/replicas` | 运行副本（含 `status`、`node_id`、`base_url`） |
 | GET | `/nodes` | 节点 inventory |
 | GET | `/operations/{id}` | 异步操作状态（`ready_replicas` / `succeeded`） |
+| GET | `/operations/{id}/events` | SSE 推送 operation 状态（替代轮询） |
+| GET | `/health/summary` | 控制面健康摘要 |
+| GET | `/audit-logs` | 审计只读（admin；需 xtrace） |
 
-写操作返回 **202** + `operation_id`；轮询 `GET /operations/{id}` 直到 `status: succeeded`（或 `failed`），无需解析 placement JSON。
+写操作返回 **202** + `operation_id`；可轮询 `GET /operations/{id}` 或订阅 SSE 直到 `succeeded`。支持 `Idempotency-Key` 请求头（24h 内同 key + 同 body 返回同一 `operation_id`）。
+
+推理响应会回显 `x-nebula-request-id`；可选请求头 `x-nebula-replica-id` 固定 Router 选路到指定副本。
 
 **示例：一步部署**
 

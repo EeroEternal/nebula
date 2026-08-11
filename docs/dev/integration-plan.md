@@ -131,11 +131,11 @@ Internal    Router / Scheduler / etcd       永不对外
 
 **目的：** 补齐 Nebula **已有概念** 的对外表达，而非为某行业加字段。每项 **独立可选**，按需求开关：
 
-| ID | 能力 | Nebula 依据 | 默认 |
-|----|------|-------------|------|
-| I2.1 | Operation **SSE** `…/operations/{id}/events` | 异步 reconcile 天然有阶段 | 建议做；替代轮询 |
-| I2.2 | 推理响应回显 `x-nebula-request-id` / trace | 已有 ExecutionContext + OTel | 建议做；低成本 |
-| I2.3 | **`x-nebula-replica-id`** 固定 Router 选路 | Router 扩展；默认仍自动负载均衡 | 可选；显式 opt-in |
+| ID | 能力 | Nebula 依据 | 默认 | 状态 |
+|----|------|-------------|------|------|
+| I2.1 | Operation **SSE** `…/operations/{id}/events` | 异步 reconcile 天然有阶段 | 建议做；替代轮询 | ✅ |
+| I2.2 | 推理响应回显 `x-nebula-request-id` / trace | 已有 ExecutionContext + OTel | 建议做；低成本 | ✅ |
+| I2.3 | **`x-nebula-replica-id`** 固定 Router 选路 | Router 扩展；默认仍自动负载均衡 | 可选；显式 opt-in | ✅ |
 | I2.4 | Deployment **`replicas[]` 放置明细** | 对齐 `PlacementAssignment` | 仅当「多副本异构落位」产品承诺时做 |
 | I2.5 | Webhook 订阅 | Operation 事件外推 | 有企业集成需求时做 |
 
@@ -145,13 +145,13 @@ Internal    Router / Scheduler / etcd       永不对外
 
 ### I3 — 集成运维与契约冻结
 
-| ID | 交付 | 验收 |
-|----|------|------|
-| I3.1 | `GET /platform/v1/health/summary` | 控制面组件 + ready 副本计数 |
-| I3.2 | 审计轻量读 API（Postgres 或 xtrace 抽象层） | 不强制集成方部署 xtrace |
-| I3.3 | `Idempotency-Key` on Control `POST` | 重试安全 |
-| I3.4 | 半实现路径清理（如 `GET /v1/responses`） | 承诺与实现一致 |
-| I3.5 | `/platform/v1` OpenAPI 冻结 + 契约 CI | 破坏性变更 → v2 |
+| ID | 交付 | 验收 | 状态 |
+|----|------|------|------|
+| I3.1 | `GET /platform/v1/health/summary` | 控制面组件 + ready 副本计数 | ✅ |
+| I3.2 | 审计轻量读 API（Postgres 或 xtrace 抽象层） | 不强制集成方部署 xtrace | ✅ |
+| I3.3 | `Idempotency-Key` on Control `POST` | 重试安全 | ✅ |
+| I3.4 | 半实现路径清理（如 `GET /v1/responses`） | 承诺与实现一致 | ✅ |
+| I3.5 | `/platform/v1` OpenAPI 冻结 + 契约 CI | 破坏性变更 → v2 | ✅ |
 
 Tier C 治理读 API（SLO 状态、Canary 阶段）若要做，在 I3 之后单开 **I4 批次**，不挤占 v1。
 

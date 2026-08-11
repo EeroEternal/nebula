@@ -20,6 +20,14 @@ jobs:
       - name: Test workspace (gate)
         run: cargo test --workspace --all-targets -- --nocapture
 
+  openapi-control:
+    name: openapi-control contract check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate platform OpenAPI paths
+        run: ./scripts/check_openapi_control.sh
+
   smoke:
     name: stack smoke (mock engine)
     runs-on: ubuntu-latest
