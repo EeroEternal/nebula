@@ -182,7 +182,19 @@ Tier C 治理读 API（SLO 状态、Canary 阶段）若要做，在 I3 之后单
 | I5.2 | `integration.md` 与 I2/I4 实现对齐 | replica pin、compat、治理读 API | ✅ |
 | I5.3 | CHANGELOG + `versions/v1.5.0.md` | I0–I4 集成面发布说明 | ✅ |
 
-I2.4 / I2.5 已完成；Integration 计划全部交付。
+I2.4 / I2.5 已完成。
+
+---
+
+### I6 — Legacy Admin 移除（v1.6.0）
+
+| ID | 交付 | 验收 | 状态 |
+|----|------|------|------|
+| I6.1 | 移除 Gateway `/v1/admin/*` 与 `/v1/admin/v2/*` 代理 | 404；OpenAPI 无 legacy 路径 | ✅ |
+| I6.2 | 运维能力迁至 `/platform/v1`（cluster/status、whoami、drain） | CLI / 文档对齐 | ✅ |
+| I6.3 | `nebula-cli` 控制面走 Platform v1；控制台 v2 直连 BFF | 无 Gateway admin 依赖 | ✅ |
+
+Integration 计划全部交付。
 
 ---
 
@@ -195,6 +207,7 @@ I0  单一 control service + compat + 错误/OpenAPI
            └─ I3  health / 审计 / 幂等 / v1 冻结
                 └─ I4  治理读 API（SLO / Canary 只读）✅
                      └─ I5  Legacy sunset + v1.5 发布说明 ✅
+                          └─ I6  移除 `/v1/admin/*`（v1.6.0）✅
 ```
 
 I0 阻塞 I1。I2 各项独立排期，**不**作为 v1 完成前提。

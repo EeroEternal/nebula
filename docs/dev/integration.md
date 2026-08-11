@@ -1,11 +1,11 @@
 # 上层平台集成 Nebula
 
 > **读者：** 要把 Nebula 当作「推理控制面」嵌入自有平台（算电、ISV、业务中台等）的集成工程师。  
-> **基线：** Nebula v1.4.0 · Gateway 默认 `:8081`  
+> **基线：** Nebula v1.6.0 · Gateway 默认 `:8081`  
 > **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，不提供兼容层。  
 > **相关：** 安装见 [`../manual/deployment.md`](../manual/deployment.md)；错误码见 [`contracts.md`](./contracts.md)；架构见 [`../arch/architecture.md`](../arch/architecture.md)。  
-> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0–I3 ✅**）。  
-> **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（I1 `/platform/v1`；legacy 已标 deprecated）。
+> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0–I6 ✅**）。  
+> **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（仅 `/platform/v1`）。
 
 ---
 
@@ -16,7 +16,7 @@
 | 交互 | 谁发起 | 入口 | 频率 |
 |------|--------|------|------|
 | **推理** | 上层 / 业务 | Gateway `POST /v1/*` | 高 |
-| **编排** | 上层平台 | Gateway `/platform/v1/*`（推荐）或 legacy `/v1/admin/*` | 低 |
+| **编排** | 上层平台 | Gateway `/platform/v1/*` | 低 |
 | **节点执行** | 运维 / 平台下发 | 各 GPU 机器跑 `nebula-node` | 常驻 |
 
 Router、Scheduler、etcd **不对上层暴露**。上层不要直连 `:18081` Router 或 `:2379` etcd。
@@ -25,8 +25,7 @@ Router、Scheduler、etcd **不对上层暴露**。上层不要直连 `:18081` R
 上层平台 / 业务
     │  Bearer token（同一套 NEBULA_AUTH_TOKENS）
     ├─ POST /v1/chat/completions …     推理
-    └─ POST /platform/v1/models/load …    部署 / 扩缩 / 查状态（推荐）
-    └─ legacy POST /v1/admin/models/load …（deprecated）
+    └─ POST /platform/v1/models/load …    部署 / 扩缩 / 查状态
            │
            ▼
     Gateway :8081 ──► Router ──► vLLM / SGLang
@@ -107,7 +106,7 @@ Content-Type: application/json
 验证身份：
 
 ```bash
-curl -s http://<gateway>:8081/v1/admin/whoami \
+curl -s http://<gateway>:8081/platform/v1/whoami \
   -H "Authorization: Bearer platform-ctrl"
 # {"principal":"platform-ctrl","role":"operator"}
 ```
@@ -129,8 +128,8 @@ curl -s http://<gateway>:8081/v1/admin/whoami \
 
 | scope | 允许路径 |
 |-------|----------|
-| `inference` | `/v1/*`（不含 `/v1/admin`） |
-| `control` | `/platform/v1/*` 与 legacy `/v1/admin/*` |
+| `inference` | `/v1/*`（不含 `/platform/`） |
+| `control` | `/platform/v1/*` |
 | `admin` | 全部受保护路径 |
 
 Key 以 SHA-256 哈希存储。插入示例（需自行生成随机 secret）：
@@ -204,12 +203,9 @@ Gateway 对外稳定 JSON 映射见 [`contracts.md`](./contracts.md) C3（502 �
 
 ## 5. 控制 API（编排）
 
-**推荐：** `/platform/v1/*`（I1 正式契约，OpenAPI [`openapi-control.yaml`](./openapi-control.yaml)）。  
-**Legacy：** `/v1/admin/*` 仍可用但响应带 `Deprecation: true` 与 `Sunset: Thu, 11 Feb 2027 23:59:59 GMT`（计划 v1.6.0 移除），见 §5.2。
+**契约：** `/platform/v1/*`（OpenAPI [`openapi-control.yaml`](./openapi-control.yaml)）。v1.6.0 起 **已移除** `/v1/admin/*` 与 Gateway→BFF `/v1/admin/v2/*` 代理；控制台能力走 BFF `:18090/api/v2/*`，机机集成只用 Platform v1。
 
 所需角色：读 `viewer`，写 `operator`；与推理面共用 Bearer token 或 Postgres API Key（§3.5）。
-
-### 5.1 Platform v1（推荐）
 
 Base：`http://<gateway-host>:8081/platform/v1`
 
@@ -227,6 +223,9 @@ Base：`http://<gateway-host>:8081/platform/v1`
 | GET | `/operations/{id}/events` | SSE 推送 operation 状态（替代轮询） |
 | GET | `/health/summary` | 控制面健康摘要 |
 | GET | `/audit-logs` | 审计只读（admin；需 xtrace） |
+| GET | `/cluster/status` | 集群快照（nodes / endpoints / placements） |
+| GET | `/whoami` | 当前 principal / role |
+| POST | `/replicas/drain` | 副本摘流 |
 | GET/POST/DELETE | `/webhooks` | Operation 事件 Webhook 订阅（需 Postgres） |
 
 写操作返回 **202** + `operation_id`；可轮询 `GET /operations/{id}`、订阅 SSE，或配置 **Webhook**（见下）直到 `succeeded`。支持 `Idempotency-Key` 请求头（24h 内同 key + 同 body 返回同一 `operation_id`）。
@@ -264,159 +263,6 @@ curl -s http://127.0.0.1:8081/platform/v1/operations/op_… \
 # {"status":"running","ready_replicas":0,"desired_replicas":1,…}
 ```
 
-### 5.2 Legacy Admin（deprecated）
-
-Base：`http://<gateway-host>:8081/v1/admin`
-
-**下线计划：** 2027-02-11 起不再保证可用（HTTP `Sunset` 头）；目标在 **v1.6.0** 移除。新集成请只用 `/platform/v1/*`。
-
-#### 部署模型
-
-`POST /v1/admin/models/load`
-
-写入 `/models/{model_uid}/spec` 与 `/deployments/{model_uid}`；Scheduler 异步 reconcile 生成 `/placements/`；Node 启引擎并注册 `/endpoints/`。
-
-**请求体**（`ModelLoadRequest`）：
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `model_uid` | string | 是 | 全局唯一 ID |
-| `model_name` | string | 是 | 对外名 / HF ID，如 `Qwen/Qwen2.5-7B-Instruct` |
-| `replicas` | u32 | 否 | 默认 1 |
-| `node_id` | string | 否 | 节点亲和；须与 `nebula-node --node-id` 一致 |
-| `gpu_index` | u32 | 否 | 单卡（legacy） |
-| `gpu_indices` | [u32] | 否 | 多卡 TP，如 `[0,1]` |
-| `min_replicas` / `max_replicas` | u32 | 否 | 自动扩缩边界 |
-| `engine_type` | string | 否 | `vllm` / `sglang`，默认 vLLM |
-| `docker_image` | string | 否 | 引擎镜像覆盖 |
-| `config` | object | 否 | 见下表 |
-
-**config 常用字段**（`ModelConfig`）：
-
-| 字段 | 说明 |
-|------|------|
-| `tensor_parallel_size` | TP 大小 |
-| `gpu_memory_utilization` | 显存占用比例 |
-| `max_model_len` | 最大上下文 |
-| `served_model_name` | 引擎 `--served-model-name` |
-| `required_vram_mb` | 调度显存预估 |
-
-**示例：指定节点与 GPU**
-
-```bash
-curl -s -X POST http://127.0.0.1:8081/v1/admin/models/load \
-  -H "Authorization: Bearer platform-ctrl" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model_uid": "qwen3-prod",
-    "model_name": "Qwen/Qwen3-8B",
-    "replicas": 1,
-    "node_id": "gpu-node-01",
-    "gpu_indices": [0, 1],
-    "engine_type": "vllm",
-    "config": {
-      "tensor_parallel_size": 2,
-      "gpu_memory_utilization": 0.9
-    }
-  }'
-```
-
-**响应**（200）：
-
-```json
-{
-  "request_id": "qwen3-prod",
-  "model_uid": "qwen3-prod",
-  "status": "running_desired",
-  "path": "deployments"
-}
-```
-
-表示**期望已写入**，非引擎已 ready。须轮询 §5.5 直到 endpoint `status: "ready"`。
-
-**注意：** Gateway Admin **不做**兼容矩阵校验（与控制台 BFF 不同），见 §10.3。
-
-**语义：** `node_id` / `gpu_indices` 为**部署级亲和**（整次 deployment 的约束）。多副本默认同策略下由 Scheduler 选位；**不是** per-replica 独立 `replica_config` 数组。
-
-### 5.2 扩缩容
-
-`PUT /v1/admin/models/requests/:id/scale`
-
-`:id` 为 `model_uid`（或 legacy `model_requests` id，Gateway 会解析）。
-
-```bash
-curl -s -X PUT http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod/scale \
-  -H "Authorization: Bearer platform-ctrl" \
-  -H "Content-Type: application/json" \
-  -d '{"replicas": 2}'
-```
-
-响应含 `old_replicas` / `new_replicas`。缩容时 Nebula 对旧副本做 drain（先不接新请求再停），见架构文档。
-
-### 5.3 停止
-
-`DELETE /v1/admin/models/requests/:id`
-
-将 deployment `desired_state` 置为 `stopped`，Scheduler / Node 回收副本。
-
-```bash
-curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
-  -H "Authorization: Bearer platform-ctrl"
-```
-
-### 5.4 副本 Drain（运维）
-
-`POST /v1/admin/endpoints/drain`
-
-```json
-{ "model_uid": "qwen3-prod", "replica_id": 0 }
-```
-
-将指定 endpoint 标为 `draining`，用于上线前摘流或缩容配合。
-
-### 5.5 集群状态（集成轮询）
-
-`GET /v1/admin/cluster/status`（viewer+）
-
-返回 `ClusterStatus`：
-
-```json
-{
-  "nodes": [ { "node_id": "...", "gpus": [...], "last_heartbeat_ms": ... } ],
-  "endpoints": [ {
-    "model_uid": "qwen3-prod",
-    "replica_id": 0,
-    "node_id": "gpu-node-01",
-    "status": "ready",
-    "base_url": "http://127.0.0.1:10814",
-    "plan_version": 1
-  } ],
-  "placements": [ { "model_uid": "...", "assignments": [...] } ],
-  "model_requests": []
-}
-```
-
-**集成就绪判定：**
-
-1. 目标 `node_id` 出现在 `nodes` 且心跳新鲜；
-2. 存在 `endpoints` 条目：`model_uid` 匹配且 `status == "ready"`；
-3. `placements.assignments` 中 replica 数与期望 `replicas` 一致（可选交叉校验）。
-
-`endpoint.status` 枚举：`starting` | `ready` | `unhealthy` | `draining` | `failed`。
-
-### 5.6 其他 Admin 接口
-
-| 方法 | 路径 | 角色 | 说明 |
-|------|------|------|------|
-| GET | `/v1/admin/models/requests` | viewer | Legacy 请求列表 |
-| GET | `/v1/admin/whoami` | 任意已认证 | 当前 principal / role |
-| GET | `/v1/admin/logs?lines=200` | viewer | Gateway 日志 tail |
-| GET | `/v1/admin/logs/stream` | viewer | SSE 日志流 |
-| GET | `/v1/admin/images` | viewer | 引擎镜像注册表 |
-| GET/PUT/DELETE | `/v1/admin/images/:id` | viewer / operator / admin | 镜像 CRUD |
-| GET | `/v1/admin/images/status` | viewer | 各节点镜像拉取状态 |
-| GET | `/v1/admin/audit-logs` | admin | 审计；须 xtrace，见 §10.4 |
-
 ---
 
 ## 6. 典型集成流程
@@ -451,12 +297,12 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 | 路径 | 原因 |
 |------|------|
-| BFF `:18090/api/v2/*` | 鉴权为控制台登录 session，非 `NEBULA_AUTH_TOKENS` |
-| Gateway `/v1/admin/v2/*` | 转发 BFF，同样依赖 session token，不适合机机集成 |
+| BFF `:18090/api/v2/*` | 鉴权为控制台登录 session，非机机 API Key |
+| Gateway `/v1/admin/*` | **v1.6.0 已移除**；用 `/platform/v1/*` |
 | Router `:18081` | 无 Gateway 鉴权 / 审计 / 租户门控；破坏安全边界 |
 | etcd | 无稳定对外契约；写入口归属见 [`ownership.md`](./ownership.md) |
 
-控制台能力（Benchmark、SLO、模板、租户 CRUD）若平台需要，应通过 **Gateway Admin 已暴露能力** 或单独排期 **平台专用 API**，而不是复用 BFF 会话模型。
+控制台能力（Benchmark、SLO 写、模板、租户 CRUD、镜像注册表）走 BFF；机机集成用 `/platform/v1/*`。
 
 ---
 
@@ -466,7 +312,7 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 |------|------|
 | 指标 | Gateway `/metrics`、Router `:18081/metrics`（Prometheus） |
 | 链路 | 请求带 `traceparent` → xtrace（`OBSERVE_URL`） |
-| 审计 | Admin `GET /v1/admin/audit-logs`（admin + xtrace） |
+| 审计 | `GET /platform/v1/audit-logs`（admin + xtrace） |
 
 平台侧建议：用自有 trace_id 与 `x-nebula-request-id` 关联；不要在 Prometheus 上为高基数 tenant / user 打 label（明细走审计 / trace）。
 
@@ -474,24 +320,16 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 ## 10. 实现状态、前提与限制
 
-本文 §4–§5 描述的 **Gateway 推理 + Admin 编排** 在 v1.4.0 代码中均已注册并实现（路由见 `crates/nebula-gateway/src/main.rs`）。能否在生产联调中一次跑通，还取决于下面运行前提与行为差异。
+本文 §4–§5 描述的 **Gateway 推理 + Platform 控制面** 在 v1.6.0 均已注册（路由见 `crates/nebula-gateway/src/main.rs`）。
 
-### 10.1 已实现的接口（代码已落地）
+### 10.1 已实现的接口
 
 | 类别 | 路径 | 说明 |
 |------|------|------|
-| 推理 | `POST /v1/chat/completions` 等 §4 所列 | Gateway 鉴权 → Router 选路 → 引擎 Passthrough |
-| 推理 | `POST /v1/messages`、`POST /v1/responses` | Gateway 协议适配后走同一路由 |
-| 推理 | `GET /v1/models` | 读 etcd placement，OpenAI 列表形状 |
-| 编排 | `POST /v1/admin/models/load` | 写 spec + deployment |
-| 编排 | `PUT …/scale`、`DELETE …/requests/:id` | 改副本 / 停止 |
-| 编排 | `GET /v1/admin/cluster/status` | 节点 + endpoint + placement 快照 |
-| 编排 | `POST /v1/admin/endpoints/drain` | 副本摘流 |
-| 鉴权 | `NEBULA_AUTH_TOKENS` + `Authorization: Bearer` | 推理与 Admin 共用 |
-| 追踪 | `traceparent` + ExecutionContext header | Gateway→Router inject/extract |
-| 多租户 | `NEBULA_MULTI_TENANT=1` + `token:role:tenant_id` | 可选 |
-
-`admin/models/load` 写入的 `node_id` / `gpu_indices` 会进入 deployment；Scheduler `planner.rs` 读取 `node_affinity` / `gpu_affinity` 生成 placement（需 Scheduler 进程在跑）。
+| 推理 | `POST /v1/chat/completions` 等 §4 所列 | Gateway 鉴权 → Router → 引擎 |
+| 推理 | `GET /v1/models` | OpenAI 列表形状 |
+| 编排 | `/platform/v1/*` §5 | Operation、Webhook、异构放置 |
+| 鉴权 | API Key 或 `NEBULA_AUTH_TOKENS` | 推理与 Control 共用 scope |
 
 ### 10.2 运行前提（缺一则集成失败）
 
@@ -503,13 +341,13 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 | **etcd 可达** | 部署与状态查询均失败 |
 | **生产开启鉴权**（勿用 `NEBULA_AUTH_DISABLED`） | 裸奔，非集成契约 |
 
-首次部署常含模型下载，ready 可能需数分钟；须轮询 `cluster/status`，不能假设 `load` 响应即 ready。
+首次部署常含模型下载，ready 可能需数分钟；须轮询 `GET /platform/v1/operations/{id}` 或 `…/replicas`，不能假设 `load` 响应即 ready。
 
 ### 10.3 与控制台（BFF）的行为差异
 
 平台走 Gateway Admin 时，下列行为**与控制台页面不完全相同**，集成方需知晓：
 
-| 项 | `/platform/v1` / legacy Admin | 控制台（BFF `/api/v2/*`） |
+| 项 | `/platform/v1` | 控制台（BFF `/api/v2/*`） |
 |----|-------------------------------|---------------------------|
 | **写路径** | 均走 `nebula-control`（与 BFF 同源） | 同一 service 层 |
 | **兼容矩阵** | I0 起部署写入口统一 compat 校验 | 同左 |
@@ -522,8 +360,7 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 |------|------|
 | `POST /v1/embeddings`、`/v1/rerank` | Gateway/Router 已代理；**是否成功取决于引擎**是否实现该路径 |
 | `GET /v1/responses` | **未实现**（501）；仅 `POST /v1/responses` 可用 |
-| `GET /v1/admin/audit-logs` | 需 Gateway 配置 `OBSERVE_URL` + `OBSERVE_TOKEN`（xtrace）；未配返回 503 |
-| `GET /v1/admin/logs` | 读 Gateway 本地 `NEBULA_GATEWAY_LOG_PATH`，非集群统一日志 |
+| `GET /platform/v1/audit-logs` | 需 Gateway 配置 `OBSERVE_URL` + `OBSERVE_TOKEN`（xtrace）；未配返回 503 |
 | `min_replicas` / `max_replicas` | 写入 deployment 后由 **Scheduler 自动扩缩**；须 `min < max` 且 Scheduler 在跑 |
 
 ### 10.5 产品级限制（非 bug）

@@ -22,9 +22,16 @@ use crate::output::{
     print_models_v2, print_node_cache, print_templates,
 };
 
-/// Build a v2 API URL from the gateway base URL.
-fn v2_url(gateway_url: &str, path: &str) -> String {
-    format!("{}/v1/admin/v2{}", gateway_url.trim_end_matches('/'), path)
+fn platform_url(gateway_url: &str, path: &str) -> String {
+    format!(
+        "{}/platform/v1{}",
+        gateway_url.trim_end_matches('/'),
+        path
+    )
+}
+
+fn bff_v2_url(bff_url: &str, path: &str) -> String {
+    format!("{}/api/v2{}", bff_url.trim_end_matches('/'), path)
 }
 
 #[tokio::main]
@@ -36,10 +43,7 @@ async fn main() -> Result<()> {
     match args.command {
         Command::Cluster { subcommand } => match subcommand {
             ClusterCommand::Status => {
-                let url = format!(
-                    "{}/v1/admin/cluster/status",
-                    args.gateway_url.trim_end_matches('/')
-                );
+                let url = platform_url(&args.gateway_url, "/cluster/status");
                 let status: ClusterStatus = auth(client.get(&url), token.as_ref())
                     .send()
                     .await?
@@ -50,7 +54,7 @@ async fn main() -> Result<()> {
         },
         Command::Model { subcommand } => match subcommand {
             ModelCommand::List => {
-                let url = v2_url(&args.gateway_url, "/models");
+                let url = bff_v2_url(&args.bff_url, "/models");
                 let resp = auth(client.get(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     let models: Vec<serde_json::Value> = resp.json().await?;
@@ -60,7 +64,7 @@ async fn main() -> Result<()> {
                 }
             }
             ModelCommand::Get { model_uid } => {
-                let url = v2_url(&args.gateway_url, &format!("/models/{}", model_uid));
+                let url = bff_v2_url(&args.bff_url, &format!("/models/{}", model_uid));
                 let resp = auth(client.get(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     let model: serde_json::Value = resp.json().await?;
@@ -77,7 +81,7 @@ async fn main() -> Result<()> {
                 start,
                 replicas,
             } => {
-                let url = v2_url(&args.gateway_url, "/models");
+                let url = bff_v2_url(&args.bff_url, "/models");
                 let mut body = serde_json::json!({
                     "model_name": name,
                     "engine_type": engine,
@@ -105,7 +109,10 @@ async fn main() -> Result<()> {
                 model_uid,
                 replicas,
             } => {
-                let url = v2_url(&args.gateway_url, &format!("/models/{}/start", model_uid));
+                let url = bff_v2_url(
+                    &args.bff_url,
+                    &format!("/models/{}/start", model_uid),
+                );
                 let body = serde_json::json!({ "replicas": replicas });
                 let resp = auth(client.post(&url), token.as_ref())
                     .json(&body)
@@ -121,16 +128,17 @@ async fn main() -> Result<()> {
                 }
             }
             ModelCommand::Stop { model_uid } => {
-                let url = v2_url(&args.gateway_url, &format!("/models/{}/stop", model_uid));
+                let url = platform_url(&args.gateway_url, &format!("/models/{model_uid}/stop"));
                 let resp = auth(client.post(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
-                    println!("✓ Model '{}' stopped", model_uid);
+                    println!("✓ Model '{}' stop accepted", model_uid);
+                    println!("{}", resp.text().await?);
                 } else {
                     eprintln!("✗ Failed to stop model: {}", resp.text().await?);
                 }
             }
             ModelCommand::Delete { model_uid } => {
-                let url = v2_url(&args.gateway_url, &format!("/models/{}", model_uid));
+                let url = bff_v2_url(&args.bff_url, &format!("/models/{}", model_uid));
                 let resp = auth(client.delete(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     println!("✓ Model '{}' deleted", model_uid);
@@ -142,19 +150,22 @@ async fn main() -> Result<()> {
                 model_uid,
                 replicas,
             } => {
-                let url = v2_url(&args.gateway_url, &format!("/models/{}/scale", model_uid));
+                let url = platform_url(
+                    &args.gateway_url,
+                    &format!("/models/{model_uid}/deployment/scale"),
+                );
                 let body = serde_json::json!({ "replicas": replicas });
-                let resp = auth(client.put(&url), token.as_ref())
+                let resp = auth(client.post(&url), token.as_ref())
                     .json(&body)
                     .send()
                     .await?;
                 if resp.status().is_success() {
-                    println!("✓ Model '{}' scaled to {} replicas", model_uid, replicas);
+                    println!("✓ Model '{}' scale accepted → {} replicas", model_uid, replicas);
+                    println!("{}", resp.text().await?);
                 } else {
                     eprintln!("✗ Failed to scale model: {}", resp.text().await?);
                 }
             }
-            // Legacy v1 commands
             ModelCommand::Load {
                 name,
                 uid,
@@ -165,10 +176,7 @@ async fn main() -> Result<()> {
                 max_model_len,
                 lora,
             } => {
-                let url = format!(
-                    "{}/v1/admin/models/load",
-                    args.gateway_url.trim_end_matches('/')
-                );
+                let url = platform_url(&args.gateway_url, "/models/load");
                 let config = build_config(
                     tensor_parallel_size,
                     gpu_memory_utilization,
@@ -188,35 +196,34 @@ async fn main() -> Result<()> {
                     max_replicas: None,
                     engine_type: None,
                     docker_image: None,
+                    replica_specs: None,
+                    callback_url: None,
                 };
                 let resp = auth(client.post(&url), token.as_ref())
                     .json(&req)
                     .send()
                     .await?;
                 if resp.status().is_success() {
-                    println!("✓ Model load request submitted for '{}'", name);
+                    println!("✓ Model load accepted for '{}'", name);
                     println!("{}", resp.text().await?);
                 } else {
                     eprintln!("✗ Failed to load model: {}", resp.text().await?);
                 }
             }
             ModelCommand::Unload { id } => {
-                let url = format!(
-                    "{}/v1/admin/models/requests/{}",
-                    args.gateway_url.trim_end_matches('/'),
-                    id
-                );
-                let resp = auth(client.delete(&url), token.as_ref()).send().await?;
+                let url = platform_url(&args.gateway_url, &format!("/models/{id}/stop"));
+                let resp = auth(client.post(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
-                    println!("✓ Model unload request submitted for ID: {}", id);
+                    println!("✓ Model stop accepted for: {}", id);
+                    println!("{}", resp.text().await?);
                 } else {
-                    eprintln!("✗ Failed to unload model: {}", resp.text().await?);
+                    eprintln!("✗ Failed to stop model: {}", resp.text().await?);
                 }
             }
         },
         Command::Template { subcommand } => match subcommand {
             TemplateCommand::List => {
-                let url = v2_url(&args.gateway_url, "/templates");
+                let url = bff_v2_url(&args.bff_url, "/templates");
                 let resp = auth(client.get(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     let templates: Vec<serde_json::Value> = resp.json().await?;
@@ -231,7 +238,7 @@ async fn main() -> Result<()> {
                 engine,
                 source,
             } => {
-                let url = v2_url(&args.gateway_url, "/templates");
+                let url = bff_v2_url(&args.bff_url, "/templates");
                 let body = serde_json::json!({
                     "name": name,
                     "model_name": model_name,
@@ -254,8 +261,8 @@ async fn main() -> Result<()> {
                 uid,
                 replicas,
             } => {
-                let url = v2_url(
-                    &args.gateway_url,
+                let url = bff_v2_url(
+                    &args.bff_url,
                     &format!("/templates/{}/deploy", template_id),
                 );
                 let mut body = serde_json::json!({ "replicas": replicas });
@@ -277,8 +284,8 @@ async fn main() -> Result<()> {
                 }
             }
             TemplateCommand::Save { model_uid, name } => {
-                let url = v2_url(
-                    &args.gateway_url,
+                let url = bff_v2_url(
+                    &args.bff_url,
                     &format!("/models/{}/save-as-template", model_uid),
                 );
                 let body = serde_json::json!({ "name": name });
@@ -297,7 +304,7 @@ async fn main() -> Result<()> {
         Command::Cache { subcommand } => match subcommand {
             CacheCommand::List { node } => {
                 if let Some(node_id) = node {
-                    let url = v2_url(&args.gateway_url, &format!("/nodes/{}/cache", node_id));
+                    let url = bff_v2_url(&args.bff_url, &format!("/nodes/{node_id}/cache"));
                     let resp = auth(client.get(&url), token.as_ref()).send().await?;
                     if resp.status().is_success() {
                         let data: serde_json::Value = resp.json().await?;
@@ -306,7 +313,7 @@ async fn main() -> Result<()> {
                         eprintln!("✗ Failed to get node cache: {}", resp.text().await?);
                     }
                 } else {
-                    let url = v2_url(&args.gateway_url, "/cache/summary");
+                    let url = bff_v2_url(&args.bff_url, "/cache/summary");
                     let resp = auth(client.get(&url), token.as_ref()).send().await?;
                     if resp.status().is_success() {
                         let data: serde_json::Value = resp.json().await?;
@@ -319,7 +326,7 @@ async fn main() -> Result<()> {
         },
         Command::Disk { subcommand } => match subcommand {
             DiskCommand::Status => {
-                let url = v2_url(&args.gateway_url, "/alerts");
+                let url = bff_v2_url(&args.bff_url, "/alerts");
                 let resp = auth(client.get(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     let data: serde_json::Value = resp.json().await?;
@@ -330,59 +337,18 @@ async fn main() -> Result<()> {
             }
         },
         Command::Whoami => {
-            let url = format!("{}/v1/admin/whoami", args.gateway_url.trim_end_matches('/'));
+            let url = platform_url(&args.gateway_url, "/whoami");
             let resp = auth(client.get(&url), token.as_ref()).send().await?;
             println!("{}", resp.text().await?);
         }
         Command::Metrics => {
-            let url = format!(
-                "{}/v1/admin/metrics",
-                args.gateway_url.trim_end_matches('/')
-            );
-            let resp = auth(client.get(&url), token.as_ref()).send().await?;
+            let url = format!("{}/metrics", args.gateway_url.trim_end_matches('/'));
+            let resp = client.get(&url).send().await?;
             println!("{}", resp.text().await?);
         }
-        Command::Logs { lines, follow } => {
-            if follow {
-                let url = format!(
-                    "{}/v1/admin/logs/stream",
-                    args.gateway_url.trim_end_matches('/')
-                );
-                let resp = auth(client.get(&url), token.as_ref()).send().await?;
-                if !resp.status().is_success() {
-                    eprintln!("✗ Failed to stream logs: {}", resp.status());
-                    std::process::exit(1);
-                }
-                let mut stream = resp.bytes_stream();
-                let mut buf = String::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk?;
-                    let s = String::from_utf8_lossy(&chunk);
-                    buf.push_str(&s);
-
-                    while let Some(pos) = buf.find('\n') {
-                        let line = buf[..pos].trim().to_string();
-                        buf.drain(..=pos);
-
-                        if line.is_empty() {
-                            continue;
-                        }
-                        if let Some(data) = line.strip_prefix("data:") {
-                            let data = data.trim();
-                            if !data.is_empty() {
-                                println!("{}", data);
-                            }
-                        }
-                    }
-                }
-            } else {
-                let mut url = format!("{}/v1/admin/logs", args.gateway_url.trim_end_matches('/'));
-                if let Some(n) = lines {
-                    url = format!("{}?lines={}", url, n);
-                }
-                let resp = auth(client.get(&url), token.as_ref()).send().await?;
-                println!("{}", resp.text().await?);
-            }
+        Command::Logs { .. } => {
+            eprintln!("✗ Gateway /v1/admin/logs removed in v1.6; tail the gateway log file on the host (NEBULA_GATEWAY_LOG_PATH).");
+            std::process::exit(1);
         }
         Command::Chat {
             model,
@@ -403,18 +369,18 @@ async fn main() -> Result<()> {
             .await?;
         }
         Command::Scale { id, replicas } => {
-            let url = format!(
-                "{}/v1/admin/models/requests/{}/scale",
-                args.gateway_url.trim_end_matches('/'),
-                id
+            let url = platform_url(
+                &args.gateway_url,
+                &format!("/models/{id}/deployment/scale"),
             );
             let body = serde_json::json!({ "replicas": replicas });
-            let resp = auth(client.put(&url), token.as_ref())
+            let resp = auth(client.post(&url), token.as_ref())
                 .json(&body)
                 .send()
                 .await?;
             if resp.status().is_success() {
-                println!("✓ Scaled request '{}' to {} replicas", id, replicas);
+                println!("✓ Scale accepted for '{}' → {} replicas", id, replicas);
+                println!("{}", resp.text().await?);
             } else {
                 eprintln!("✗ Failed to scale: {}", resp.text().await?);
             }
@@ -423,10 +389,7 @@ async fn main() -> Result<()> {
             model_uid,
             replica_id,
         } => {
-            let url = format!(
-                "{}/v1/admin/endpoints/drain",
-                args.gateway_url.trim_end_matches('/')
-            );
+            let url = platform_url(&args.gateway_url, "/replicas/drain");
             let body = serde_json::json!({
                 "model_uid": model_uid,
                 "replica_id": replica_id
@@ -443,7 +406,7 @@ async fn main() -> Result<()> {
         }
         Command::Admin { subcommand } => match subcommand {
             AdminCommand::Migrate => {
-                let url = v2_url(&args.gateway_url, "/migrate");
+                let url = bff_v2_url(&args.bff_url, "/migrate");
                 let resp = auth(client.post(&url), token.as_ref()).send().await?;
                 if resp.status().is_success() {
                     let result: serde_json::Value = resp.json().await?;
@@ -471,9 +434,7 @@ async fn main() -> Result<()> {
                                     let reason = d["reason"].as_str().unwrap_or("unknown");
                                     println!("  ✗ {} → failed ({})", uid, reason);
                                 }
-                                _ => {
-                                    println!("  ? {} → {}", uid, action);
-                                }
+                                _ => {}
                             }
                         }
                     }

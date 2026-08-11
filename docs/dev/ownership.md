@@ -18,9 +18,9 @@
 | Control API v1（机机） | Gateway | `/platform/v1/*` | 集成主契约；Operation + API Key |
 | 治理读（SLO / Canary） | Gateway | `/platform/v1/models/…/slo`、`/canaries` | 只读；写仍 BFF |
 | 观测面板聚合 | BFF | `/api/v2/observability/*` | |
-| 运维只读快照 | BFF 优先 | `/api/overview` 等 | Gateway 遗留 `/v1/admin/cluster/status` 只读保留，新功能不扩 |
+| 运维只读快照 | BFF / Platform | `/api/overview`、`GET /platform/v1/cluster/status` | Gateway Admin 已移除（v1.6） |
 | 镜像注册 | BFF | `/api/images/*` 与 `/api/v2/...` | **禁止** Gateway 再扩 images 写 API |
-| Endpoint drain | Gateway 或 BFF（择一） | 当前 Gateway `/v1/admin/endpoints/drain` | 新客户端走 BFF 时再迁；勿双写语义 |
+| Endpoint drain | Platform v1 | `POST /platform/v1/replicas/drain` | BFF 亦可；勿双写 |
 | Scheduler 选主探针 | Scheduler | `/healthz` leader=200 / follower=503 | LB 门禁 |
 
 ## 禁止
@@ -33,5 +33,5 @@
 ## 迁移方向（不阻塞 Wave 1）
 
 1. 新控制台写路径只加 BFF `/api/v2/*`。
-2. Gateway `/v1/admin/*` 写接口标记 deprecated，文档指向 BFF。
+2. 机机集成只用 Gateway `/platform/v1/*`；控制台走 BFF。
 3. Gateway 保留：推理代理、鉴权 token、少量运维只读与 drain（直至 BFF 接管）。

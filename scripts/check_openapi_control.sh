@@ -20,6 +20,10 @@ required_paths=(
   "/platform/v1/models/{model_uid}/slo/evaluation"
   "/platform/v1/canaries"
   "/platform/v1/canaries/{canary_id}"
+  "/platform/v1/cluster/status"
+  "/platform/v1/whoami"
+  "/platform/v1/replicas/drain"
+  "/platform/v1/webhooks"
 )
 
 missing=()

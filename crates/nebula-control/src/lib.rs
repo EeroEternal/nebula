@@ -21,7 +21,10 @@ pub use governance::{
 };
 pub use health::{cluster_counts, etcd_health, ClusterCounts, ComponentHealth, ComponentStatus, HealthSummary};
 pub use idempotency::{get_idempotency, hash_body, put_idempotency, IdempotencyRecord};
-pub use inventory::{list_endpoints, list_nodes, list_replicas, NodeInventory, ReplicaView};
+pub use inventory::{
+    count_ready_replicas, drain_replica, get_cluster_status, list_endpoints, list_nodes,
+    list_replicas, DrainReplicaRequest, DrainReplicaResponse, NodeInventory, ReplicaView,
+};
 pub use models::{create_model, get_model, list_models, CreateModelRequest};
 pub use operation::{
     create_operation, get_operation, Operation, OperationKind, OperationOptions, OperationResponse,

@@ -6,6 +6,18 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-08-11
+
+### Removed
+- **Gateway `/v1/admin/*`:** All legacy Admin routes, BFF v2 proxy, deprecation middleware, and local admin logs/metrics/image registry endpoints.
+- **`nebula-cli`:** No longer calls `/v1/admin/*`; control uses `/platform/v1/*`, console v2 uses BFF `/api/v2/*` directly.
+
+### Added
+- **`GET /platform/v1/cluster/status`**, **`GET /platform/v1/whoami`**, **`POST /platform/v1/replicas/drain`** — migrated from removed Admin paths.
+
+### Changed
+- OpenAPI and integration docs describe `/platform/v1` as the sole control contract.
+
 ## [1.5.0] - 2026-08-11
 
 ### Added

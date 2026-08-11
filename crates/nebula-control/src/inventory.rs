@@ -1,6 +1,9 @@
-use nebula_common::{EndpointInfo, EndpointStatus, NodeStatus, resolve_node_platform};
+use nebula_common::{
+    ClusterStatus, EndpointInfo, EndpointStatus, ModelRequest, NodeStatus, PlacementPlan,
+    resolve_node_platform,
+};
 use nebula_meta::MetaStore;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ServiceError;
 
@@ -84,4 +87,82 @@ pub fn count_ready_replicas(replicas: &[ReplicaView]) -> u32 {
         .iter()
         .filter(|r| r.status == EndpointStatus::Ready)
         .count() as u32
+}
+
+/// Full cluster snapshot (nodes, endpoints, placements, legacy model_requests).
+pub async fn get_cluster_status(store: &dyn MetaStore) -> Result<ClusterStatus, ServiceError> {
+    let nodes_raw = store.list_prefix("/nodes/").await?;
+    let mut nodes = Vec::new();
+    for (_, v, _) in nodes_raw {
+        if let Ok(n) = serde_json::from_slice::<NodeStatus>(&v) {
+            nodes.push(n);
+        }
+    }
+
+    let endpoints = list_endpoints(store).await?;
+
+    let placements_raw = store.list_prefix("/placements/").await?;
+    let mut placements = Vec::new();
+    for (_, v, _) in placements_raw {
+        if let Ok(p) = serde_json::from_slice::<PlacementPlan>(&v) {
+            placements.push(p);
+        }
+    }
+
+    let requests_raw = store.list_prefix("/model_requests/").await?;
+    let mut model_requests = Vec::new();
+    for (_, v, _) in requests_raw {
+        if let Ok(r) = serde_json::from_slice::<ModelRequest>(&v) {
+            model_requests.push(r);
+        }
+    }
+
+    Ok(ClusterStatus {
+        nodes,
+        endpoints,
+        placements,
+        model_requests,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DrainReplicaRequest {
+    pub model_uid: String,
+    pub replica_id: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DrainReplicaResponse {
+    pub model_uid: String,
+    pub replica_id: u32,
+    pub status: String,
+}
+
+pub async fn drain_replica(
+    store: &dyn MetaStore,
+    model_uid: &str,
+    replica_id: u32,
+) -> Result<DrainReplicaResponse, ServiceError> {
+    let key = format!("/endpoints/{model_uid}/{replica_id}");
+    let (data, _) = store
+        .get(&key)
+        .await?
+        .ok_or_else(|| ServiceError::NotFound("endpoint not found".to_string()))?;
+
+    let mut ep: EndpointInfo = serde_json::from_slice(&data)?;
+    if ep.status == EndpointStatus::Draining {
+        return Ok(DrainReplicaResponse {
+            model_uid: model_uid.to_string(),
+            replica_id,
+            status: "already_draining".to_string(),
+        });
+    }
+    ep.status = EndpointStatus::Draining;
+    let val = serde_json::to_vec(&ep)?;
+    store.put(&key, val, None).await?;
+    Ok(DrainReplicaResponse {
+        model_uid: model_uid.to_string(),
+        replica_id,
+        status: "draining".to_string(),
+    })
 }
