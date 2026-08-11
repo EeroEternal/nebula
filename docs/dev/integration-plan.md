@@ -114,14 +114,14 @@ Internal    Router / Scheduler / etcd       永不对外
 
 **目的：** Nebula 控制面的 **正式对外契约**。
 
-| ID | 交付 | 验收 |
-|----|------|------|
-| I1.1 | `GET/POST /platform/v1/models` … | ModelSpec 资源化 |
-| I1.2 | `GET/PUT …/models/{uid}/deployment`；`POST …/stop` | 部署期望与 Tier A 字段对齐 |
-| I1.3 | `GET …/models/{uid}/replicas`；`GET /platform/v1/nodes` | 运行态 / inventory 只读 |
-| I1.4 | `POST` 变更 → `operation_id`；`GET /platform/v1/operations/{id}` | 集成方不读 placement JSON |
-| I1.5 | **API Key**（Postgres）；scope：`inference` / `control` / `admin` | 替代纯 env token 的长期方案；env token 可保留兼容 |
-| I1.6 | 废弃 `/v1/admin/models/load`、`/v1/admin/v2/*` 代理 | 文档与 OpenAPI 只认 `/platform/v1` |
+| ID | 交付 | 验收 | 状态 |
+|----|------|------|------|
+| I1.1 | `GET/POST /platform/v1/models` … | ModelSpec 资源化 | ✅ |
+| I1.2 | `GET/PUT …/models/{uid}/deployment`；`POST …/stop` | 部署期望与 Tier A 字段对齐 | ✅ |
+| I1.3 | `GET …/models/{uid}/replicas`；`GET /platform/v1/nodes` | 运行态 / inventory 只读 | ✅ |
+| I1.4 | `POST` 变更 → `operation_id`；`GET /platform/v1/operations/{id}` | 集成方不读 placement JSON | ✅ |
+| I1.5 | **API Key**（Postgres）；scope：`inference` / `control` / `admin` | 替代纯 env token 的长期方案；env token 可保留兼容 | ✅ |
+| I1.6 | 废弃 `/v1/admin/models/load`、`/v1/admin/v2/*` 代理 | 文档与 OpenAPI 只认 `/platform/v1` | ✅ |
 
 **Inference：** 仍 `/v1/*`；与 Control 共享 Key 或分 scope。
 

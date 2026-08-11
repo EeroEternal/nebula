@@ -6,6 +6,8 @@ mod engine;
 mod handlers;
 mod interface;
 mod metrics;
+mod platform_auth;
+mod platform_v1;
 mod protocol_adapt;
 mod proxy_common;
 mod responses;
@@ -33,9 +35,15 @@ use crate::handlers::{
     list_models, not_implemented, proxy_post, proxy_v2,
 };
 use crate::metrics::{metrics_handler, track_requests};
+use crate::platform_auth::build_gateway_auth;
+use crate::platform_v1::{
+    legacy_deprecation_middleware, platform_create_model, platform_get_deployment,
+    platform_get_model, platform_get_operation, platform_list_models, platform_list_nodes,
+    platform_list_replicas, platform_load_model, platform_put_deployment,
+    platform_scale_deployment, platform_stop_model,
+};
 use crate::state::AppState;
 use crate::util::read_engine_env_file;
-use nebula_common::auth::parse_auth_from_env;
 
 #[tokio::main]
 async fn main() {
@@ -77,7 +85,7 @@ async fn main() {
         }
     };
 
-    let auth = parse_auth_from_env();
+    let auth = build_gateway_auth().await;
 
     let metrics = Arc::new(metrics::Metrics::default());
     let dual_write = nebula_common::DualWriteEmitter::from_env(
@@ -152,6 +160,31 @@ async fn main() {
         .route("/v2/cache/summary", any(proxy_v2))
         .route("/v2/alerts", any(proxy_v2))
         .route("/v2/migrate", any(proxy_v2))
+        .layer(middleware::from_fn(legacy_deprecation_middleware))
+        .with_state(st.clone());
+
+    let platform_routes = Router::new()
+        .route("/models", get(platform_list_models).post(platform_create_model))
+        .route("/models/load", post(platform_load_model))
+        .route(
+            "/models/:model_uid",
+            get(platform_get_model),
+        )
+        .route(
+            "/models/:model_uid/deployment",
+            get(platform_get_deployment).put(platform_put_deployment),
+        )
+        .route(
+            "/models/:model_uid/deployment/scale",
+            post(platform_scale_deployment),
+        )
+        .route("/models/:model_uid/stop", post(platform_stop_model))
+        .route(
+            "/models/:model_uid/replicas",
+            get(platform_list_replicas),
+        )
+        .route("/nodes", get(platform_list_nodes))
+        .route("/operations/:operation_id", get(platform_get_operation))
         .with_state(st.clone());
 
     let secure_routes = Router::new()
@@ -163,13 +196,14 @@ async fn main() {
         .route("/v1/rerank", post(proxy_post))
         .route("/v1/models", get(list_models))
         .nest("/v1/admin", admin_routes)
+        .nest("/platform/v1", platform_routes)
         .layer(middleware::from_fn_with_state(
             st.clone(),
             audit::audit_middleware,
         ))
         .layer(middleware::from_fn_with_state(
             st.clone(),
-            nebula_common::auth::auth_middleware::<AppState>,
+            crate::platform_auth::gateway_auth_middleware,
         ))
         .layer(middleware::from_fn(
             nebula_common::telemetry::trace_context_middleware,

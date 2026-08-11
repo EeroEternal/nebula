@@ -32,7 +32,7 @@ pub async fn prepare_upstream(
     let model = peek_json_model_field(body_bytes);
     let ctx = build_execution_context(headers, auth.tenant_id.as_deref(), None);
 
-    let _conc_guard = if st.auth.multi_tenant {
+    let _conc_guard = if st.auth.env.multi_tenant {
         if let Some(ref tenant_id) = ctx.tenant_id {
             match load_tenant(&*st.store, tenant_id).await {
                 Ok(Some(tenant)) => {
