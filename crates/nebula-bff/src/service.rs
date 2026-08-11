@@ -5,7 +5,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -1271,13 +1270,34 @@ fn extract_label_value(line: &str, label: &str) -> Option<String> {
 }
 
 pub(crate) fn parse_histogram_quantile(metrics_text: &str, metric: &str, quantile: f64) -> f64 {
+    parse_histogram_quantile_filtered(metrics_text, metric, quantile, None)
+}
+
+/// Approximate histogram quantile. When multiple label sets share the same
+/// metric name (e.g. per-`model_uid` series), bucket counts at the same `le`
+/// are **merged** before computing the quantile — otherwise no single series'
+/// cumulative can reach `total * q` and the parser incorrectly returns 0.
+pub(crate) fn parse_histogram_quantile_filtered(
+    metrics_text: &str,
+    metric: &str,
+    quantile: f64,
+    model_uid: Option<&str>,
+) -> f64 {
     let bucket_metric = format!("{metric}_bucket");
-    let mut buckets: Vec<(f64, f64)> = Vec::new();
+    let mut by_le: std::collections::BTreeMap<u64, f64> = std::collections::BTreeMap::new();
     let mut total = 0.0;
 
     for line in metrics_text.lines().filter(|line| !line.starts_with('#')) {
         if !metric_line_matches(line, &bucket_metric) {
             continue;
+        }
+        if let Some(uid) = model_uid {
+            let Some(label) = extract_label_value(line, "model_uid") else {
+                continue;
+            };
+            if label != uid {
+                continue;
+            }
         }
 
         let le = match extract_label_value(line, "le") {
@@ -1300,18 +1320,19 @@ pub(crate) fn parse_histogram_quantile(metrics_text: &str, metric: &str, quantil
         }
 
         if let Ok(boundary) = le.parse::<f64>() {
-            buckets.push((boundary, value));
+            // Key by bits so BTreeMap stays ordered without f64 Ord.
+            let key = boundary.to_bits();
+            *by_le.entry(key).or_insert(0.0) += value;
         }
     }
 
-    if total <= 0.0 || buckets.is_empty() {
+    if total <= 0.0 || by_le.is_empty() {
         return 0.0;
     }
 
-    buckets.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
     let target = total * quantile.clamp(0.0, 1.0);
-
-    for (boundary, cumulative) in buckets {
+    for (bits, cumulative) in by_le {
+        let boundary = f64::from_bits(bits);
         if cumulative >= target {
             return boundary;
         }
@@ -1589,6 +1610,39 @@ nebula_router_requests_total{route="chat"} 10
 nebula_router_requests_total{route="embed"} 5
 "#;
         assert_eq!(parse_metric_sum(text, "nebula_router_requests_total"), 15.0);
+    }
+
+    #[test]
+    fn histogram_quantile_merges_multi_model_series() {
+        // Two model series each with count=2 at le=0.05; without merging,
+        // target = 0.95 * 4 = 3.8 never matches a per-series cumulative of 2.
+        let text = r#"
+nebula_route_ttft_seconds_bucket{model_uid="a",le="0.001"} 0
+nebula_route_ttft_seconds_bucket{model_uid="a",le="0.05"} 2
+nebula_route_ttft_seconds_bucket{model_uid="a",le="+Inf"} 2
+nebula_route_ttft_seconds_bucket{model_uid="b",le="0.001"} 0
+nebula_route_ttft_seconds_bucket{model_uid="b",le="0.05"} 2
+nebula_route_ttft_seconds_bucket{model_uid="b",le="+Inf"} 2
+"#;
+        let q = parse_histogram_quantile(text, "nebula_route_ttft_seconds", 0.95);
+        assert!(
+            (q - 0.05).abs() < 1e-9,
+            "expected merged p95 boundary 0.05, got {q}"
+        );
+        let qa = parse_histogram_quantile_filtered(
+            text,
+            "nebula_route_ttft_seconds",
+            0.95,
+            Some("a"),
+        );
+        assert!((qa - 0.05).abs() < 1e-9);
+        let missing = parse_histogram_quantile_filtered(
+            text,
+            "nebula_route_ttft_seconds",
+            0.95,
+            Some("nope"),
+        );
+        assert_eq!(missing, 0.0);
     }
 
     #[test]

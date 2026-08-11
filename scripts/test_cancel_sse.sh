@@ -4,6 +4,9 @@
 # SLO: client disconnect during SSE increments nebula_router_requests_aborted_total
 # and must NOT increment status_5xx / model 5xx counters.
 #
+# Uses a hard TCP close mid-stream (curl --max-time often loses the race on fast
+# engines that finish before the deadline).
+#
 # Usage:
 #   ROUTER_URL=http://127.0.0.1:18081 MODEL=my-model ./scripts/test_cancel_sse.sh
 set -euo pipefail
@@ -18,13 +21,6 @@ if [[ -z "${MODEL}" ]]; then
   exit 2
 fi
 
-auth_hdr=()
-if [[ -n "${TOKEN}" ]]; then
-  # Use first token if comma-separated
-  t="${TOKEN%%,*}"
-  auth_hdr=(-H "Authorization: Bearer ${t}")
-fi
-
 metric() {
   local name="$1"
   curl -fsS "${METRICS_URL}" | awk -v n="$name" '$1==n {print $2; found=1} END{if(!found) print 0}'
@@ -35,16 +31,48 @@ before_5xx="$(metric nebula_router_responses_5xx)"
 
 echo "before abort=${before_abort} 5xx=${before_5xx}"
 
-# Long streaming request; kill client after 2s to force abort.
-set +e
-curl -NsS --max-time 2 \
-  "${auth_hdr[@]}" \
-  -H "Content-Type: application/json" \
-  -d "{\"model\":\"${MODEL}\",\"stream\":true,\"max_tokens\":2048,\"messages\":[{\"role\":\"user\",\"content\":\"count slowly to 200\"}]}" \
-  "${ROUTER_URL}/v1/chat/completions" >/dev/null 2>&1
-set -e
+# Hard-close after ~4KiB so we abort while the engine is still producing tokens.
+python3 - "$ROUTER_URL" "$MODEL" "${TOKEN%%,*}" <<'PY'
+import http.client, json, sys, time
+from urllib.parse import urlparse
 
-sleep 1
+base, model, token = sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ""
+u = urlparse(base)
+host, port = u.hostname or "127.0.0.1", u.port or (443 if u.scheme == "https" else 80)
+path = (u.path or "").rstrip("/") + "/v1/chat/completions"
+body = json.dumps({
+    "model": model,
+    "stream": True,
+    "max_tokens": 2048,
+    "messages": [{"role": "user", "content": "count from 1 to 5000 slowly, one number per line"}],
+}).encode()
+conn = http.client.HTTPConnection(host, port, timeout=120)
+conn.putrequest("POST", path)
+conn.putheader("Content-Type", "application/json")
+conn.putheader("Content-Length", str(len(body)))
+if token:
+    conn.putheader("Authorization", f"Bearer {token}")
+conn.endheaders()
+conn.send(body)
+resp = conn.getresponse()
+ct = resp.getheader("content-type") or ""
+if resp.status != 200 or "text/event-stream" not in ct:
+    snippet = resp.read(400)
+    raise SystemExit(f"expected SSE 200, got {resp.status} ct={ct!r} body={snippet!r}")
+n = 0
+t0 = time.time()
+while True:
+    chunk = resp.read(128)
+    if not chunk:
+        raise SystemExit(f"upstream finished before abort (bytes={n})")
+    n += len(chunk)
+    if n >= 4096:
+        conn.close()
+        print(f"hard-closed after {n} bytes in {time.time()-t0:.3f}s", flush=True)
+        break
+time.sleep(1.0)
+PY
+
 after_abort="$(metric nebula_router_requests_aborted_total)"
 after_5xx="$(metric nebula_router_responses_5xx)"
 
