@@ -18,6 +18,7 @@ use crate::state::AppState;
 
 pub struct PreparedUpstream {
     pub model: Option<String>,
+    pub request_id: String,
     pub headers: reqwest::header::HeaderMap,
     /// Held for the request lifetime when multi-tenant admission is active.
     pub _conc_guard: Option<nebula_common::admission::ConcurrencyGuard>,
@@ -77,6 +78,7 @@ pub async fn prepare_upstream(
 
     Ok(PreparedUpstream {
         model,
+        request_id: ctx.request_id,
         headers: req_headers,
         _conc_guard,
     })
@@ -183,7 +185,11 @@ pub fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
 }
 
 /// Forward a non-SSE or SSE upstream response to the client (shared by proxy_post).
-pub async fn forward_upstream_response(st: &AppState, resp: reqwest::Response) -> Response {
+pub async fn forward_upstream_response(
+    st: &AppState,
+    resp: reqwest::Response,
+    request_id: Option<&str>,
+) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
     use tokio_stream::{wrappers::ReceiverStream, StreamExt};
@@ -237,6 +243,7 @@ pub async fn forward_upstream_response(st: &AppState, resp: reqwest::Response) -
             .body(Body::from_stream(stream))
             .unwrap_or_else(|_| Response::new(Body::empty()));
         append_headers(&resp_headers, &mut out);
+        inject_nebula_echo_headers(&mut out, request_id);
         return out;
     }
 
@@ -255,5 +262,20 @@ pub async fn forward_upstream_response(st: &AppState, resp: reqwest::Response) -
         .body(Body::from(bytes))
         .unwrap_or_else(|_| Response::new(Body::empty()));
     append_headers(&resp_headers, &mut out);
+    inject_nebula_echo_headers(&mut out, request_id);
     out
+}
+
+fn inject_nebula_echo_headers(out: &mut Response, request_id: Option<&str>) {
+    use axum::http::{HeaderName, HeaderValue};
+    use nebula_common::HEADER_REQUEST_ID;
+
+    if let Some(rid) = request_id {
+        if let Ok(v) = HeaderValue::from_str(rid) {
+            out.headers_mut().insert(
+                HeaderName::from_static(HEADER_REQUEST_ID),
+                v,
+            );
+        }
+    }
 }

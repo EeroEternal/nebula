@@ -552,7 +552,7 @@ pub async fn proxy_post(
     };
     let _guard = prepared._conc_guard;
 
-    forward_upstream_response(&st, resp).await
+    forward_upstream_response(&st, resp, Some(&prepared.request_id)).await
 }
 
 pub async fn proxy_v2(
@@ -1236,62 +1236,8 @@ pub async fn admin_audit_logs(
         return resp;
     }
 
-    let (xtrace_url, xtrace_token) = match (&st.xtrace_url, &st.xtrace_token) {
-        (Some(u), Some(t)) => (u.clone(), t.clone()),
-        _ => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": "audit logging not configured (xtrace not set)"})),
-            )
-                .into_response();
-        }
-    };
-
-    let mut params = vec![("tags[]", "audit".to_string())];
-    if let Some(p) = query.page {
-        params.push(("page", p.to_string()));
+    match crate::audit::fetch_audit_logs(&st, &query).await {
+        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Err(resp) => resp,
     }
-    params.push(("limit", query.limit.unwrap_or(50).min(200).to_string()));
-    if let Some(u) = &query.user_id {
-        params.push(("userId", u.clone()));
-    }
-    if let Some(f) = &query.from {
-        params.push(("fromTimestamp", f.clone()));
-    }
-    if let Some(t) = &query.to {
-        params.push(("toTimestamp", t.clone()));
-    }
-
-    let base = xtrace_url.trim_end_matches('/');
-    let qs = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", k, v))
-        .collect::<Vec<_>>()
-        .join("&");
-    let url = format!("{base}/api/public/traces?{qs}");
-
-    let resp = match st.http.get(&url).bearer_auth(&xtrace_token).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("xtrace request failed: {}", e)})),
-            )
-                .into_response();
-        }
-    };
-
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("xtrace parse error: {}", e)})),
-            )
-                .into_response();
-        }
-    };
-
-    (status, Json(body)).into_response()
 }

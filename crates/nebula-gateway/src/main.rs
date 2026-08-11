@@ -7,6 +7,7 @@ mod handlers;
 mod interface;
 mod metrics;
 mod platform_auth;
+mod platform_idempotency;
 mod platform_v1;
 mod protocol_adapt;
 mod proxy_common;
@@ -32,15 +33,16 @@ use crate::handlers::{
     admin_drain_endpoint, admin_get_image, admin_list_image_status, admin_list_images,
     admin_list_requests, admin_load_model, admin_logs, admin_logs_stream, admin_put_image,
     admin_scale_request, admin_whoami, create_anthropic_messages, create_responses, healthz,
-    list_models, not_implemented, proxy_post, proxy_v2,
+    list_models, proxy_post, proxy_v2,
 };
 use crate::metrics::{metrics_handler, track_requests};
 use crate::platform_auth::build_gateway_auth;
 use crate::platform_v1::{
-    legacy_deprecation_middleware, platform_create_model, platform_get_deployment,
-    platform_get_model, platform_get_operation, platform_list_models, platform_list_nodes,
-    platform_list_replicas, platform_load_model, platform_put_deployment,
-    platform_scale_deployment, platform_stop_model,
+    legacy_deprecation_middleware, platform_audit_logs, platform_create_model,
+    platform_get_deployment, platform_get_model, platform_get_operation, platform_health_summary,
+    platform_list_models, platform_list_nodes, platform_list_replicas, platform_load_model,
+    platform_operation_events, platform_put_deployment, platform_scale_deployment,
+    platform_stop_model,
 };
 use crate::state::AppState;
 use crate::util::read_engine_env_file;
@@ -185,10 +187,13 @@ async fn main() {
         )
         .route("/nodes", get(platform_list_nodes))
         .route("/operations/:operation_id", get(platform_get_operation))
+        .route("/operations/:operation_id/events", get(platform_operation_events))
+        .route("/health/summary", get(platform_health_summary))
+        .route("/audit-logs", get(platform_audit_logs))
         .with_state(st.clone());
 
     let secure_routes = Router::new()
-        .route("/v1/responses", get(not_implemented).post(create_responses))
+        .route("/v1/responses", post(create_responses))
         .route("/v1/messages", post(create_anthropic_messages))
         .route("/v1/chat/completions", post(proxy_post))
         .route("/v1/completions", post(proxy_post))

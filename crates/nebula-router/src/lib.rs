@@ -383,6 +383,28 @@ impl Router {
         plan_version: Option<u64>,
         exclude: Option<(&str, u32)>,
     ) -> Result<EndpointInfo, RouteError> {
+        // Explicit replica pin (opt-in via x-nebula-replica-id).
+        if let Some(replica_id) = ctx.pinned_replica_id {
+            if let Some(ep) = self
+                .endpoints
+                .get(&(model_uid.to_string(), replica_id))
+                .map(|v| v.value().clone())
+            {
+                let excluded = exclude
+                    .map(|(m, r)| m == model_uid && r == replica_id)
+                    .unwrap_or(false);
+                let plan_ok = plan_version.map(|v| ep.plan_version == v).unwrap_or(true);
+                if !excluded
+                    && ep.status == EndpointStatus::Ready
+                    && plan_ok
+                    && !self.is_endpoint_circuit_open(&ep.model_uid, ep.replica_id)
+                {
+                    return Ok(ep);
+                }
+            }
+            return Err(RouteError::NoEndpoint);
+        }
+
         // Session affinity check
         if let Some(session_id) = ctx.session_id.as_deref() {
             if let Some(aff) = self.session_affinity.get(session_id) {
@@ -580,6 +602,24 @@ mod plan_version_tests {
     }
 
     #[test]
+    fn pinned_replica_id_selects_target() {
+        let router = Router::new();
+        router.upsert_endpoint(ready_ep("m1", 0, 1));
+        router.upsert_endpoint(ready_ep("m1", 1, 1));
+        let ctx = ExecutionContext {
+            request_id: "r".into(),
+            session_id: None,
+            tenant_id: None,
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+            pinned_replica_id: Some(1),
+        };
+        let ep = router.route(&ctx, "m1").unwrap();
+        assert_eq!(ep.replica_id, 1);
+    }
+
+    #[test]
     fn plan_version_filters_stale_endpoints() {
         let router = Router::new();
         router.upsert_endpoint(ready_ep("m1", 0, 1));
@@ -591,6 +631,7 @@ mod plan_version_tests {
             priority: None,
             deadline_ms: None,
             budget_tokens: None,
+            pinned_replica_id: None,
         };
 
         let ep = router.route_with_plan_version(&ctx, "m1", 2).unwrap();
@@ -621,6 +662,7 @@ mod plan_version_tests {
             priority: None,
             deadline_ms: None,
             budget_tokens: None,
+            pinned_replica_id: None,
         };
         let ep = router.route_with_plan_version(&ctx, "m2", 7).unwrap();
         assert_eq!(ep.replica_id, 0);
@@ -639,6 +681,7 @@ mod plan_version_tests {
             priority: None,
             deadline_ms: None,
             budget_tokens: None,
+            pinned_replica_id: None,
         };
         assert!(matches!(
             router.route_with_plan_version(&ctx, "m1", 1).unwrap_err(),

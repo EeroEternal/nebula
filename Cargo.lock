@@ -1456,10 +1456,12 @@ version = "1.4.0"
 dependencies = [
  "anyhow",
  "axum",
+ "hex",
  "nebula-common",
  "nebula-meta",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tracing",
  "uuid",

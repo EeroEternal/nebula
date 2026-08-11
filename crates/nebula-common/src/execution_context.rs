@@ -9,9 +9,12 @@ pub struct ExecutionContext {
     pub priority: Option<i32>,
     pub deadline_ms: Option<u64>,
     pub budget_tokens: Option<u32>,
+    /// Opt-in replica pin (`x-nebula-replica-id`); Router honors when set.
+    pub pinned_replica_id: Option<u32>,
 }
 
 pub const HEADER_REQUEST_ID: &str = "x-nebula-request-id";
+pub const HEADER_REPLICA_ID: &str = "x-nebula-replica-id";
 pub const HEADER_SESSION_ID: &str = "x-session-id";
 pub const HEADER_TENANT_ID: &str = "x-nebula-tenant-id";
 pub const HEADER_PRIORITY: &str = "x-nebula-priority";
@@ -58,6 +61,8 @@ pub fn build_execution_context(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u32>().ok());
 
+    let pinned_replica_id = header_str(HEADER_REPLICA_ID).and_then(|s| s.parse::<u32>().ok());
+
     ExecutionContext {
         request_id,
         session_id: header_str(HEADER_SESSION_ID),
@@ -65,6 +70,7 @@ pub fn build_execution_context(
         priority,
         deadline_ms,
         budget_tokens,
+        pinned_replica_id,
     }
 }
 
@@ -85,6 +91,9 @@ pub fn inject_execution_context(headers: &mut axum::http::HeaderMap, ctx: &Execu
     }
     if let Some(b) = ctx.budget_tokens {
         insert_header(headers, HEADER_BUDGET_TOKENS, &b.to_string());
+    }
+    if let Some(r) = ctx.pinned_replica_id {
+        insert_header(headers, HEADER_REPLICA_ID, &r.to_string());
     }
 }
 
@@ -121,6 +130,7 @@ mod tests {
             priority: Some(2),
             deadline_ms: Some(99),
             budget_tokens: Some(1000),
+            pinned_replica_id: None,
         };
         let mut out = HeaderMap::new();
         inject_execution_context(&mut out, &ctx);

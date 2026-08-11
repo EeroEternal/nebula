@@ -37,7 +37,8 @@ pub use engine_args::{build_engine_extra_args, build_engine_extra_args_lenient};
 pub use engine_image::{EngineImage, ImagePullStatus, NodeImageStatus, VersionPolicy};
 pub use execution_context::{
     build_execution_context, inject_execution_context, ExecutionContext, HEADER_BUDGET_TOKENS,
-    HEADER_DEADLINE_MS, HEADER_PRIORITY, HEADER_REQUEST_ID, HEADER_SESSION_ID, HEADER_TENANT_ID,
+    HEADER_DEADLINE_MS, HEADER_PRIORITY, HEADER_REPLICA_ID, HEADER_REQUEST_ID, HEADER_SESSION_ID,
+    HEADER_TENANT_ID,
 };
 pub use json_model::{
     peek_json_model_field, rewrite_json_model_field, HEADER_NEBULA_MODEL, HEADER_NEBULA_MODEL_UID,

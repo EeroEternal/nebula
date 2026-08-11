@@ -6,7 +6,7 @@ info:
     Stable contract: `/platform/v1/*` (I1).
     Legacy `/v1/admin/*` is deprecated — responses include `Deprecation: true`.
     See docs/dev/integration.md and docs/dev/integration-plan.md.
-  version: 1.0.0-i1
+  version: 1.1.0-i2-i3
 
 servers:
   - url: http://127.0.0.1:8081
@@ -165,6 +165,39 @@ paths:
       responses:
         '200':
           description: Operation with refreshed ready_replicas
+
+  /platform/v1/operations/{operation_id}/events:
+    get:
+      summary: Operation status SSE stream
+      operationId: platformOperationEvents
+      tags: [Platform v1]
+      parameters:
+        - name: operation_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: text/event-stream of operation updates
+
+  /platform/v1/health/summary:
+    get:
+      summary: Control plane health summary
+      operationId: platformHealthSummary
+      tags: [Platform v1]
+      responses:
+        '200':
+          description: gateway / etcd / router + cluster counts
+
+  /platform/v1/audit-logs:
+    get:
+      summary: Audit log read (xtrace proxy)
+      operationId: platformAuditLogs
+      tags: [Platform v1]
+      responses:
+        '200':
+          description: Audit traces from xtrace
 
   /v1/admin/models/load:
     post:

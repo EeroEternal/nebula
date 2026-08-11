@@ -1,23 +1,34 @@
-//! `/platform/v1/*` Control API handlers (I1).
+//! `/platform/v1/*` Control API handlers (I1+).
+
+use std::convert::Infallible;
+use std::time::Duration;
 
 use axum::{
-    body::Body,
-    extract::{Path, State},
+    body::{Body, Bytes},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive},
+        IntoResponse, Response, Sse,
+    },
     Extension, Json,
 };
 use serde_json::json;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 
 use nebula_control::{
-    create_model, create_operation, get_model, get_model_deployment, get_operation, list_models,
-    list_nodes, list_replicas, load_model, scale_model, start_model, stop_model, CreateModelRequest,
-    OperationKind, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
+    cluster_counts, create_model, create_operation, etcd_health, get_model, get_model_deployment,
+    get_operation, list_models, list_nodes, list_replicas, load_model, scale_model, start_model,
+    stop_model, ComponentHealth, ComponentStatus, CreateModelRequest, HealthSummary, OperationKind,
+    OperationStatus, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
 };
 
+use crate::audit::{fetch_audit_logs, AuditLogQuery};
 use crate::auth::{require_role, AuthContext, Role};
 use crate::control::control_error;
+use crate::platform_idempotency::{check_idempotency, record_idempotency};
 use crate::state::AppState;
 
 fn require_control_read(ctx: &AuthContext, st: &AppState) -> Option<Response> {
@@ -40,6 +51,79 @@ fn operation_accepted(op: nebula_control::Operation) -> Response {
         .into_response()
 }
 
+async fn finish_write(
+    st: &AppState,
+    ctx: &AuthContext,
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+    op: nebula_control::Operation,
+) -> Response {
+    if let Err(e) = record_idempotency(&st.store, &ctx.principal, headers, path, body, &op).await {
+        return control_error(e);
+    }
+    operation_accepted(op)
+}
+
+pub async fn platform_health_summary(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+
+    let etcd = etcd_health(&*st.store).await;
+    let cluster = match cluster_counts(&*st.store).await {
+        Ok(c) => c,
+        Err(e) => return control_error(e),
+    };
+
+    let router_url = format!(
+        "{}/healthz",
+        st.router_base_url.trim_end_matches('/')
+    );
+    let router = match st.http.get(&router_url).send().await {
+        Ok(r) if r.status().is_success() => ComponentHealth {
+            status: ComponentStatus::Ok,
+            message: None,
+        },
+        Ok(r) => ComponentHealth {
+            status: ComponentStatus::Degraded,
+            message: Some(format!("router returned {}", r.status())),
+        },
+        Err(e) => ComponentHealth {
+            status: ComponentStatus::Unavailable,
+            message: Some(format!("router unreachable: {e}")),
+        },
+    };
+
+    let summary = HealthSummary {
+        gateway: ComponentHealth {
+            status: ComponentStatus::Ok,
+            message: None,
+        },
+        etcd,
+        router,
+        cluster,
+    };
+    (StatusCode::OK, Json(summary)).into_response()
+}
+
+pub async fn platform_audit_logs(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Query(query): Query<AuditLogQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_role(&st.metrics, &ctx, Role::Admin) {
+        return resp;
+    }
+    match fetch_audit_logs(&st, &query).await {
+        Ok(body) => (StatusCode::OK, Json(body)).into_response(),
+        Err(resp) => resp,
+    }
+}
+
 pub async fn platform_list_models(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -56,11 +140,24 @@ pub async fn platform_list_models(
 pub async fn platform_create_model(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
-    Json(req): Json<CreateModelRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
     if let Some(resp) = require_control_write(&ctx, &st) {
         return resp;
     }
+    let path = "/platform/v1/models";
+    match check_idempotency(&st.store, &ctx.principal, &headers, path, &body).await {
+        Ok(Some(r)) => return r,
+        Ok(None) => {}
+        Err(e) => return control_error(e),
+    }
+    let req: CreateModelRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return control_error(ServiceError::BadRequest(format!("invalid json: {e}")));
+        }
+    };
     match create_model(&*st.store, &ctx.principal, req).await {
         Ok(spec) => (StatusCode::CREATED, Json(spec)).into_response(),
         Err(e) => control_error(e),
@@ -102,14 +199,27 @@ pub async fn platform_put_deployment(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Path(model_uid): Path<String>,
-    Json(req): Json<StartDeploymentRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
     if let Some(resp) = require_control_write(&ctx, &st) {
         return resp;
     }
+    let path = format!("/platform/v1/models/{model_uid}/deployment");
+    match check_idempotency(&st.store, &ctx.principal, &headers, &path, &body).await {
+        Ok(Some(r)) => return r,
+        Ok(None) => {}
+        Err(e) => return control_error(e),
+    }
+    let req: StartDeploymentRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return control_error(ServiceError::BadRequest(format!("invalid json: {e}")));
+        }
+    };
     match start_model(&*st.store, &model_uid, req).await {
         Ok(dep) => match create_operation(&*st.store, OperationKind::Deploy, &dep).await {
-            Ok(op) => operation_accepted(op),
+            Ok(op) => finish_write(&st, &ctx, &headers, &path, &body, op).await,
             Err(e) => control_error(e),
         },
         Err(e) => control_error(e),
@@ -120,13 +230,21 @@ pub async fn platform_stop_model(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Path(model_uid): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     if let Some(resp) = require_control_write(&ctx, &st) {
         return resp;
     }
+    let path = format!("/platform/v1/models/{model_uid}/stop");
+    let body: &[u8] = &[];
+    match check_idempotency(&st.store, &ctx.principal, &headers, &path, body).await {
+        Ok(Some(r)) => return r,
+        Ok(None) => {}
+        Err(e) => return control_error(e),
+    }
     match stop_model(&*st.store, &model_uid).await {
         Ok(dep) => match create_operation(&*st.store, OperationKind::Stop, &dep).await {
-            Ok(op) => operation_accepted(op),
+            Ok(op) => finish_write(&st, &ctx, &headers, &path, body, op).await,
             Err(e) => control_error(e),
         },
         Err(e) => control_error(e),
@@ -137,32 +255,57 @@ pub async fn platform_scale_deployment(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Path(model_uid): Path<String>,
-    Json(req): Json<ScaleDeploymentRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
     if let Some(resp) = require_control_write(&ctx, &st) {
         return resp;
     }
+    let path = format!("/platform/v1/models/{model_uid}/deployment/scale");
+    match check_idempotency(&st.store, &ctx.principal, &headers, &path, &body).await {
+        Ok(Some(r)) => return r,
+        Ok(None) => {}
+        Err(e) => return control_error(e),
+    }
+    let req: ScaleDeploymentRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return control_error(ServiceError::BadRequest(format!("invalid json: {e}")));
+        }
+    };
     match scale_model(&*st.store, &model_uid, req).await {
         Ok(dep) => match create_operation(&*st.store, OperationKind::Scale, &dep).await {
-            Ok(op) => operation_accepted(op),
+            Ok(op) => finish_write(&st, &ctx, &headers, &path, &body, op).await,
             Err(e) => control_error(e),
         },
         Err(e) => control_error(e),
     }
 }
 
-/// One-shot load: upsert spec + start deployment (compat-validated).
 pub async fn platform_load_model(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
-    Json(req): Json<nebula_common::ModelLoadRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> impl IntoResponse {
     if let Some(resp) = require_control_write(&ctx, &st) {
         return resp;
     }
+    let path = "/platform/v1/models/load";
+    match check_idempotency(&st.store, &ctx.principal, &headers, path, &body).await {
+        Ok(Some(r)) => return r,
+        Ok(None) => {}
+        Err(e) => return control_error(e),
+    }
+    let req: nebula_common::ModelLoadRequest = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return control_error(ServiceError::BadRequest(format!("invalid json: {e}")));
+        }
+    };
     match load_model(&*st.store, &ctx.principal, req).await {
         Ok(dep) => match create_operation(&*st.store, OperationKind::Deploy, &dep).await {
-            Ok(op) => operation_accepted(op),
+            Ok(op) => finish_write(&st, &ctx, &headers, path, &body, op).await,
             Err(e) => control_error(e),
         },
         Err(e) => control_error(e),
@@ -208,6 +351,54 @@ pub async fn platform_get_operation(
         Ok(op) => (StatusCode::OK, Json(op)).into_response(),
         Err(e) => control_error(e),
     }
+}
+
+pub async fn platform_operation_events(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(operation_id): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+
+    let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(16);
+    let store = st.store.clone();
+    tokio::spawn(async move {
+        loop {
+            match get_operation(&*store, &operation_id).await {
+                Ok(op) => {
+                    let terminal = matches!(
+                        op.status,
+                        OperationStatus::Succeeded | OperationStatus::Failed
+                    );
+                    let payload = serde_json::to_string(&op).unwrap_or_else(|_| "{}".into());
+                    if tx
+                        .send(Ok(Event::default().event("operation").data(payload)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if terminal {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let payload = json!({ "error": e.to_string() }).to_string();
+                    let _ = tx
+                        .send(Ok(Event::default().event("error").data(payload)))
+                        .await;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 pub fn apply_legacy_deprecation_headers(headers: &mut HeaderMap) {

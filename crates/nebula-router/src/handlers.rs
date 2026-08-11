@@ -287,7 +287,7 @@ pub async fn proxy_chat_completions(
         let dual = st.dual_write.clone();
         let model_uid_for_stream = model_uid.clone();
         let status_code = status.as_u16();
-        let request_id = request_id.clone();
+        let request_id_for_task = request_id.clone();
         tokio::spawn(async move {
             let mut first_chunk = true;
             let mut aborted = false;
@@ -332,7 +332,7 @@ pub async fn proxy_chat_completions(
                 );
                 tracing::info!(
                     model_uid = %model_uid_for_stream,
-                    request_id = %request_id,
+                    request_id = %request_id_for_task,
                     "router SSE aborted: client disconnected"
                 );
                 // Abort is not a 5xx / model error.
@@ -356,6 +356,7 @@ pub async fn proxy_chat_completions(
             .body(Body::from_stream(stream))
             .unwrap_or_else(|_| Response::new(Body::empty()));
         copy_response_headers(&resp_headers, &mut out);
+        inject_router_echo_headers(&mut out, &request_id, _selected_ep.replica_id);
         return out;
     }
 
@@ -380,5 +381,23 @@ pub async fn proxy_chat_completions(
         .body(Body::from(bytes))
         .unwrap_or_else(|_| Response::new(Body::empty()));
     copy_response_headers(&resp_headers, &mut out);
+    inject_router_echo_headers(&mut out, &request_id, _selected_ep.replica_id);
     out
+}
+
+fn inject_router_echo_headers(out: &mut Response, request_id: &str, replica_id: u32) {
+    use nebula_common::{HEADER_REPLICA_ID, HEADER_REQUEST_ID};
+
+    if let Ok(v) = HeaderValue::from_str(request_id) {
+        out.headers_mut().insert(
+            HeaderName::from_static(HEADER_REQUEST_ID),
+            v,
+        );
+    }
+    if let Ok(v) = HeaderValue::from_str(&replica_id.to_string()) {
+        out.headers_mut().insert(
+            HeaderName::from_static(HEADER_REPLICA_ID),
+            v,
+        );
+    }
 }
