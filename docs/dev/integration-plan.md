@@ -172,6 +172,20 @@ Tier C 治理读 API（SLO 状态、Canary 阶段）若要做，在 I3 之后单
 
 ---
 
+### I5 — Legacy 收尾与 v1 发布
+
+**目的：** 完成 §9 完成定义；legacy Admin 有明确下线日期。
+
+| ID | 交付 | 验收 | 状态 |
+|----|------|------|------|
+| I5.1 | Legacy Admin **`Sunset`** 响应头 + 文档日期 | `Thu, 11 Feb 2027 23:59:59 GMT`；v1.6.0 移除 | ✅ |
+| I5.2 | `integration.md` 与 I2/I4 实现对齐 | replica pin、compat、治理读 API | ✅ |
+| I5.3 | CHANGELOG + `versions/v1.5.0.md` | I0–I4 集成面发布说明 | ✅ |
+
+I2.4 / I2.5 仍按需排期，不阻塞 v1.5 发布。
+
+---
+
 ## 6. 总体顺序
 
 ```text
@@ -180,6 +194,7 @@ I0  单一 control service + compat + 错误/OpenAPI
       └─ I2  按需 Tier C（SSE → replica pin → 异构放置 → webhook）
            └─ I3  health / 审计 / 幂等 / v1 冻结
                 └─ I4  治理读 API（SLO / Canary 只读）✅
+                     └─ I5  Legacy sunset + v1.5 发布说明 ✅
 ```
 
 I0 阻塞 I1。I2 各项独立排期，**不**作为 v1 完成前提。
@@ -206,7 +221,7 @@ I0 阻塞 I1。I2 各项独立排期，**不**作为 v1 完成前提。
 | L2 Pool（[`pool.md`](../arch/pool.md)） | I2.4 异构放置与 Pool 可 later 合并；v1 用 affinity 即可 |
 | Console UX | Tier D 不变；与 Control 共享 service |
 
-[`roadmap.md`](../arch/roadmap.md) **Integration I0–I3** 行跟踪本计划。
+[`roadmap.md`](../arch/roadmap.md) **Integration I0–I4** 行跟踪本计划。
 
 ---
 

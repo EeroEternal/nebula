@@ -205,7 +205,7 @@ Gateway 对外稳定 JSON 映射见 [`contracts.md`](./contracts.md) C3（502 �
 ## 5. 控制 API（编排）
 
 **推荐：** `/platform/v1/*`（I1 正式契约，OpenAPI [`openapi-control.yaml`](./openapi-control.yaml)）。  
-**Legacy：** `/v1/admin/*` 仍可用但响应带 `Deprecation: true`，见 §5.2。
+**Legacy：** `/v1/admin/*` 仍可用但响应带 `Deprecation: true` 与 `Sunset: Thu, 11 Feb 2027 23:59:59 GMT`（计划 v1.6.0 移除），见 §5.2。
 
 所需角色：读 `viewer`，写 `operator`；与推理面共用 Bearer token 或 Postgres API Key（§3.5）。
 
@@ -258,6 +258,8 @@ curl -s http://127.0.0.1:8081/platform/v1/operations/op_… \
 ### 5.2 Legacy Admin（deprecated）
 
 Base：`http://<gateway-host>:8081/v1/admin`
+
+**下线计划：** 2027-02-11 起不再保证可用（HTTP `Sunset` 头）；目标在 **v1.6.0** 移除。新集成请只用 `/platform/v1/*`。
 
 #### 部署模型
 
@@ -498,13 +500,12 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 平台走 Gateway Admin 时，下列行为**与控制台页面不完全相同**，集成方需知晓：
 
-| 项 | Gateway Admin | 控制台（BFF `/api/v2/*`） |
-|----|---------------|---------------------------|
-| **Gateway Admin** | **走 `nebula-control`（与 BFF 同源）** | 部署前校验引擎/GPU/镜像 |
-| **鉴权** | `NEBULA_AUTH_TOKENS` | Postgres 登录 session |
-| **失败时机** | 不兼容配置可能到 Node 启引擎时才失败 | 部署请求可能被 BFF 直接拒绝 |
-
-若平台需要兼容门禁，当前应自行在调用前做规则校验，或后续在 Gateway Admin 补同等校验（产品排期项）。
+| 项 | `/platform/v1` / legacy Admin | 控制台（BFF `/api/v2/*`） |
+|----|-------------------------------|---------------------------|
+| **写路径** | 均走 `nebula-control`（与 BFF 同源） | 同一 service 层 |
+| **兼容矩阵** | I0 起部署写入口统一 compat 校验 | 同左 |
+| **鉴权** | API Key 或 `NEBULA_AUTH_TOKENS` | Postgres 登录 session |
+| **治理写** | 无（SLO/Canary 写仍走 BFF） | 完整 CRUD |
 
 ### 10.4 接口级 caveat
 
@@ -520,13 +521,11 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 | 项 | 现状 |
 |----|------|
-| **指定 replica 推理** | 不支持。Router 自动选路 + 可选 `x-session-id` 亲和；不能 `replica_id` pin |
-| **Per-replica 异构放置** | 部署级 `node_id` / `gpu_indices`；多副本跨不同节点需多次单副本部署或等产品扩展 |
-| **BFF 机机 API** | 无；集成统一走 Gateway |
+| **指定 replica 推理** | 可选：请求头 `x-nebula-replica-id` 固定 Router 选路；默认仍自动负载均衡 + `x-session-id` 亲和 |
+| **Per-replica 异构放置** | 部署级 `node_id` / `gpu_indices`；多副本跨不同节点需多次单副本部署或等产品扩展（I2.4） |
+| **BFF 机机 API** | 无；集成统一走 Gateway `/platform/v1` |
 | **纳管外部已有推理集群** | 非产品承诺路径 |
 | **训练 / 云 API 聚合** | 不在 Nebula 范围 |
-
-Replica 级路由（如 `x-nebula-replica-id`）若成为平台硬性需求，需在 Nebula 产品侧单独立项。
 
 ---
 
@@ -553,7 +552,9 @@ Replica 级路由（如 `x-nebula-replica-id`）若成为平台硬性需求，�
 | 契约 | 代码 |
 |------|------|
 | Gateway 路由 | `crates/nebula-gateway/src/main.rs` |
+| Platform v1 handlers | `crates/nebula-gateway/src/platform_v1.rs` |
 | Admin load / scale / status | `crates/nebula-gateway/src/handlers.rs` |
+| Control service | `crates/nebula-control/` |
 | 推理代理与 header 注入 | `crates/nebula-gateway/src/proxy_common.rs` |
 | 鉴权 | `crates/nebula-common/src/auth.rs` |
 | ExecutionContext | `crates/nebula-common/src/execution_context.rs` |
