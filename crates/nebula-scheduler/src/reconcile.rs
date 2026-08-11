@@ -411,6 +411,8 @@ async fn add_replacement_replicas_from_plan(
             docker_image: docker_image.clone(),
             min_replicas: None,
             max_replicas: None,
+            replica_specs: None,
+            callback_url: None,
         },
         status: ModelRequestStatus::Scheduled,
         created_at_ms: 0,

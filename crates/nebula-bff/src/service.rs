@@ -417,8 +417,10 @@ pub async fn create_model(
                 config_overrides: None,
                 node_id: req.node_id,
                 gpu_indices: req.gpu_indices,
+                replica_specs: None,
                 image_id: None,
                 image_override_reason: None,
+                callback_url: None,
             },
         )
         .await?;
@@ -902,8 +904,10 @@ pub async fn deploy_template(
             config_overrides: req.config_overrides,
             node_id: req.node_id,
             gpu_indices: req.gpu_indices,
+            replica_specs: None,
             image_id: None,
             image_override_reason: None,
+            callback_url: None,
         },
     )
     .await?;
