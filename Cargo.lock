@@ -1394,6 +1394,7 @@ dependencies = [
  "chrono",
  "clap",
  "nebula-common",
+ "nebula-control",
  "nebula-meta",
  "rand 0.8.5",
  "reqwest",
@@ -1450,6 +1451,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "nebula-control"
+version = "1.4.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "nebula-common",
+ "nebula-meta",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nebula-gateway"
 version = "1.4.0"
 dependencies = [
@@ -1463,6 +1479,7 @@ dependencies = [
  "futures-util",
  "http",
  "nebula-common",
+ "nebula-control",
  "nebula-meta",
  "reqwest",
  "serde",

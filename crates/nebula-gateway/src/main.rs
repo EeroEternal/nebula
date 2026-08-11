@@ -1,6 +1,7 @@
 mod args;
 mod audit;
 mod auth;
+mod control;
 mod engine;
 mod handlers;
 mod interface;

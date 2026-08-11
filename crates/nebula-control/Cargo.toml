@@ -1,0 +1,18 @@
+[package]
+name = "nebula-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared control-plane service layer for Gateway and BFF"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+nebula-common = { path = "../nebula-common" }
+nebula-meta = { path = "../nebula-meta" }

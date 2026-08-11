@@ -25,4 +25,5 @@ rand = "0.8"
 
 nebula-meta = { path = "../nebula-meta" }
 nebula-common = { path = "../nebula-common" }
+nebula-control = { path = "../nebula-control" }
 thiserror.workspace = true

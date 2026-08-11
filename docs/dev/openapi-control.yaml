@@ -1,0 +1,159 @@
+openapi: 3.0.3
+info:
+  title: Nebula Control API (current)
+  description: |
+    I0 snapshot of machine-facing control routes on Gateway.
+    Stable `/platform/v1` is planned in I1; legacy `/v1/admin/*` remains during deprecation.
+    See docs/dev/integration.md and docs/dev/integration-plan.md.
+  version: 0.1.0-i0
+
+servers:
+  - url: http://127.0.0.1:8081
+    description: Gateway (default dev)
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/admin/models/load:
+    post:
+      summary: Deploy or update model (legacy)
+      deprecated: true
+      operationId: adminLoadModel
+      tags: [Control Legacy]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelLoadRequest'
+      responses:
+        '200':
+          description: Deployment desired state written
+        '400':
+          $ref: '#/components/responses/Error'
+
+  /v1/admin/models/requests/{id}/scale:
+    put:
+      summary: Scale model replicas (legacy)
+      deprecated: true
+      operationId: adminScaleModel
+      tags: [Control Legacy]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [replicas]
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+      responses:
+        '200':
+          description: Scaled
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /v1/admin/models/requests/{id}:
+    delete:
+      summary: Stop model (legacy)
+      deprecated: true
+      operationId: adminStopModel
+      tags: [Control Legacy]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Stop desired
+        '404':
+          $ref: '#/components/responses/Error'
+
+  /v1/admin/cluster/status:
+    get:
+      summary: Cluster snapshot (nodes, endpoints, placements)
+      operationId: adminClusterStatus
+      tags: [Control Legacy]
+      responses:
+        '200':
+          description: ClusterStatus JSON
+
+  /v1/chat/completions:
+    post:
+      summary: OpenAI-compatible chat (inference)
+      operationId: chatCompletions
+      tags: [Inference]
+      externalDocs:
+        description: OpenAI API reference
+        url: https://platform.openai.com/docs/api-reference/chat
+      responses:
+        '200':
+          description: Completion response
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: NEBULA_AUTH_TOKENS entry (token:role[:tenant_id])
+
+  schemas:
+    ModelLoadRequest:
+      type: object
+      required: [model_uid, model_name]
+      properties:
+        model_uid:
+          type: string
+        model_name:
+          type: string
+        replicas:
+          type: integer
+          default: 1
+        node_id:
+          type: string
+        gpu_index:
+          type: integer
+        gpu_indices:
+          type: array
+          items:
+            type: integer
+        engine_type:
+          type: string
+        docker_image:
+          type: string
+        config:
+          type: object
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            type:
+              type: string
+            code:
+              type: string
+            message:
+              type: string
+            request_id:
+              type: string
+
+  responses:
+    Error:
+      description: C3-style error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'

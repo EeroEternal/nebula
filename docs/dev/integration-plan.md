@@ -98,13 +98,13 @@ Internal    Router / Scheduler / etcd       永不对外
 
 **目的：** 在改 URL 之前，让「API 部署 = 控制台部署」。
 
-| ID | 交付 | 验收 |
+| ID | 交付 | 状态 |
 |----|------|------|
-| I0.1 | 抽出共享 **control service**（自 BFF `service.rs`）；Gateway Admin 只调 service，不直接写 etcd | 同输入 → 同 deployment / compat 结果 |
-| I0.2 | 部署入口统一 **兼容矩阵** + 结构化拒绝 | API 层 400，行为与控制台一致 |
-| I0.3 | Control 侧错误统一 C3 envelope | 无 plain text 404 |
-| I0.4 | OpenAPI 描述 **当前** Admin + 推理索引 | CI 防漂移 |
-| I0.5 | Legacy 路径标注 deprecated 时间表 | 见 [`integration.md`](./integration.md) |
+| I0.1 | 共享 **`nebula-control`** crate；Gateway Admin 调 `load_model` / `scale_model` / `stop_model` | ✅ |
+| I0.2 | 部署入口统一 **兼容矩阵** + 结构化拒绝 | ✅ |
+| I0.3 | Control 侧错误统一 C3 envelope | ✅ |
+| I0.4 | OpenAPI [`openapi-control.yaml`](./openapi-control.yaml) | ✅ |
+| I0.5 | Legacy 路径 OpenAPI `deprecated` + 文档互链 | ✅ |
 
 **范围：** Tier A 的前置；不新增 Tier C 能力。
 

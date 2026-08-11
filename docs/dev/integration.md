@@ -4,7 +4,8 @@
 > **基线：** Nebula v1.4.0 · Gateway 默认 `:8081`  
 > **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，不提供兼容层。  
 > **相关：** 安装见 [`../manual/deployment.md`](../manual/deployment.md)；错误码见 [`contracts.md`](./contracts.md)；架构见 [`../arch/architecture.md`](../arch/architecture.md)。  
-> **演进计划：** [`integration-plan.md`](./integration-plan.md)（以 Nebula 控制面分层定义暴露范围，I0–I3 拟议）。
+> **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0 ✅**；I1–I3 拟议）。  
+> **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（I0 现状；legacy 已标 deprecated）。
 
 ---
 
@@ -422,7 +423,7 @@ curl -s -X DELETE http://127.0.0.1:8081/v1/admin/models/requests/qwen3-prod \
 
 | 项 | Gateway Admin | 控制台（BFF `/api/v2/*`） |
 |----|---------------|---------------------------|
-| **兼容矩阵校验** | **不校验**；`compat_rule_ids` 写空 | 部署前校验引擎/GPU/镜像 |
+| **Gateway Admin** | **走 `nebula-control`（与 BFF 同源）** | 部署前校验引擎/GPU/镜像 |
 | **鉴权** | `NEBULA_AUTH_TOKENS` | Postgres 登录 session |
 | **失败时机** | 不兼容配置可能到 Node 启引擎时才失败 | 部署请求可能被 BFF 直接拒绝 |
 
