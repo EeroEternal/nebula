@@ -716,6 +716,7 @@ mod tests {
             extra_args: None,
             engine_type: None,
             docker_image: None,
+            pool_id: None,
         }
     }
 

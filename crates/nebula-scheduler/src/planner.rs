@@ -2,14 +2,49 @@ use std::collections::{HashMap, HashSet};
 
 use nebula_common::{
     build_engine_extra_args_lenient, image_platforms_match, resolve_node_platform, EngineImage,
-    ModelConfig, ModelDeployment, ModelRequest, ModelSpec, NodeStatus, PlacementAssignment,
-    PlacementPlan,
+    HardwarePool, ModelConfig, ModelDeployment, ModelRequest, ModelSpec, NodeStatus,
+    PlacementAssignment, PlacementPlan,
 };
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::util::now_ms;
 
 const NODE_STALE_MS: u64 = 60_000;
+
+async fn load_allowed_pool_nodes(
+    store: &EtcdMetaStore,
+    allowed_pools: Option<&[String]>,
+) -> anyhow::Result<Option<HashSet<String>>> {
+    let Some(pools) = allowed_pools else {
+        return Ok(None);
+    };
+    if pools.is_empty() {
+        return Ok(None);
+    }
+
+    let kvs = store.list_prefix("/pools/").await?;
+    let mut allowed_node_ids = HashSet::new();
+    let mut matched_pools = 0usize;
+
+    for (_, val, _) in kvs {
+        if let Ok(pool) = serde_json::from_slice::<HardwarePool>(&val) {
+            if pools.iter().any(|p| p == &pool.pool_id) {
+                matched_pools += 1;
+                if pool.schedulable {
+                    for node_id in pool.node_ids {
+                        allowed_node_ids.insert(node_id);
+                    }
+                }
+            }
+        }
+    }
+
+    if matched_pools == 0 {
+        anyhow::bail!("none of the allowed_pools {:?} exist in /pools/", pools);
+    }
+
+    Ok(Some(allowed_node_ids))
+}
 
 async fn load_image_platforms(
     store: &EtcdMetaStore,
@@ -236,6 +271,7 @@ fn make_assignment(
         extra_args,
         engine_type,
         docker_image,
+        pool_id: None,
     }
 }
 
@@ -365,6 +401,7 @@ pub async fn build_plan_from_deployment(
             gpu_affinity,
             &used_gpus,
             image_ref,
+            deployment.allowed_pools.as_deref(),
         )
         .await?;
 
@@ -406,7 +443,7 @@ pub async fn build_plan_from_deployment(
     })
 }
 
-/// Node/GPU selection for deployment path. Respects optional affinity overrides.
+/// Node/GPU selection for deployment path. Respects optional affinity and pool constraints.
 async fn select_node_and_gpus_for_deployment(
     store: &EtcdMetaStore,
     config: &Option<ModelConfig>,
@@ -414,11 +451,21 @@ async fn select_node_and_gpus_for_deployment(
     gpu_affinity: Option<&[u32]>,
     used_gpus: &HashMap<String, HashSet<u32>>,
     docker_image: Option<&str>,
+    allowed_pools: Option<&[String]>,
 ) -> anyhow::Result<(String, Vec<u32>)> {
     let image_platforms = load_image_platforms(store, docker_image).await;
+    let allowed_nodes_from_pool = load_allowed_pool_nodes(store, allowed_pools).await?;
 
-    // If both node and GPU affinity are specified, use them directly (still check platform).
+    // If both node and GPU affinity are specified, use them directly (still check platform & pool).
     if let Some(target_node) = node_affinity {
+        if let Some(ref allowed) = allowed_nodes_from_pool {
+            if !allowed.contains(target_node) {
+                anyhow::bail!(
+                    "node_affinity '{target_node}' is not in allowed_pools {:?}",
+                    allowed_pools.unwrap_or_default()
+                );
+            }
+        }
         if !image_platforms.is_empty() {
             if let Ok(kvs) = store.list_prefix("/nodes/").await {
                 for (_, val, _) in kvs {
@@ -439,9 +486,6 @@ async fn select_node_and_gpus_for_deployment(
         let indices = gpu_affinity.map(|g| g.to_vec()).unwrap_or_default();
         return Ok((target_node.to_string(), indices));
     }
-
-    // If only GPU affinity is set but no node, we still need to auto-select a node
-    // but will use the specified GPUs. Fall through to auto-selection below.
 
     let required_vram_mb = config
         .as_ref()
@@ -466,10 +510,17 @@ async fn select_node_and_gpus_for_deployment(
     let now = now_ms();
     let mut best_node: Option<(String, Vec<u32>, u64)> = None;
     let mut rejected_platform = 0u32;
+    let mut rejected_pool = 0u32;
 
     for node in &nodes {
         if now.saturating_sub(node.last_heartbeat_ms) > NODE_STALE_MS {
             continue;
+        }
+        if let Some(ref allowed) = allowed_nodes_from_pool {
+            if !allowed.contains(&node.node_id) {
+                rejected_pool += 1;
+                continue;
+            }
         }
         if !node_matches_platforms(node, &image_platforms) {
             rejected_platform += 1;
@@ -528,10 +579,23 @@ async fn select_node_and_gpus_for_deployment(
         if now.saturating_sub(node.last_heartbeat_ms) > NODE_STALE_MS {
             continue;
         }
+        if let Some(ref allowed) = allowed_nodes_from_pool {
+            if !allowed.contains(&node.node_id) {
+                continue;
+            }
+        }
         if !node_matches_platforms(node, &image_platforms) {
             continue;
         }
         return Ok((node.node_id.clone(), vec![]));
+    }
+
+    if rejected_pool > 0 && allowed_nodes_from_pool.is_some() {
+        anyhow::bail!(
+            "no eligible nodes in allowed_pools {:?} (rejected {} nodes by pool constraint)",
+            allowed_pools.unwrap_or_default(),
+            rejected_pool
+        );
     }
 
     if rejected_platform > 0 && !image_platforms.is_empty() {

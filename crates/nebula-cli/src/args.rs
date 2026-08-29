@@ -92,19 +92,57 @@ pub enum Command {
         #[arg(long)]
         replicas: u32,
     },
-    /// Drain an endpoint (graceful shutdown)
+    /// Drain an endpoint or entire node (graceful shutdown)
     Drain {
-        /// model_uid of the endpoint
-        #[arg(long)]
+        /// model_uid of the endpoint (required if not draining by node)
+        #[arg(long, default_value = "")]
         model_uid: String,
         /// replica_id of the endpoint
-        #[arg(long)]
+        #[arg(long, default_value_t = 0)]
         replica_id: u32,
+        /// Drain all replicas on a specific node
+        #[arg(long)]
+        node_id: Option<String>,
+    },
+    /// Hardware pool management
+    Pool {
+        #[command(subcommand)]
+        subcommand: PoolCommand,
     },
     /// Admin operations
     Admin {
         #[command(subcommand)]
         subcommand: AdminCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PoolCommand {
+    /// List all hardware pools
+    List,
+    /// Get details of a hardware pool
+    Get {
+        /// Pool ID
+        pool_id: String,
+    },
+    /// Create a new hardware pool
+    Create {
+        /// Pool ID
+        pool_id: String,
+        /// Display name
+        #[arg(long)]
+        display_name: Option<String>,
+        /// Platform constraint (e.g. nvidia-cuda)
+        #[arg(long)]
+        platform: Option<String>,
+        /// Member node IDs
+        #[arg(long)]
+        nodes: Vec<String>,
+    },
+    /// Delete a hardware pool
+    Delete {
+        /// Pool ID
+        pool_id: String,
     },
 }
 

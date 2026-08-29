@@ -15,6 +15,7 @@ pub mod model_spec;
 pub mod model_template;
 pub mod node_status;
 pub mod placement;
+pub mod pool;
 pub mod selection;
 pub mod slo;
 pub mod tenant;
@@ -55,6 +56,7 @@ pub use node_status::{
     image_platforms_match, resolve_node_platform, GpuStatus, NodeStatus, DEFAULT_NODE_PLATFORM,
 };
 pub use placement::{next_placement_version, PlacementAssignment, PlacementPlan};
+pub use pool::{HardwarePool, PoolRole};
 pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
 pub use slo::{
     evaluate_slo, DiagnosticEvent, ModelSlo, SloComplianceStatus, SloEvaluation, SloMetricSample,

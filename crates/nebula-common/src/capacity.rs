@@ -178,6 +178,7 @@ mod tests {
             replica_specs: None,
             config_overrides: None,
             image_id: None,
+            allowed_pools: None,
             image_override_reason: None,
             compat_rule_ids: vec![],
             version: 1,

@@ -166,3 +166,43 @@ pub async fn drain_replica(
         status: "draining".to_string(),
     })
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DrainNodeResponse {
+    pub node_id: String,
+    pub drained_replicas: Vec<DrainReplicaResponse>,
+}
+
+pub async fn drain_node(
+    store: &dyn MetaStore,
+    node_id: &str,
+) -> Result<DrainNodeResponse, ServiceError> {
+    let raw = store.list_prefix("/endpoints/").await?;
+    let mut drained = Vec::new();
+
+    for (key, val, _) in raw {
+        if let Ok(mut ep) = serde_json::from_slice::<EndpointInfo>(&val) {
+            if ep.node_id == node_id {
+                let status_str = if ep.status == EndpointStatus::Draining {
+                    "already_draining".to_string()
+                } else {
+                    ep.status = EndpointStatus::Draining;
+                    if let Ok(data) = serde_json::to_vec(&ep) {
+                        let _ = store.put(&key, data, None).await;
+                    }
+                    "draining".to_string()
+                };
+                drained.push(DrainReplicaResponse {
+                    model_uid: ep.model_uid,
+                    replica_id: ep.replica_id,
+                    status: status_str,
+                });
+            }
+        }
+    }
+
+    Ok(DrainNodeResponse {
+        node_id: node_id.to_string(),
+        drained_replicas: drained,
+    })
+}

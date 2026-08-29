@@ -607,6 +607,82 @@ pub async fn list_canaries(
     Ok((StatusCode::OK, Json(items)).into_response())
 }
 
+// ---------------------------------------------------------------------------
+// Hardware Pools & Node Drain
+// ---------------------------------------------------------------------------
+
+pub async fn list_pools(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp);
+    }
+    let pools = nebula_control::list_pools(&*st.store).await?;
+    Ok((StatusCode::OK, Json(pools)).into_response())
+}
+
+pub async fn get_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(pool_id): Path<String>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp);
+    }
+    let pool = nebula_control::get_pool(&*st.store, &pool_id).await?;
+    Ok((StatusCode::OK, Json(pool)).into_response())
+}
+
+pub async fn create_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(req): Json<nebula_control::CreatePoolRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp);
+    }
+    let pool = nebula_control::create_pool(&*st.store, req).await?;
+    Ok((StatusCode::CREATED, Json(pool)).into_response())
+}
+
+pub async fn update_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(pool_id): Path<String>,
+    Json(req): Json<nebula_control::UpdatePoolRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp);
+    }
+    let pool = nebula_control::update_pool(&*st.store, &pool_id, req).await?;
+    Ok((StatusCode::OK, Json(pool)).into_response())
+}
+
+pub async fn delete_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(pool_id): Path<String>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp);
+    }
+    nebula_control::delete_pool(&*st.store, &pool_id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+pub async fn drain_node(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(node_id): Path<String>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp);
+    }
+    let resp = nebula_control::drain_node(&*st.store, &node_id).await?;
+    Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
 pub async fn create_canary(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,

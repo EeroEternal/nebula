@@ -7,6 +7,7 @@ pub mod idempotency;
 pub mod inventory;
 pub mod models;
 pub mod operation;
+pub mod pool;
 pub mod router_metrics;
 pub mod store;
 
@@ -22,13 +23,18 @@ pub use governance::{
 pub use health::{cluster_counts, etcd_health, ClusterCounts, ComponentHealth, ComponentStatus, HealthSummary};
 pub use idempotency::{get_idempotency, hash_body, put_idempotency, IdempotencyRecord};
 pub use inventory::{
-    count_ready_replicas, drain_replica, get_cluster_status, list_endpoints, list_nodes,
-    list_replicas, DrainReplicaRequest, DrainReplicaResponse, NodeInventory, ReplicaView,
+    count_ready_replicas, drain_node, drain_replica, get_cluster_status, list_endpoints, list_nodes,
+    list_replicas, DrainNodeResponse, DrainReplicaRequest, DrainReplicaResponse, NodeInventory,
+    ReplicaView,
 };
 pub use models::{create_model, get_model, list_models, CreateModelRequest};
 pub use operation::{
     create_operation, get_operation, Operation, OperationKind, OperationOptions, OperationResponse,
     OperationStatus,
+};
+pub use pool::{
+    create_pool, delete_pool, get_pool, list_pools, update_pool, CreatePoolRequest,
+    UpdatePoolRequest,
 };
 pub use router_metrics::evaluate_slo_from_router_metrics;
 pub use store::{

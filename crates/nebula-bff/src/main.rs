@@ -153,6 +153,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/templates/:id/deploy", post(handlers_v2::deploy_template))
         .route("/nodes/:node_id/cache", get(handlers_v2::node_cache))
         .route("/nodes/:node_id/disk", get(handlers_v2::node_disk))
+        .route("/nodes/:node_id/drain", post(handlers_v2::drain_node))
+        .route(
+            "/pools",
+            get(handlers_v2::list_pools).post(handlers_v2::create_pool),
+        )
+        .route(
+            "/pools/:pool_id",
+            get(handlers_v2::get_pool)
+                .put(handlers_v2::update_pool)
+                .delete(handlers_v2::delete_pool),
+        )
         .route("/cache/summary", get(handlers_v2::cache_summary))
         .route("/alerts", get(handlers_v2::list_alerts))
         .route("/migrate", post(handlers_v2::migrate_v1_to_v2))

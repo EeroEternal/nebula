@@ -68,6 +68,10 @@ pub struct ModelDeployment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_id: Option<String>,
 
+    /// Optional pool affinity constraints. If non-empty, Scheduler only assigns to nodes in these pools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_pools: Option<Vec<String>>,
+
     /// Human reason when forcing an image / platform override past defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_override_reason: Option<String>,

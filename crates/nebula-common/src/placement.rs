@@ -26,6 +26,10 @@ pub struct PlacementAssignment {
     /// the node-level engine docker_image CLI arg.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub docker_image: Option<String>,
+
+    /// The HardwarePool this assignment was scheduled into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_id: Option<String>,
 }
 
 impl PlacementAssignment {

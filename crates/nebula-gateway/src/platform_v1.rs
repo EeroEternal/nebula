@@ -19,12 +19,13 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use nebula_control::{
     callback_url_from_scale, callback_url_from_start, cluster_counts, create_model, create_operation,
-    drain_replica, etcd_health, evaluate_slo_from_router_metrics, filter_canaries_by_model,
-    get_canary, get_cluster_status, get_model, get_model_deployment, get_operation, get_slo,
-    list_canaries, list_models, list_nodes, list_replicas, load_model, scale_model, start_model,
-    stop_model, ComponentHealth, ComponentStatus, CreateModelRequest, DrainReplicaRequest,
-    HealthSummary, OperationKind, OperationOptions, OperationStatus, ScaleDeploymentRequest,
-    ServiceError, StartDeploymentRequest,
+    create_pool, delete_pool, drain_node, drain_replica, etcd_health, evaluate_slo_from_router_metrics,
+    filter_canaries_by_model, get_canary, get_cluster_status, get_model, get_model_deployment,
+    get_operation, get_pool, get_slo, list_canaries, list_models, list_nodes, list_pools,
+    list_replicas, load_model, scale_model, start_model, stop_model, update_pool, ComponentHealth,
+    ComponentStatus, CreateModelRequest, CreatePoolRequest, DrainReplicaRequest, HealthSummary,
+    OperationKind, OperationOptions, OperationStatus, ScaleDeploymentRequest, ServiceError,
+    StartDeploymentRequest, UpdatePoolRequest,
 };
 
 use crate::audit::{fetch_audit_logs, AuditLogQuery};
@@ -583,6 +584,90 @@ pub async fn platform_drain_replica(
     }
     match drain_replica(&*st.store, &body.model_uid, body.replica_id).await {
         Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_drain_node(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(node_id): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_write(&ctx, &st) {
+        return resp;
+    }
+    match drain_node(&*st.store, &node_id).await {
+        Ok(resp) => (StatusCode::OK, Json(resp)).into_response(),
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_list_pools(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+    match list_pools(&*st.store).await {
+        Ok(pools) => (StatusCode::OK, Json(pools)).into_response(),
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_get_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(pool_id): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_read(&ctx, &st) {
+        return resp;
+    }
+    match get_pool(&*st.store, &pool_id).await {
+        Ok(pool) => (StatusCode::OK, Json(pool)).into_response(),
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_create_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Json(body): Json<CreatePoolRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_write(&ctx, &st) {
+        return resp;
+    }
+    match create_pool(&*st.store, body).await {
+        Ok(pool) => (StatusCode::CREATED, Json(pool)).into_response(),
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_update_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(pool_id): Path<String>,
+    Json(body): Json<UpdatePoolRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_write(&ctx, &st) {
+        return resp;
+    }
+    match update_pool(&*st.store, &pool_id, body).await {
+        Ok(pool) => (StatusCode::OK, Json(pool)).into_response(),
+        Err(e) => control_error(e),
+    }
+}
+
+pub async fn platform_delete_pool(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(pool_id): Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_write(&ctx, &st) {
+        return resp;
+    }
+    match delete_pool(&*st.store, &pool_id).await {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => control_error(e),
     }
 }

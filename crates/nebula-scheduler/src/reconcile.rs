@@ -448,6 +448,7 @@ async fn add_replacement_replicas_from_plan(
                 extra_args: stale.extra_args.clone().or(extra_args.clone()),
                 engine_type: stale.engine_type.clone().or(engine_type.clone()),
                 docker_image: stale.docker_image.clone().or(docker_image.clone()),
+                pool_id: stale.pool_id.clone(),
             });
             used_replica_ids.insert(stale.replica_id);
 
@@ -500,6 +501,7 @@ async fn add_replacement_replicas_from_plan(
                     extra_args: extra_args.clone(),
                     engine_type: engine_type.clone(),
                     docker_image: docker_image.clone(),
+                    pool_id: None,
                 });
 
                 info!(

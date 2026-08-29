@@ -13,7 +13,7 @@ use nebula_common::{ClusterStatus, ModelLoadRequest};
 
 use crate::args::{
     AdminCommand, Args, CacheCommand, ClusterCommand, Command, DiskCommand, ModelCommand,
-    TemplateCommand,
+    PoolCommand, TemplateCommand,
 };
 use crate::client::auth;
 use crate::config::build_config;
@@ -388,22 +388,89 @@ async fn main() -> Result<()> {
         Command::Drain {
             model_uid,
             replica_id,
+            node_id,
         } => {
-            let url = platform_url(&args.gateway_url, "/replicas/drain");
-            let body = serde_json::json!({
-                "model_uid": model_uid,
-                "replica_id": replica_id
-            });
-            let resp = auth(client.post(&url), token.as_ref())
-                .json(&body)
-                .send()
-                .await?;
-            if resp.status().is_success() {
-                println!("✓ Draining endpoint {}/replica-{}", model_uid, replica_id);
+            if let Some(nid) = node_id {
+                let url = platform_url(&args.gateway_url, &format!("/nodes/{nid}/drain"));
+                let resp = auth(client.post(&url), token.as_ref()).send().await?;
+                if resp.status().is_success() {
+                    let result: serde_json::Value = resp.json().await?;
+                    println!("✓ Node '{}' draining initiated", nid);
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    eprintln!("✗ Failed to drain node: {}", resp.text().await?);
+                }
             } else {
-                eprintln!("✗ Failed to drain: {}", resp.text().await?);
+                let url = platform_url(&args.gateway_url, "/replicas/drain");
+                let body = serde_json::json!({
+                    "model_uid": model_uid,
+                    "replica_id": replica_id
+                });
+                let resp = auth(client.post(&url), token.as_ref())
+                    .json(&body)
+                    .send()
+                    .await?;
+                if resp.status().is_success() {
+                    println!("✓ Draining endpoint {}/replica-{}", model_uid, replica_id);
+                } else {
+                    eprintln!("✗ Failed to drain: {}", resp.text().await?);
+                }
             }
         }
+        Command::Pool { subcommand } => match subcommand {
+            PoolCommand::List => {
+                let url = platform_url(&args.gateway_url, "/pools");
+                let resp = auth(client.get(&url), token.as_ref()).send().await?;
+                if resp.status().is_success() {
+                    let pools: serde_json::Value = resp.json().await?;
+                    println!("{}", serde_json::to_string_pretty(&pools)?);
+                } else {
+                    eprintln!("✗ Failed to list pools: {}", resp.text().await?);
+                }
+            }
+            PoolCommand::Get { pool_id } => {
+                let url = platform_url(&args.gateway_url, &format!("/pools/{pool_id}"));
+                let resp = auth(client.get(&url), token.as_ref()).send().await?;
+                if resp.status().is_success() {
+                    let pool: serde_json::Value = resp.json().await?;
+                    println!("{}", serde_json::to_string_pretty(&pool)?);
+                } else {
+                    eprintln!("✗ Failed to get pool: {}", resp.text().await?);
+                }
+            }
+            PoolCommand::Create {
+                pool_id,
+                display_name,
+                platform,
+                nodes,
+            } => {
+                let url = platform_url(&args.gateway_url, "/pools");
+                let body = serde_json::json!({
+                    "pool_id": pool_id,
+                    "display_name": display_name.unwrap_or_else(|| pool_id.clone()),
+                    "platform": platform,
+                    "node_ids": nodes,
+                });
+                let resp = auth(client.post(&url), token.as_ref())
+                    .json(&body)
+                    .send()
+                    .await?;
+                if resp.status().is_success() {
+                    println!("✓ Created hardware pool '{}'", pool_id);
+                } else {
+                    eprintln!("✗ Failed to create pool: {}", resp.text().await?);
+                }
+            }
+            PoolCommand::Delete { pool_id } => {
+                let url = platform_url(&args.gateway_url, &format!("/pools/{pool_id}"));
+                let resp = auth(client.delete(&url), token.as_ref()).send().await?;
+                if resp.status().is_success() {
+                    println!("✓ Deleted hardware pool '{}'", pool_id);
+                } else {
+                    eprintln!("✗ Failed to delete pool: {}", resp.text().await?);
+                }
+            }
+        },
         Command::Admin { subcommand } => match subcommand {
             AdminCommand::Migrate => {
                 let url = bff_v2_url(&args.bff_url, "/migrate");

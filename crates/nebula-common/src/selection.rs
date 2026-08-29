@@ -407,6 +407,7 @@ pub fn draft_from_candidate(
             ..Default::default()
         }),
         image_id: candidate.image_id.clone(),
+        allowed_pools: None,
         image_override_reason: Some("selection_draft".into()),
         compat_rule_ids: Vec::new(),
         version: 1,
