@@ -6,6 +6,21 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-08-29
+
+### Removed
+- **Nebula Lite (`crates/nebula-lite`):** Deprecated and removed the single-node local launcher; Nebula strictly focuses on distributed cluster control-plane coordination.
+- **GitHub Workflows:** Cleaned up unused automation workflows and stale templates.
+
+### Changed
+- **BFF Storage Migration (PostgreSQL):**
+  - Migrated deployment templates (`/templates/`) to `bff_templates` table in PostgreSQL.
+  - Migrated L3 model profiles (`/model_profiles/`) to `bff_model_profiles` table in PostgreSQL.
+  - Migrated tenant pricing (`/pricing/`) to `bff_pricing` table in PostgreSQL.
+  - Migrated window usage & metrics (`/usage/{tenant}/{window}`) to `bff_usage` table in PostgreSQL.
+  - Migrated benchmark runs and profiles (`/benchmarks/*`) to `bff_benchmark_runs` and `bff_benchmark_profiles` in PostgreSQL.
+- **etcd Clarification:** etcd keyspace strictly pruned to coordination truths (`/deployments/`, `/placements/`, `/endpoints/`, `/stats/`, `/capabilities/`, leases & election).
+
 ## [1.6.0] - 2026-08-11
 
 ### Removed

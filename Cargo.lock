@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-bff"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1412,7 +1412,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-cli"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1428,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-common"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-control"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-gateway"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-meta"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1515,7 +1515,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-node"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1540,7 +1540,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-observe"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-router"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1579,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "nebula-scheduler"
-version = "1.4.0"
+version = "1.7.0"
 dependencies = [
  "anyhow",
  "axum",
