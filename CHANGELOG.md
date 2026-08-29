@@ -6,6 +6,14 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-29
+
+### Added
+- **HardwarePool Resource Abstraction (`/pools/`):** Define logical heterogeneous GPU/NPU resource pools with role, platform, node membership, and schedulability controls.
+- **Pool-Constrained Placement Scheduling:** `ModelDeployment` supports `allowed_pools` to restrict replica placement to designated pools with explicit capacity rejection.
+- **Node-level Graceful Drain:** `POST /platform/v1/nodes/:node_id/drain` and `POST /api/v2/nodes/:node_id/drain` to gracefully drain all model replicas on a physical node prior to maintenance.
+- **CLI Commands:** Added `nebula pool [list|get|create|delete]` and `nebula drain --node-id <node_id>`.
+
 ## [1.7.0] - 2026-08-29
 
 ### Removed

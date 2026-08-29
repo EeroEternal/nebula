@@ -1,6 +1,6 @@
 # Nebula 文档索引
 
-当前发布：**[v1.7.0](versions/v1.7.0.md)**。
+当前发布：**[v1.8.0](versions/v1.8.0.md)**。
 
 ## 产品与运维（`manual/`）
 
@@ -17,6 +17,7 @@
 
 | 文档 | 说明 |
 |------|------|
+| [`versions/v1.8.0.md`](versions/v1.8.0.md) | v1.8.0 L2 算力池化（HardwarePool）与整机优雅排空（Node Drain） |
 | [`versions/v1.7.0.md`](versions/v1.7.0.md) | v1.7.0 架构升级：业务与资产全量迁入 PostgreSQL，下线单机 Lite |
 | [`versions/v1.6.0.md`](versions/v1.6.0.md) | v1.6.0 移除 legacy Admin |
 | [`versions/v1.5.0.md`](versions/v1.5.0.md) | v1.5.0 集成 Control API |
