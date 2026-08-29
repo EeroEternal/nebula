@@ -14,14 +14,6 @@ fn tenant_key(id: &str) -> String {
     format!("/tenants/{id}")
 }
 
-fn pricing_key(id: &str) -> String {
-    format!("/pricing/{id}")
-}
-
-fn usage_key(tenant_id: &str, window_start_ms: u64) -> String {
-    format!("/usage/{tenant_id}/{window_start_ms}")
-}
-
 pub async fn list_tenants(store: &dyn MetaStore) -> Result<Vec<Tenant>, ServiceError> {
     let entries = store.list_prefix("/tenants/").await?;
     let mut out: Vec<Tenant> = entries
@@ -103,13 +95,32 @@ pub async fn delete_tenant(store: &dyn MetaStore, tenant_id: &str) -> Result<(),
     Ok(())
 }
 
-pub async fn list_pricing(store: &dyn MetaStore) -> Result<Vec<CostPriceConfig>, ServiceError> {
-    let entries = store.list_prefix("/pricing/").await?;
-    let mut out: Vec<CostPriceConfig> = entries
-        .into_iter()
-        .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
-        .collect();
-    out.sort_by(|a, b| a.price_id.cmp(&b.price_id));
+pub async fn list_pricing_db(db: &sqlx::PgPool) -> Result<Vec<CostPriceConfig>, ServiceError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"
+        SELECT price_id, engine_type, platform, price_per_1k_input, price_per_1k_output, currency, notes, updated_at_ms
+        FROM bff_pricing
+        ORDER BY price_id ASC
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error listing pricing: {e}")))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(CostPriceConfig {
+            price_id: r.get("price_id"),
+            engine_type: r.get("engine_type"),
+            platform: r.get("platform"),
+            price_per_1k_input: r.get("price_per_1k_input"),
+            price_per_1k_output: r.get("price_per_1k_output"),
+            currency: r.get("currency"),
+            notes: r.get("notes"),
+            updated_at_ms: r.get::<i64, _>("updated_at_ms") as u64,
+        });
+    }
     Ok(out)
 }
 
@@ -124,8 +135,8 @@ pub struct UpsertPricingRequest {
     pub notes: Option<String>,
 }
 
-pub async fn upsert_pricing(
-    store: &dyn MetaStore,
+pub async fn upsert_pricing_db(
+    db: &sqlx::PgPool,
     req: UpsertPricingRequest,
 ) -> Result<CostPriceConfig, ServiceError> {
     if req.price_id.trim().is_empty() {
@@ -141,14 +152,44 @@ pub async fn upsert_pricing(
         notes: req.notes,
         updated_at_ms: now_ms(),
     };
-    store
-        .put(&pricing_key(&cfg.price_id), serde_json::to_vec(&cfg)?, None)
-        .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO bff_pricing (
+            price_id, engine_type, platform, price_per_1k_input, price_per_1k_output, currency, notes, updated_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (price_id) DO UPDATE SET
+            engine_type = EXCLUDED.engine_type,
+            platform = EXCLUDED.platform,
+            price_per_1k_input = EXCLUDED.price_per_1k_input,
+            price_per_1k_output = EXCLUDED.price_per_1k_output,
+            currency = EXCLUDED.currency,
+            notes = EXCLUDED.notes,
+            updated_at_ms = EXCLUDED.updated_at_ms
+        "#,
+    )
+    .bind(&cfg.price_id)
+    .bind(&cfg.engine_type)
+    .bind(&cfg.platform)
+    .bind(cfg.price_per_1k_input)
+    .bind(cfg.price_per_1k_output)
+    .bind(&cfg.currency)
+    .bind(&cfg.notes)
+    .bind(cfg.updated_at_ms as i64)
+    .execute(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error saving pricing: {e}")))?;
+
     Ok(cfg)
 }
 
-pub async fn delete_pricing(store: &dyn MetaStore, price_id: &str) -> Result<(), ServiceError> {
-    store.delete(&pricing_key(price_id)).await?;
+pub async fn delete_pricing_db(db: &sqlx::PgPool, price_id: &str) -> Result<(), ServiceError> {
+    sqlx::query("DELETE FROM bff_pricing WHERE price_id = $1")
+        .bind(price_id)
+        .execute(db)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("db error deleting pricing: {e}")))?;
     Ok(())
 }
 
@@ -169,10 +210,11 @@ pub struct IngestUsageRequest {
     pub window_start_ms: Option<u64>,
 }
 
-pub async fn ingest_usage(
-    store: &dyn MetaStore,
+pub async fn ingest_usage_db(
+    db: &sqlx::PgPool,
     req: IngestUsageRequest,
 ) -> Result<UsageWindow, ServiceError> {
+    use sqlx::Row;
     let tenant_id = req.tenant_id.trim();
     if tenant_id.is_empty() {
         return Err(ServiceError::BadRequest("tenant_id required".into()));
@@ -181,9 +223,40 @@ pub async fn ingest_usage(
     let window_start = req
         .window_start_ms
         .unwrap_or_else(|| usage_window_start_ms(now));
-    let key = usage_key(tenant_id, window_start);
-    let mut window = match store.get(&key).await? {
-        Some((data, _)) => serde_json::from_slice::<UsageWindow>(&data)?,
+
+    let existing_row = sqlx::query(
+        r#"
+        SELECT window_duration, requests, input_tokens, output_tokens,
+               denied_rps, denied_concurrency, denied_model, denied_token_budget, denied_disabled,
+               cost_estimate, model_uid, engine_type
+        FROM bff_usage
+        WHERE tenant_id = $1 AND window_start_ms = $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(window_start as i64)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error fetching usage: {e}")))?;
+
+    let mut window = match existing_row {
+        Some(r) => UsageWindow {
+            tenant_id: tenant_id.to_string(),
+            window_start_ms: window_start,
+            window: r.get("window_duration"),
+            requests: r.get::<i64, _>("requests") as u64,
+            input_tokens: r.get::<i64, _>("input_tokens") as u64,
+            output_tokens: r.get::<i64, _>("output_tokens") as u64,
+            denied_rps: r.get::<i64, _>("denied_rps") as u64,
+            denied_concurrency: r.get::<i64, _>("denied_concurrency") as u64,
+            denied_model: r.get::<i64, _>("denied_model") as u64,
+            denied_token_budget: r.get::<i64, _>("denied_token_budget") as u64,
+            denied_disabled: r.get::<i64, _>("denied_disabled") as u64,
+            cost_estimate: r.get("cost_estimate"),
+            model_uid: r.get("model_uid"),
+            engine_type: r.get("engine_type"),
+            updated_at_ms: now,
+        },
         None => UsageWindow {
             tenant_id: tenant_id.to_string(),
             window_start_ms: window_start,
@@ -202,6 +275,7 @@ pub async fn ingest_usage(
             updated_at_ms: now,
         },
     };
+
     window.requests += req.requests.unwrap_or(0);
     window.input_tokens += req.input_tokens.unwrap_or(0);
     window.output_tokens += req.output_tokens.unwrap_or(0);
@@ -217,8 +291,7 @@ pub async fn ingest_usage(
         window.engine_type = req.engine_type;
     }
 
-    // Attach cost estimate when a price row is provided or engine matches a price.
-    let prices = list_pricing(store).await.unwrap_or_default();
+    let prices = list_pricing_db(db).await.unwrap_or_default();
     let price = req
         .price_id
         .as_ref()
@@ -233,30 +306,102 @@ pub async fn ingest_usage(
         window.cost_estimate = Some(estimate_cost(p, window.input_tokens, window.output_tokens));
     }
     window.updated_at_ms = now;
-    store.put(&key, serde_json::to_vec(&window)?, None).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO bff_usage (
+            tenant_id, window_start_ms, window_duration, requests, input_tokens, output_tokens,
+            denied_rps, denied_concurrency, denied_model, denied_token_budget, denied_disabled,
+            cost_estimate, model_uid, engine_type, updated_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (tenant_id, window_start_ms) DO UPDATE SET
+            window_duration = EXCLUDED.window_duration,
+            requests = EXCLUDED.requests,
+            input_tokens = EXCLUDED.input_tokens,
+            output_tokens = EXCLUDED.output_tokens,
+            denied_rps = EXCLUDED.denied_rps,
+            denied_concurrency = EXCLUDED.denied_concurrency,
+            denied_model = EXCLUDED.denied_model,
+            denied_token_budget = EXCLUDED.denied_token_budget,
+            denied_disabled = EXCLUDED.denied_disabled,
+            cost_estimate = EXCLUDED.cost_estimate,
+            model_uid = EXCLUDED.model_uid,
+            engine_type = EXCLUDED.engine_type,
+            updated_at_ms = EXCLUDED.updated_at_ms
+        "#,
+    )
+    .bind(&window.tenant_id)
+    .bind(window.window_start_ms as i64)
+    .bind(&window.window)
+    .bind(window.requests as i64)
+    .bind(window.input_tokens as i64)
+    .bind(window.output_tokens as i64)
+    .bind(window.denied_rps as i64)
+    .bind(window.denied_concurrency as i64)
+    .bind(window.denied_model as i64)
+    .bind(window.denied_token_budget as i64)
+    .bind(window.denied_disabled as i64)
+    .bind(window.cost_estimate)
+    .bind(&window.model_uid)
+    .bind(&window.engine_type)
+    .bind(window.updated_at_ms as i64)
+    .execute(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error saving usage: {e}")))?;
+
     Ok(window)
 }
 
-pub async fn list_usage(
-    store: &dyn MetaStore,
+pub async fn list_usage_db(
+    db: &sqlx::PgPool,
     tenant_id: &str,
 ) -> Result<Vec<UsageWindow>, ServiceError> {
-    let prefix = format!("/usage/{tenant_id}/");
-    let entries = store.list_prefix(&prefix).await?;
-    let mut out: Vec<UsageWindow> = entries
-        .into_iter()
-        .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
-        .collect();
-    out.sort_by(|a, b| b.window_start_ms.cmp(&a.window_start_ms));
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"
+        SELECT tenant_id, window_start_ms, window_duration, requests, input_tokens, output_tokens,
+               denied_rps, denied_concurrency, denied_model, denied_token_budget, denied_disabled,
+               cost_estimate, model_uid, engine_type, updated_at_ms
+        FROM bff_usage
+        WHERE tenant_id = $1
+        ORDER BY window_start_ms DESC
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error listing usage: {e}")))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(UsageWindow {
+            tenant_id: r.get("tenant_id"),
+            window_start_ms: r.get::<i64, _>("window_start_ms") as u64,
+            window: r.get("window_duration"),
+            requests: r.get::<i64, _>("requests") as u64,
+            input_tokens: r.get::<i64, _>("input_tokens") as u64,
+            output_tokens: r.get::<i64, _>("output_tokens") as u64,
+            denied_rps: r.get::<i64, _>("denied_rps") as u64,
+            denied_concurrency: r.get::<i64, _>("denied_concurrency") as u64,
+            denied_model: r.get::<i64, _>("denied_model") as u64,
+            denied_token_budget: r.get::<i64, _>("denied_token_budget") as u64,
+            denied_disabled: r.get::<i64, _>("denied_disabled") as u64,
+            cost_estimate: r.get("cost_estimate"),
+            model_uid: r.get("model_uid"),
+            engine_type: r.get("engine_type"),
+            updated_at_ms: r.get::<i64, _>("updated_at_ms") as u64,
+        });
+    }
     Ok(out)
 }
 
-pub async fn tenant_cost_summary(
-    store: &dyn MetaStore,
+pub async fn tenant_cost_summary_db(
+    db: &sqlx::PgPool,
     tenant_id: &str,
 ) -> Result<TenantCostSummary, ServiceError> {
-    let windows = list_usage(store, tenant_id).await?;
-    let currency = list_pricing(store)
+    let windows = list_usage_db(db, tenant_id).await?;
+    let currency = list_pricing_db(db)
         .await?
         .first()
         .map(|p| p.currency.clone());

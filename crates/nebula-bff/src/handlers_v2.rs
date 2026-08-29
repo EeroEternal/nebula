@@ -787,7 +787,7 @@ pub async fn list_pricing(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let items = crate::tenant_svc::list_pricing(&*st.store).await?;
+    let items = crate::tenant_svc::list_pricing_db(&st.db).await?;
     Ok((StatusCode::OK, Json(items)).into_response())
 }
 
@@ -799,7 +799,7 @@ pub async fn upsert_pricing(
     if let Some(resp) = require_role(&ctx, Role::Admin) {
         return Ok(resp);
     }
-    let p = crate::tenant_svc::upsert_pricing(&*st.store, req).await?;
+    let p = crate::tenant_svc::upsert_pricing_db(&st.db, req).await?;
     Ok((StatusCode::OK, Json(p)).into_response())
 }
 
@@ -811,7 +811,7 @@ pub async fn delete_pricing(
     if let Some(resp) = require_role(&ctx, Role::Admin) {
         return Ok(resp);
     }
-    crate::tenant_svc::delete_pricing(&*st.store, &price_id).await?;
+    crate::tenant_svc::delete_pricing_db(&st.db, &price_id).await?;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -823,7 +823,7 @@ pub async fn ingest_usage(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let w = crate::tenant_svc::ingest_usage(&*st.store, req).await?;
+    let w = crate::tenant_svc::ingest_usage_db(&st.db, req).await?;
     Ok((StatusCode::OK, Json(w)).into_response())
 }
 
@@ -835,7 +835,7 @@ pub async fn list_tenant_usage(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let items = crate::tenant_svc::list_usage(&*st.store, &tenant_id).await?;
+    let items = crate::tenant_svc::list_usage_db(&st.db, &tenant_id).await?;
     Ok((StatusCode::OK, Json(items)).into_response())
 }
 
@@ -847,6 +847,6 @@ pub async fn tenant_cost_summary(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let s = crate::tenant_svc::tenant_cost_summary(&*st.store, &tenant_id).await?;
+    let s = crate::tenant_svc::tenant_cost_summary_db(&st.db, &tenant_id).await?;
     Ok((StatusCode::OK, Json(s)).into_response())
 }

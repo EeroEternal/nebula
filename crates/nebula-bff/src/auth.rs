@@ -128,6 +128,48 @@ pub async fn initialize_auth_schema(state: &AppState) -> anyhow::Result<()> {
     .execute(&state.db)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS bff_pricing (
+            price_id TEXT PRIMARY KEY,
+            engine_type TEXT NOT NULL,
+            platform TEXT,
+            price_per_1k_input DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            price_per_1k_output DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            notes TEXT,
+            updated_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS bff_usage (
+            tenant_id TEXT NOT NULL,
+            window_start_ms BIGINT NOT NULL,
+            window_duration TEXT NOT NULL DEFAULT '15m',
+            requests BIGINT NOT NULL DEFAULT 0,
+            input_tokens BIGINT NOT NULL DEFAULT 0,
+            output_tokens BIGINT NOT NULL DEFAULT 0,
+            denied_rps BIGINT NOT NULL DEFAULT 0,
+            denied_concurrency BIGINT NOT NULL DEFAULT 0,
+            denied_model BIGINT NOT NULL DEFAULT 0,
+            denied_token_budget BIGINT NOT NULL DEFAULT 0,
+            denied_disabled BIGINT NOT NULL DEFAULT 0,
+            cost_estimate DOUBLE PRECISION,
+            model_uid TEXT,
+            engine_type TEXT,
+            updated_at_ms BIGINT NOT NULL,
+            PRIMARY KEY (tenant_id, window_start_ms)
+        )
+        "#,
+    )
+    .execute(&state.db)
+    .await?;
+
     let existing_admin = sqlx::query("SELECT id FROM bff_users WHERE username = $1 LIMIT 1")
         .bind("admin")
         .fetch_optional(&state.db)
