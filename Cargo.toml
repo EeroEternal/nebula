@@ -10,7 +10,6 @@ members = [
   "crates/nebula-gateway",
   "crates/nebula-node",
   "crates/nebula-cli",
-  "crates/nebula-lite",
   "crates/nebula-observe",
 ]
 

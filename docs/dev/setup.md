@@ -98,8 +98,6 @@ cargo build --release
 ./bin/nebula-down.sh
 ```
 
-单机最小推理（无 etcd/BFF）：见 [`lite.md`](./lite.md)，二进制 `nebula-lite`。
-
 ## 注意事项
 
 - 这些二进制文件不再包含在 Git 仓库中，以减小仓库大小并加快克隆速度

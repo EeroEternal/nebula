@@ -34,7 +34,6 @@
 | [`arch/roadmap.md`](arch/roadmap.md) | 排期（与 vision Phase 0–3 对齐） |
 | [`dev/plan.md`](dev/plan.md) | 开发计划 |
 | [`dev/setup.md`](dev/setup.md) | 开发环境 |
-| [`dev/lite.md`](dev/lite.md) | Lite 单机：单进程 vLLM/SGLang，无 etcd/BFF |
 | [`dev/ownership.md`](dev/ownership.md) | 接口归属 |
 | [`dev/etcd.md`](dev/etcd.md) | etcd 放什么 / 不放什么 |
 | [`dev/contracts.md`](dev/contracts.md) | L1 一致性契约套件验收条目 |
