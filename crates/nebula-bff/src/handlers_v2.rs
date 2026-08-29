@@ -545,7 +545,7 @@ pub async fn list_benchmark_runs(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let runs = crate::benchmark_svc::list_runs(&*st.store).await?;
+    let runs = crate::benchmark_svc::list_runs_db(&st.db).await?;
     Ok((StatusCode::OK, Json(runs)).into_response())
 }
 
@@ -557,7 +557,7 @@ pub async fn get_benchmark_run(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let run = crate::benchmark_svc::get_run(&*st.store, &run_id).await?;
+    let run = crate::benchmark_svc::get_run_db(&st.db, &run_id).await?;
     Ok((StatusCode::OK, Json(run)).into_response())
 }
 
@@ -569,7 +569,7 @@ pub async fn ingest_benchmark_run(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let run = crate::benchmark_svc::ingest_run(&*st.store, run).await?;
+    let run = crate::benchmark_svc::ingest_run_db(&st.db, run).await?;
     Ok((StatusCode::CREATED, Json(run)).into_response())
 }
 
@@ -580,7 +580,7 @@ pub async fn list_benchmark_profiles(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let profiles = crate::benchmark_svc::list_profiles(&*st.store).await?;
+    let profiles = crate::benchmark_svc::list_profiles_db(&st.db).await?;
     Ok((StatusCode::OK, Json(profiles)).into_response())
 }
 
@@ -592,7 +592,7 @@ pub async fn recommend_engines(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let resp = crate::benchmark_svc::recommend(&*st.store, req).await?;
+    let resp = crate::benchmark_svc::recommend_db(&st.db, req).await?;
     Ok((StatusCode::OK, Json(resp)).into_response())
 }
 
@@ -700,7 +700,7 @@ pub async fn selection_recommend(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let resp = crate::selection_svc::recommend(&*st.store, req).await?;
+    let resp = crate::selection_svc::recommend(&*st.store, &st.db, req).await?;
     Ok((StatusCode::OK, Json(resp)).into_response())
 }
 
@@ -712,7 +712,7 @@ pub async fn selection_draft(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let draft = crate::selection_svc::draft(&*st.store, req).await?;
+    let draft = crate::selection_svc::draft(&*st.store, &st.db, req).await?;
     Ok((StatusCode::OK, Json(draft)).into_response())
 }
 

@@ -38,18 +38,15 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 | `/download_progress/` | 下载进度 | 短 TTL（~30s） |
 | `/alerts/{node}/disk_*` | 磁盘告警位 | **lease**；趋势告警走 Prometheus |
 
-## C. 借住（今天在 etcd，优先迁出）
+## C. 已迁入 Postgres（BFF 专用资产与历史）
 
-无热路径 watch；扩容或要历史/审计时迁 Postgres（或对象存储），**禁止**因此让 Scheduler/Node 读 PG。
-
-| Key 前缀 | 更合适的家 |
-|----------|------------|
-| `/templates/` | Postgres（控制台资产） |
-| `/pricing/` | Postgres（账单同域） |
-| `/usage/{tenant}/{window}` | Postgres / 计费库（防窗口膨胀） |
-| `/benchmarks/runs\|profiles/…` | Postgres；大结果外置 |
-| `/model_profiles/` | Postgres（L3 画像；现 BFF 最新值借住） |
-| `/model_requests/` | 遗留只读；迁移后删除，**禁止新写** |
+以下前缀已从 etcd 完全迁入 PostgreSQL（`bff_*` 表），Scheduler/Node/Gateway 热路径不碰 PG：
+- `/templates/` → `bff_templates`
+- `/pricing/` → `bff_pricing`
+- `/usage/{tenant}/{window}` → `bff_usage`
+- `/benchmarks/runs|profiles/...` → `bff_benchmark_runs`, `bff_benchmark_profiles`
+- `/model_profiles/` → `bff_model_profiles`
+- `/model_requests/` → 遗留兼容已收敛，禁止新写。
 
 ## D. 不应进
 

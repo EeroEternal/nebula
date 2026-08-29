@@ -11,20 +11,12 @@ use nebula_meta::MetaStore;
 
 use crate::service::{now_ms, ServiceError};
 
-fn run_key(run_id: &str) -> String {
-    format!("/benchmarks/runs/{run_id}")
-}
-
 fn profile_key_hash(key: &ProfileKey) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     key.hash(&mut h);
     format!("{:x}", h.finish())
-}
-
-fn profile_etcd_key(key: &ProfileKey) -> String {
-    format!("/benchmarks/profiles/{}", profile_key_hash(key))
 }
 
 fn canary_key(id: &str) -> String {
@@ -35,25 +27,50 @@ pub async fn list_workloads() -> Vec<BenchmarkWorkload> {
     builtin_workloads()
 }
 
-pub async fn list_runs(store: &dyn MetaStore) -> Result<Vec<BenchmarkRun>, ServiceError> {
-    let entries = store.list_prefix("/benchmarks/runs/").await?;
-    let mut out: Vec<BenchmarkRun> = entries
-        .into_iter()
-        .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
-        .collect();
-    out.sort_by(|a, b| b.finished_at_ms.cmp(&a.finished_at_ms));
+pub async fn list_runs_db(db: &sqlx::PgPool) -> Result<Vec<BenchmarkRun>, ServiceError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"
+        SELECT run_json FROM bff_benchmark_runs ORDER BY finished_at_ms DESC
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error listing benchmark runs: {e}")))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        let val: serde_json::Value = r.get("run_json");
+        if let Ok(run) = serde_json::from_value(val) {
+            out.push(run);
+        }
+    }
     Ok(out)
 }
 
-pub async fn get_run(store: &dyn MetaStore, run_id: &str) -> Result<BenchmarkRun, ServiceError> {
-    match store.get(&run_key(run_id)).await? {
-        Some((data, _)) => Ok(serde_json::from_slice(&data)?),
+pub async fn get_run_db(db: &sqlx::PgPool, run_id: &str) -> Result<BenchmarkRun, ServiceError> {
+    use sqlx::Row;
+    let row = sqlx::query(
+        r#"
+        SELECT run_json FROM bff_benchmark_runs WHERE run_id = $1
+        "#,
+    )
+    .bind(run_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error getting benchmark run: {e}")))?;
+
+    match row {
+        Some(r) => {
+            let val: serde_json::Value = r.get("run_json");
+            serde_json::from_value(val).map_err(Into::into)
+        }
         None => Err(ServiceError::NotFound(format!("benchmark run {run_id} not found"))),
     }
 }
 
-pub async fn ingest_run(
-    store: &dyn MetaStore,
+pub async fn ingest_run_db(
+    db: &sqlx::PgPool,
     mut run: BenchmarkRun,
 ) -> Result<BenchmarkRun, ServiceError> {
     if run.run_id.trim().is_empty() {
@@ -65,42 +82,79 @@ pub async fn ingest_run(
     if run.finished_at_ms == 0 {
         run.finished_at_ms = now_ms();
     }
-    store
-        .put(&run_key(&run.run_id), serde_json::to_vec(&run)?, None)
-        .await?;
+    let run_val = serde_json::to_value(&run)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO bff_benchmark_runs (run_id, run_json, finished_at_ms)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (run_id) DO UPDATE SET
+            run_json = EXCLUDED.run_json,
+            finished_at_ms = EXCLUDED.finished_at_ms
+        "#,
+    )
+    .bind(&run.run_id)
+    .bind(run_val)
+    .bind(run.finished_at_ms as i64)
+    .execute(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error saving benchmark run: {e}")))?;
 
     // Rebuild profile from all runs sharing this key.
-    let all = list_runs(store).await?;
+    let all = list_runs_db(db).await?;
     let profile = build_profile_from_runs(&run.profile_key, &all, now_ms());
-    store
-        .put(
-            &profile_etcd_key(&run.profile_key),
-            serde_json::to_vec(&profile)?,
-            None,
-        )
-        .await?;
+    let hash = profile_key_hash(&run.profile_key);
+    let profile_val = serde_json::to_value(&profile)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO bff_benchmark_profiles (profile_key_hash, profile_json, updated_at_ms)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (profile_key_hash) DO UPDATE SET
+            profile_json = EXCLUDED.profile_json,
+            updated_at_ms = EXCLUDED.updated_at_ms
+        "#,
+    )
+    .bind(&hash)
+    .bind(profile_val)
+    .bind(profile.updated_at_ms as i64)
+    .execute(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error saving benchmark profile: {e}")))?;
+
     Ok(run)
 }
 
-pub async fn list_profiles(store: &dyn MetaStore) -> Result<Vec<PerformanceProfile>, ServiceError> {
-    let entries = store.list_prefix("/benchmarks/profiles/").await?;
-    let mut out: Vec<PerformanceProfile> = entries
-        .into_iter()
-        .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
-        .collect();
-    out.sort_by(|a, b| b.updated_at_ms.cmp(&a.updated_at_ms));
+pub async fn list_profiles_db(db: &sqlx::PgPool) -> Result<Vec<PerformanceProfile>, ServiceError> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        r#"
+        SELECT profile_json FROM bff_benchmark_profiles ORDER BY updated_at_ms DESC
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error listing benchmark profiles: {e}")))?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        let val: serde_json::Value = r.get("profile_json");
+        if let Ok(p) = serde_json::from_value(val) {
+            out.push(p);
+        }
+    }
     Ok(out)
 }
 
-pub async fn recommend(
-    store: &dyn MetaStore,
+pub async fn recommend_db(
+    db: &sqlx::PgPool,
     req: RecommendRequest,
 ) -> Result<RecommendResponse, ServiceError> {
     if req.model_name.trim().is_empty() {
         return Err(ServiceError::BadRequest("model_name required".into()));
     }
-    let profiles = list_profiles(store).await?;
-    let runs = list_runs(store).await?;
+    let profiles = list_profiles_db(db).await?;
+    let runs = list_runs_db(db).await?;
     Ok(recommend_from_profiles(&req, &profiles, &runs))
 }
 

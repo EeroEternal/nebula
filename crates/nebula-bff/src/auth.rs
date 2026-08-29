@@ -170,6 +170,30 @@ pub async fn initialize_auth_schema(state: &AppState) -> anyhow::Result<()> {
     .execute(&state.db)
     .await?;
 
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS bff_benchmark_runs (
+            run_id TEXT PRIMARY KEY,
+            run_json JSONB NOT NULL,
+            finished_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&state.db)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS bff_benchmark_profiles (
+            profile_key_hash TEXT PRIMARY KEY,
+            profile_json JSONB NOT NULL,
+            updated_at_ms BIGINT NOT NULL
+        )
+        "#,
+    )
+    .execute(&state.db)
+    .await?;
+
     let existing_admin = sqlx::query("SELECT id FROM bff_users WHERE username = $1 LIMIT 1")
         .bind("admin")
         .fetch_optional(&state.db)

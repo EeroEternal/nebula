@@ -120,19 +120,21 @@ pub async fn get_profile_db(db: &sqlx::PgPool, id: &str) -> Result<ModelProfile,
 
 pub async fn recommend(
     store: &dyn MetaStore,
+    db: &sqlx::PgPool,
     mut req: SelectionRequest,
 ) -> Result<SelectionResponse, ServiceError> {
     fill_current_from_model(store, &mut req).await?;
-    let profiles = crate::benchmark_svc::list_profiles(store).await?;
-    let runs = crate::benchmark_svc::list_runs(store).await?;
+    let profiles = crate::benchmark_svc::list_profiles_db(db).await?;
+    let runs = crate::benchmark_svc::list_runs_db(db).await?;
     Ok(select_backends(&req, &profiles, &runs))
 }
 
 pub async fn draft(
     store: &dyn MetaStore,
+    db: &sqlx::PgPool,
     req: DraftRequest,
 ) -> Result<DeploymentDraft, ServiceError> {
-    let resp = recommend(store, req.selection.clone()).await?;
+    let resp = recommend(store, db, req.selection.clone()).await?;
     let candidate = resp
         .candidates
         .get(req.candidate_index)
