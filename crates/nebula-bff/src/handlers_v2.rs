@@ -139,7 +139,7 @@ pub async fn list_templates(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let templates = service::list_templates(&*st.store).await?;
+    let templates = service::list_templates_db(&st.db).await?;
     Ok((StatusCode::OK, Json(templates)).into_response())
 }
 
@@ -151,7 +151,7 @@ pub async fn get_template(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let template = service::get_model_template(&*st.store, &id).await?;
+    let template = service::get_model_template_db(&st.db, &id).await?;
     Ok((StatusCode::OK, Json(template)).into_response())
 }
 
@@ -163,7 +163,7 @@ pub async fn create_template(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let template = service::create_template(&*st.store, req).await?;
+    let template = service::create_template_db(&st.db, req).await?;
     Ok((StatusCode::CREATED, Json(template)).into_response())
 }
 
@@ -176,7 +176,7 @@ pub async fn update_template(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let template = service::update_template(&*st.store, &id, req).await?;
+    let template = service::update_template_db(&st.db, &id, req).await?;
     Ok((StatusCode::OK, Json(template)).into_response())
 }
 
@@ -188,7 +188,7 @@ pub async fn delete_template(
     if let Some(resp) = require_role(&ctx, Role::Admin) {
         return Ok(resp);
     }
-    service::delete_template(&*st.store, &id).await?;
+    service::delete_template_db(&st.db, &id).await?;
     Ok((
         StatusCode::OK,
         Json(json!({"status": "deleted", "template_id": id})),
@@ -205,7 +205,7 @@ pub async fn deploy_template(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let spec = service::deploy_template(&*st.store, ctx.principal.clone(), &id, req).await?;
+    let spec = service::deploy_template(&*st.store, &st.db, ctx.principal.clone(), &id, req).await?;
     Ok((StatusCode::CREATED, Json(spec)).into_response())
 }
 
@@ -218,7 +218,7 @@ pub async fn save_as_template(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let template = service::save_as_template(&*st.store, &model_uid, req).await?;
+    let template = service::save_as_template(&*st.store, &st.db, &model_uid, req).await?;
     Ok((StatusCode::CREATED, Json(template)).into_response())
 }
 
@@ -676,7 +676,7 @@ pub async fn put_model_profile(
         return Ok(resp);
     }
     req.profile_id = profile_id;
-    let p = crate::selection_svc::put_profile(&*st.store, req).await?;
+    let p = crate::selection_svc::put_profile_db(&st.db, req).await?;
     Ok((StatusCode::OK, Json(p)).into_response())
 }
 
@@ -688,7 +688,7 @@ pub async fn get_model_profile(
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
         return Ok(resp);
     }
-    let p = crate::selection_svc::get_profile(&*st.store, &profile_id).await?;
+    let p = crate::selection_svc::get_profile_db(&st.db, &profile_id).await?;
     Ok((StatusCode::OK, Json(p)).into_response())
 }
 

@@ -61,10 +61,6 @@ async fn fill_current_from_model(
     Ok(())
 }
 
-fn profile_key(id: &str) -> String {
-    format!("/model_profiles/{id}")
-}
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -72,24 +68,52 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-pub async fn put_profile(
-    store: &dyn MetaStore,
+pub async fn put_profile_db(
+    db: &sqlx::PgPool,
     mut profile: ModelProfile,
 ) -> Result<ModelProfile, ServiceError> {
     if profile.profile_id.trim().is_empty() {
         return Err(ServiceError::BadRequest("profile_id required".into()));
     }
     profile.updated_at_ms = now_ms();
-    let val = serde_json::to_vec(&profile)?;
-    store
-        .put(&profile_key(&profile.profile_id), val, None)
-        .await?;
+    let val = serde_json::to_value(&profile)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO bff_model_profiles (profile_id, profile_json, updated_at_ms)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (profile_id) DO UPDATE SET
+            profile_json = EXCLUDED.profile_json,
+            updated_at_ms = EXCLUDED.updated_at_ms
+        "#,
+    )
+    .bind(&profile.profile_id)
+    .bind(val)
+    .bind(profile.updated_at_ms as i64)
+    .execute(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error saving profile: {e}")))?;
+
     Ok(profile)
 }
 
-pub async fn get_profile(store: &dyn MetaStore, id: &str) -> Result<ModelProfile, ServiceError> {
-    match store.get(&profile_key(id)).await? {
-        Some((bytes, _)) => Ok(serde_json::from_slice(&bytes)?),
+pub async fn get_profile_db(db: &sqlx::PgPool, id: &str) -> Result<ModelProfile, ServiceError> {
+    let row = sqlx::query(
+        r#"
+        SELECT profile_json FROM bff_model_profiles WHERE profile_id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error getting profile: {e}")))?;
+
+    match row {
+        Some(r) => {
+            use sqlx::Row;
+            let val: serde_json::Value = r.get("profile_json");
+            serde_json::from_value(val).map_err(Into::into)
+        }
         None => Err(ServiceError::NotFound(format!("model profile {id}"))),
     }
 }

@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sqlx::Row;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -330,26 +331,134 @@ pub fn compute_aggregated_state(
 }
 
 // ---------------------------------------------------------------------------
-// Etcd DB Operations Helpers
+// Database Operations Helpers (PostgreSQL)
 // ---------------------------------------------------------------------------
 
-pub async fn get_model_template(
-    store: &dyn MetaStore,
+pub async fn get_model_template_db(
+    db: &sqlx::PgPool,
     id: &str,
 ) -> Result<ModelTemplate, ServiceError> {
-    match store.get(&format!("/templates/{id}")).await? {
-        Some((data, _)) => serde_json::from_slice(&data).map_err(Into::into),
+    let row = sqlx::query(
+        r#"
+        SELECT template_id, name, description, category, model_name, model_source,
+               engine_type, docker_image, config, default_replicas, labels, source,
+               created_at_ms, updated_at_ms
+        FROM bff_templates
+        WHERE template_id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error getting template: {e}")))?;
+
+    match row {
+        Some(r) => {
+            let model_source_raw: Option<serde_json::Value> = r.get("model_source");
+            let model_source: Option<nebula_common::ModelSource> = match model_source_raw {
+                Some(v) => serde_json::from_value(v).ok(),
+                None => None,
+            };
+            let config_raw: Option<serde_json::Value> = r.get("config");
+            let config: Option<nebula_common::ModelConfig> = match config_raw {
+                Some(v) => serde_json::from_value(v).ok(),
+                None => None,
+            };
+            let labels_raw: serde_json::Value = r.get("labels");
+            let labels = serde_json::from_value(labels_raw).unwrap_or_default();
+            let source_str: String = r.get("source");
+            let source = match source_str.to_lowercase().as_str() {
+                "system" => TemplateSource::System,
+                "saved" => TemplateSource::Saved,
+                _ => TemplateSource::User,
+            };
+            let default_replicas_i32: i32 = r.get("default_replicas");
+
+            let category_raw: Option<String> = r.get("category");
+            let category: Option<nebula_common::TemplateCategory> = match category_raw {
+                Some(s) => serde_json::from_value(serde_json::Value::String(s)).ok(),
+                None => None,
+            };
+
+            Ok(ModelTemplate {
+                template_id: r.get("template_id"),
+                name: r.get("name"),
+                description: r.get("description"),
+                category,
+                model_name: r.get("model_name"),
+                model_source,
+                engine_type: r.get("engine_type"),
+                docker_image: r.get("docker_image"),
+                config,
+                default_replicas: default_replicas_i32.max(0) as u32,
+                labels,
+                source,
+                created_at_ms: r.get::<i64, _>("created_at_ms") as u64,
+                updated_at_ms: r.get::<i64, _>("updated_at_ms") as u64,
+            })
+        }
         None => Err(ServiceError::NotFound("template not found".to_string())),
     }
 }
 
-pub async fn put_model_template(
-    store: &dyn MetaStore,
-    id: &str,
+pub async fn put_model_template_db(
+    db: &sqlx::PgPool,
     tpl: &ModelTemplate,
 ) -> Result<(), ServiceError> {
-    let val = serde_json::to_vec(tpl)?;
-    store.put(&format!("/templates/{id}"), val, None).await?;
+    let model_source_json = tpl.model_source.as_ref().map(|s| serde_json::to_value(s).unwrap_or_default());
+    let config_json = tpl.config.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default());
+    let labels_json = serde_json::to_value(&tpl.labels).unwrap_or_default();
+    let category_str = tpl.category.as_ref().and_then(|c| match serde_json::to_value(c) {
+        Ok(serde_json::Value::String(s)) => Some(s),
+        _ => None,
+    });
+    let source_str = match tpl.source {
+        TemplateSource::System => "system",
+        TemplateSource::Saved => "saved",
+        TemplateSource::User => "user",
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO bff_templates (
+            template_id, name, description, category, model_name, model_source,
+            engine_type, docker_image, config, default_replicas, labels, source,
+            created_at_ms, updated_at_ms
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (template_id) DO UPDATE SET
+            name = EXCLUDED.name,
+            description = EXCLUDED.description,
+            category = EXCLUDED.category,
+            model_name = EXCLUDED.model_name,
+            model_source = EXCLUDED.model_source,
+            engine_type = EXCLUDED.engine_type,
+            docker_image = EXCLUDED.docker_image,
+            config = EXCLUDED.config,
+            default_replicas = EXCLUDED.default_replicas,
+            labels = EXCLUDED.labels,
+            source = EXCLUDED.source,
+            updated_at_ms = EXCLUDED.updated_at_ms
+        "#,
+    )
+    .bind(&tpl.template_id)
+    .bind(&tpl.name)
+    .bind(&tpl.description)
+    .bind(category_str)
+    .bind(&tpl.model_name)
+    .bind(model_source_json)
+    .bind(&tpl.engine_type)
+    .bind(&tpl.docker_image)
+    .bind(config_json)
+    .bind(tpl.default_replicas as i32)
+    .bind(labels_json)
+    .bind(source_str)
+    .bind(tpl.created_at_ms as i64)
+    .bind(tpl.updated_at_ms as i64)
+    .execute(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error saving template: {e}")))?;
+
     Ok(())
 }
 
@@ -756,17 +865,69 @@ pub async fn delete_model(store: &dyn MetaStore, model_uid: &str) -> Result<usiz
 // Template CRUD
 // ---------------------------------------------------------------------------
 
-pub async fn list_templates(store: &dyn MetaStore) -> Result<Vec<ModelTemplate>, ServiceError> {
-    let kvs = store.list_prefix("/templates/").await?;
-    let templates: Vec<ModelTemplate> = kvs
-        .into_iter()
-        .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
-        .collect();
+pub async fn list_templates_db(db: &sqlx::PgPool) -> Result<Vec<ModelTemplate>, ServiceError> {
+    let rows = sqlx::query(
+        r#"
+        SELECT template_id, name, description, category, model_name, model_source,
+               engine_type, docker_image, config, default_replicas, labels, source,
+               created_at_ms, updated_at_ms
+        FROM bff_templates
+        ORDER BY created_at_ms DESC
+        "#,
+    )
+    .fetch_all(db)
+    .await
+    .map_err(|e| ServiceError::Internal(format!("db error listing templates: {e}")))?;
+
+    let mut templates = Vec::new();
+    for r in rows {
+        let model_source_raw: Option<serde_json::Value> = r.get("model_source");
+        let model_source: Option<nebula_common::ModelSource> = match model_source_raw {
+            Some(v) => serde_json::from_value(v).ok(),
+            None => None,
+        };
+        let config_raw: Option<serde_json::Value> = r.get("config");
+        let config: Option<nebula_common::ModelConfig> = match config_raw {
+            Some(v) => serde_json::from_value(v).ok(),
+            None => None,
+        };
+        let labels_raw: serde_json::Value = r.get("labels");
+        let labels = serde_json::from_value(labels_raw).unwrap_or_default();
+        let source_str: String = r.get("source");
+        let source = match source_str.to_lowercase().as_str() {
+            "system" => TemplateSource::System,
+            "saved" => TemplateSource::Saved,
+            _ => TemplateSource::User,
+        };
+        let default_replicas_i32: i32 = r.get("default_replicas");
+        let category_raw: Option<String> = r.get("category");
+        let category: Option<nebula_common::TemplateCategory> = match category_raw {
+            Some(s) => serde_json::from_value(serde_json::Value::String(s)).ok(),
+            None => None,
+        };
+
+        templates.push(ModelTemplate {
+            template_id: r.get("template_id"),
+            name: r.get("name"),
+            description: r.get("description"),
+            category,
+            model_name: r.get("model_name"),
+            model_source,
+            engine_type: r.get("engine_type"),
+            docker_image: r.get("docker_image"),
+            config,
+            default_replicas: default_replicas_i32.max(0) as u32,
+            labels,
+            source,
+            created_at_ms: r.get::<i64, _>("created_at_ms") as u64,
+            updated_at_ms: r.get::<i64, _>("updated_at_ms") as u64,
+        });
+    }
     Ok(templates)
 }
 
-pub async fn create_template(
-    store: &dyn MetaStore,
+pub async fn create_template_db(
+    db: &sqlx::PgPool,
     req: CreateTemplateRequest,
 ) -> Result<ModelTemplate, ServiceError> {
     let tid = req
@@ -774,7 +935,13 @@ pub async fn create_template(
         .clone()
         .unwrap_or_else(|| format!("tpl-{}", Uuid::new_v4()));
 
-    if store.get(&format!("/templates/{tid}")).await?.is_some() {
+    let exists: Option<String> = sqlx::query_scalar("SELECT template_id FROM bff_templates WHERE template_id = $1")
+        .bind(&tid)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("db error checking template: {e}")))?;
+
+    if exists.is_some() {
         return Err(ServiceError::Conflict(format!(
             "template with id '{tid}' already exists"
         )));
@@ -799,16 +966,16 @@ pub async fn create_template(
         updated_at_ms: now,
     };
 
-    put_model_template(store, &tid, &template).await?;
+    put_model_template_db(db, &template).await?;
     Ok(template)
 }
 
-pub async fn update_template(
-    store: &dyn MetaStore,
+pub async fn update_template_db(
+    db: &sqlx::PgPool,
     id: &str,
     req: UpdateTemplateRequest,
 ) -> Result<ModelTemplate, ServiceError> {
-    let mut template = get_model_template(store, id).await?;
+    let mut template = get_model_template_db(db, id).await?;
 
     if let Some(n) = req.name {
         template.name = n;
@@ -844,23 +1011,28 @@ pub async fn update_template(
     template.engine_type = Some(resolved);
     template.updated_at_ms = now_ms();
 
-    put_model_template(store, id, &template).await?;
+    put_model_template_db(db, &template).await?;
     Ok(template)
 }
 
-pub async fn delete_template(store: &dyn MetaStore, id: &str) -> Result<(), ServiceError> {
-    get_model_template(store, id).await?;
-    store.delete(&format!("/templates/{id}")).await?;
+pub async fn delete_template_db(db: &sqlx::PgPool, id: &str) -> Result<(), ServiceError> {
+    get_model_template_db(db, id).await?;
+    sqlx::query("DELETE FROM bff_templates WHERE template_id = $1")
+        .bind(id)
+        .execute(db)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("db error deleting template: {e}")))?;
     Ok(())
 }
 
 pub async fn deploy_template(
     store: &dyn MetaStore,
+    db: &sqlx::PgPool,
     principal: String,
     id: &str,
     req: DeployTemplateRequest,
 ) -> Result<ModelSpec, ServiceError> {
-    let tpl = get_model_template(store, id).await?;
+    let tpl = get_model_template_db(db, id).await?;
 
     let uid = req
         .model_uid
@@ -917,6 +1089,7 @@ pub async fn deploy_template(
 
 pub async fn save_as_template(
     store: &dyn MetaStore,
+    db: &sqlx::PgPool,
     model_uid: &str,
     req: SaveAsTemplateRequest,
 ) -> Result<ModelTemplate, ServiceError> {
@@ -946,7 +1119,7 @@ pub async fn save_as_template(
         updated_at_ms: now,
     };
 
-    put_model_template(store, &tid, &template).await?;
+    put_model_template_db(db, &template).await?;
     Ok(template)
 }
 
