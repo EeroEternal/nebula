@@ -10,6 +10,7 @@ import { useAuthStore } from '@/store/useAuthStore'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
+import { LanguageSwitcher } from '@/components/LanguageSwitcher'
 import type { SVGProps } from 'react'
 
 export function LoginView() {
@@ -38,7 +39,10 @@ export function LoginView() {
   }
 
   return (
-    <div className="min-h-screen w-full bg-background flex overflow-hidden">
+    <div className="relative min-h-screen w-full bg-background flex overflow-hidden">
+      <div className="absolute right-5 top-5 z-20">
+        <LanguageSwitcher />
+      </div>
       {/* Left Panel: Hero */}
       <div className="hidden lg:flex flex-col flex-1 bg-card/40 border-r border-border p-12 relative overflow-hidden">
         {/* Background Mesh Pattern */}
