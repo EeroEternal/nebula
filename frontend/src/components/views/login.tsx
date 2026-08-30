@@ -5,11 +5,12 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { authApi } from '@/lib/api'
-import { useI18n } from '@/lib/i18n'
+import { useI18n } from '@/lib/useI18n'
 import { useAuthStore } from '@/store/useAuthStore'
 import { toast } from 'sonner'
 
 import { Badge } from '@/components/ui/badge'
+import type { SVGProps } from 'react'
 
 export function LoginView() {
   const { t } = useI18n()
@@ -27,7 +28,7 @@ export function LoginView() {
       const result = await authApi.login(username.trim(), password)
       setAuth(result.token, result.user)
       localStorage.setItem('nebula_token', result.token) // Legacy sync
-      toast.success(t('login.success') || 'Login successful')
+       toast.success(t('login.success'))
       navigate('/')
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('login.failed'))
@@ -53,7 +54,7 @@ export function LoginView() {
 
         <div className="mt-auto mb-auto max-w-lg relative z-10">
           <Badge variant="outline" className="mb-6 border-primary/20 text-primary font-mono uppercase tracking-widest px-3 py-1">
-            Universal Model Plane
+             {t('login.universalPlane')}
           </Badge>
           <h1 className="text-6xl font-bold leading-tight tracking-tighter text-foreground font-mono uppercase">
             {t('login.heroTitle')}
@@ -67,7 +68,7 @@ export function LoginView() {
           <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">© 2026 Nebula Infrastructure Group</p>
           <div className="flex gap-4">
             <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
-            <p className="text-[10px] font-mono text-success uppercase tracking-widest">Systems Online</p>
+             <p className="text-[10px] font-mono text-success uppercase tracking-widest">{t('login.systemsOnline')}</p>
           </div>
         </div>
       </div>
@@ -80,7 +81,13 @@ export function LoginView() {
             <p className="text-sm text-muted-foreground">{t('login.subtitle')}</p>
           </div>
 
-          <div className="space-y-6">
+          <form
+            className="space-y-6"
+            onSubmit={(e) => {
+              e.preventDefault()
+              void submit()
+            }}
+          >
             <div className="space-y-2">
               <Label htmlFor="login-username" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('login.email')}</Label>
               <div className="relative group">
@@ -88,9 +95,11 @@ export function LoginView() {
                 <Input
                   id="login-username"
                   className="pl-10 h-12 bg-white/5 border-border/50 rounded-lg font-mono text-sm focus:ring-1 focus:ring-primary/30"
-                  placeholder="identity@nebula.io"
+                   placeholder={t('login.identityPlaceholder')}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  name="username"
+                  autoComplete="username"
                 />
               </div>
             </div>
@@ -108,9 +117,8 @@ export function LoginView() {
                   className="pl-10 pr-10 h-12 bg-white/5 border-border/50 rounded-lg font-mono text-sm focus:ring-1 focus:ring-primary/30"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') submit()
-                  }}
+                  name="password"
+                  autoComplete="current-password"
                 />
                 <button
                   type="button"
@@ -123,8 +131,8 @@ export function LoginView() {
             </div>
 
             <Button 
+              type="submit"
               className="w-full bg-primary text-primary-foreground rim-light h-12 font-bold uppercase tracking-widest text-xs" 
-              onClick={submit} 
               disabled={loading}
             >
               {loading ? (
@@ -134,7 +142,7 @@ export function LoginView() {
                 </div>
               ) : t('login.signIn')}
             </Button>
-          </div>
+          </form>
 
           <div className="pt-6 border-t border-border/50 text-center space-y-4">
             <p className="text-[10px] text-muted-foreground uppercase tracking-widest">
@@ -148,7 +156,7 @@ export function LoginView() {
   )
 }
 
-function Loader2(props: any) {
+function Loader2(props: SVGProps<SVGSVGElement>) {
   return (
     <svg
       {...props}

@@ -1,0 +1,59 @@
+modules = ["rust-stable", "nodejs-20", "bash", "python-3.12", "web"]
+
+[nix]
+channel = "stable-25_05"
+packages = ["protobuf", "etcd", "rustup"]
+
+[agent]
+expertMode = true
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Nebula frontend"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Nebula backend"
+
+[[workflows.workflow]]
+name = "Nebula frontend"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd frontend && npm run dev -- --host 0.0.0.0 --port 5000"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow]]
+name = "Nebula backend"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "./bin/replit-backend.sh"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 18090
+externalPort = 3000
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 300000

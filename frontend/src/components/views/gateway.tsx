@@ -10,7 +10,7 @@ import {
   YAxis,
 } from 'recharts'
 import type { GatewayTimePoint } from '@/lib/types'
-import { useI18n } from '@/lib/i18n'
+import { useI18n } from '@/lib/useI18n'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useGatewayStats } from '@/hooks/useGatewayStats'
@@ -21,6 +21,11 @@ const WINDOW_OPTIONS = ['5m', '15m', '1h', '6h', '24h'] as const
 const latestValue = (points: GatewayTimePoint[]) => points[points.length - 1]?.value ?? 0
 const toPct = (value: number) => `${(value * 100).toFixed(2)}%`
 const fmtNumber = (value: number, digits = 2) => value.toLocaleString(undefined, { maximumFractionDigits: digits })
+
+interface ChartDatum {
+  name: string
+  value: number
+}
 
 export function GatewayView() {
   const { t } = useI18n()
@@ -141,7 +146,7 @@ export function GatewayView() {
             <h3 className="text-2xl font-mono font-bold text-foreground">{overview ? fmtNumber(overview.rps, 3) : '—'}</h3>
             <div className="flex items-center gap-1.5 mt-4">
                 <div className="w-1.5 h-1.5 rounded-full bg-primary animate-signal" />
-                <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">Flow active</p>
+                 <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">{t('gateway.flowActive')}</p>
             </div>
         </div>
 
@@ -152,7 +157,7 @@ export function GatewayView() {
             </h3>
             <div className="flex items-center gap-1.5 mt-4">
                 <div className={cn("w-1.5 h-1.5 rounded-full", (overview?.error_5xx_ratio || 0) > 0.05 ? "bg-destructive" : "bg-success")} />
-                <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">Upstream status</p>
+                 <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">{t('gateway.upstreamStatus')}</p>
             </div>
         </div>
 
@@ -161,18 +166,18 @@ export function GatewayView() {
             <h3 className="text-2xl font-mono font-bold text-foreground">{overview ? toPct(overview.retry_success_ratio) : '—'}</h3>
             <div className="flex items-center gap-1.5 mt-4">
                 <Shield className="h-3 w-3 text-success" />
-                <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">Protection layer active</p>
+                 <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">{t('gateway.protectionActive')}</p>
             </div>
         </div>
 
         <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
-            <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">Circuit State</p>
+             <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('gateway.circuitState')}</p>
             <h3 className={cn("text-2xl font-mono font-bold", (overview?.circuit_open_count || 0) > 0 ? "text-warning" : "text-success")}>
-                {overview?.circuit_open_count || 0 > 0 ? "OPEN / DEGRADED" : "CLOSED / NOMINAL"}
+                 {overview?.circuit_open_count || 0 > 0 ? t('gateway.openDegraded') : t('gateway.closedNominal')}
             </h3>
             <div className="flex items-center gap-1.5 mt-4">
                 <Clock3 className="h-3 w-3 text-muted-foreground" />
-                <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">{overview?.circuit_open_count || 0} Open breaks</p>
+                 <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">{t('gateway.openBreaks', { count: overview?.circuit_open_count || 0 })}</p>
             </div>
         </div>
       </div>
@@ -187,7 +192,7 @@ export function GatewayView() {
   )
 }
 
-function ChartCard({ title, data, color, window, unit = "" }: { title: string, data: any[], color: string, window: string, unit?: string }) {
+function ChartCard({ title, data, color, window, unit = "" }: { title: string, data: ChartDatum[], color: string, window: string, unit?: string }) {
   return (
     <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl">
       <div className="flex items-center justify-between mb-8">
@@ -195,7 +200,7 @@ function ChartCard({ title, data, color, window, unit = "" }: { title: string, d
             <BarChart3 className="h-4 w-4 text-muted-foreground" />
             <h3 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{title}</h3>
           </div>
-          <Badge variant="outline" className="font-mono text-[9px] border-border/50 text-muted-foreground uppercase">{window} WINDOW</Badge>
+           <Badge variant="outline" className="font-mono text-[9px] border-border/50 text-muted-foreground uppercase">{window} {useI18n().t('gateway.window')}</Badge>
       </div>
       <div className="h-64">
         <ResponsiveContainer width="100%" height="100%">

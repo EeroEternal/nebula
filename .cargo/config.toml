@@ -1,0 +1,4 @@
+# Replit's loader audit hook exhausts the static TLS block in upstream rustup
+# toolchains. Cargo must explicitly clear it for rustc subprocesses.
+[env]
+LD_AUDIT = { value = "", force = true }

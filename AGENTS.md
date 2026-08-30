@@ -106,7 +106,7 @@ Nebula may add a **k8s** engine runtime for clusters that use Kubernetes GPU vir
 
 Services and standard commands are documented in `README.md` and `docs/dev/setup.md`; the notes below only capture non-obvious cloud caveats.
 
-- **Rust toolchain:** Some dependencies (e.g. `unigateway-core`) require `edition2024`, so a toolchain `>= 1.85` is mandatory. The base image pins an older default (1.83); run `rustup default stable` if a build fails with an `edition2024` error. Build binaries with `cargo build --release` before using `bin/nebula-up.sh` (it runs prebuilt binaries from `target/release/`).
+- **Rust toolchain:** The workspace is pinned to Rust 1.92 by `rust-toolchain.toml` because UniGateway dependencies declare that MSRV. Install `rustup` and let Cargo select the pinned toolchain. Build binaries with `cargo build --workspace --release` before using `bin/nebula-up.sh` (it runs prebuilt binaries from `target/release/`).
 - **etcd:** `etcd`/`etcdctl` live in `~/bin` (not on the default `PATH`). `bin/nebula-up.sh` invokes `~/bin/etcd` directly; call `etcdctl` with the full path.
 - **PostgreSQL (only needed for the BFF/console):** start with `sudo pg_ctlcluster 16 main start`. BFF expects a dedicated `nebula` database reachable at `postgresql://postgres:postgres@127.0.0.1:5432/nebula`; it auto-creates tables and seeds the default console admin `admin` / `admin123` on first start.
 - **Running the stack:** copy `deploy/nebula.env.example` to `deploy/nebula.env` (gitignored) and set `START_BFF=1`, `OBSERVE_AUTH_MODE=internal` (no xtrace token needed in dev). Then `./bin/nebula-up.sh`. Ports: gateway 8081, router 18081, bff 18090, etcd 2379, frontend 5173.

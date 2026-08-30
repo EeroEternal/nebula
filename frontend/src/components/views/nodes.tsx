@@ -2,7 +2,7 @@ import { Cpu, Server, Activity, Thermometer, Gauge, ShieldCheck, Zap } from "luc
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { cn } from "@/lib/utils"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 import { useClusterOverview } from "@/hooks/useClusterOverview"
 
 export function NodesView() {
@@ -31,7 +31,7 @@ export function NodesView() {
         return (
             <div className="h-64 flex flex-col items-center justify-center gap-4 text-muted-foreground">
                 <Server className="h-8 w-8 animate-pulse text-primary" />
-                <p className="text-[10px] font-mono uppercase tracking-widest">SCANNING INFRASTRUCTURE...</p>
+                 <p className="text-[10px] font-mono uppercase tracking-widest">{t('nodes.scanning')}</p>
             </div>
         )
     }
@@ -59,9 +59,9 @@ export function NodesView() {
                     </p>
                 </div>
                 <div className="text-right">
-                    <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-1">TOTAL GPU POWER</p>
+                     <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('nodes.totalGpuPower')}</p>
                     <p className="text-2xl font-mono font-bold text-foreground">
-                        {overview.nodes.reduce((acc, n) => acc + n.gpus.length, 0)} UNITS
+                         {overview.nodes.reduce((acc, n) => acc + n.gpus.length, 0)} {t('nodes.units')}
                     </p>
                 </div>
             </div>
@@ -79,22 +79,22 @@ export function NodesView() {
                                     <h3 className="text-lg font-bold font-mono text-foreground tracking-tight">{node.node_id}</h3>
                                     <div className="flex items-center gap-3 mt-0.5">
                                         <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
-                                            PLATFORM: {(node as { platform?: string }).platform || 'nvidia-cuda'}
+                                             {t('nodes.platform')}: {(node as { platform?: string }).platform || 'nvidia-cuda'}
                                         </p>
                                         <div className="w-1 h-1 rounded-full bg-muted-foreground/30" />
                                         <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
-                                            HEARTBEAT: {fmtTime(node.last_heartbeat_ms)} AGO
+                                             {t('nodes.heartbeatAgo', { time: fmtTime(node.last_heartbeat_ms) })}
                                         </p>
                                         <div className="w-1 h-1 rounded-full bg-muted-foreground/30" />
                                         <p className="text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
-                                            {node.gpus.length} GPUS DETECTED
+                                             {t('nodes.gpusDetected', { count: node.gpus.length })}
                                         </p>
                                     </div>
                                 </div>
                             </div>
                             <div className="flex items-center gap-4">
                                 <Badge className="bg-success/10 text-success border border-success/20 font-mono text-[10px] px-3 py-1 uppercase tracking-widest">
-                                    NODE OPERATIONAL
+                                     {t('nodes.operational')}
                                 </Badge>
                             </div>
                         </div>
@@ -111,7 +111,7 @@ export function NodesView() {
                                                 <div className="p-2 rounded-lg bg-white/5 text-muted-foreground group-hover:text-primary transition-colors">
                                                     <Cpu className="h-4 w-4" />
                                                 </div>
-                                                <span className="text-xs font-bold font-mono text-foreground tracking-widest uppercase">GPU {gpu.index}</span>
+                                                 <span className="text-xs font-bold font-mono text-foreground tracking-widest uppercase">{t('nodes.gpu')} {gpu.index}</span>
                                             </div>
                                             <div className="flex items-center gap-1.5">
                                                 <Zap className={cn("h-3 w-3", usage > 1 ? "text-primary animate-signal" : "text-muted-foreground/30")} />
@@ -121,7 +121,7 @@ export function NodesView() {
                                             </div>
                                         </div>
                                         <p className="text-[10px] font-mono text-muted-foreground truncate">
-                                            {(gpu as { name?: string }).name || 'GPU'}
+                                             {(gpu as { name?: string }).name || t('nodes.gpu')}
                                             {(gpu as { driver_version?: string }).driver_version
                                                 ? ` · drv ${(gpu as { driver_version?: string }).driver_version}`
                                                 : ''}
@@ -133,7 +133,7 @@ export function NodesView() {
                                         <div className="space-y-3">
                                             <Progress value={usage} className="h-1.5 bg-white/5" indicatorClassName={usage > 85 ? "bg-destructive" : "bg-primary"} />
                                             <div className="flex items-center justify-between text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
-                                                <span>MEMORY USAGE</span>
+                                                 <span>{t('nodes.memoryUsage')}</span>
                                                 <span className="text-foreground font-mono">
                                                     {(gpu.memory_used_mb / 1024).toFixed(1)}G / {(gpu.memory_total_mb / 1024).toFixed(1)}G
                                                 </span>
@@ -145,7 +145,7 @@ export function NodesView() {
                                             <div className="space-y-1.5">
                                                 <div className="flex items-center gap-1.5 text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest">
                                                     <Thermometer className="h-3 w-3" />
-                                                    <span>CORE TEMP</span>
+                                                     <span>{t('nodes.coreTemp')}</span>
                                                 </div>
                                                 <p className={cn(
                                                     "text-sm font-mono font-bold",
@@ -157,7 +157,7 @@ export function NodesView() {
                                             <div className="space-y-1.5">
                                                 <div className="flex items-center gap-1.5 text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest">
                                                     <Gauge className="h-3 w-3" />
-                                                    <span>CORE UTIL</span>
+                                                     <span>{t('nodes.coreUtil')}</span>
                                                 </div>
                                                 <p className={cn(
                                                     "text-sm font-mono font-bold",
@@ -170,7 +170,7 @@ export function NodesView() {
 
                                         <div className="pt-2">
                                             <div className="flex items-center justify-between">
-                                                <span className="text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest">ACTIVE WORKLOAD</span>
+                                                 <span className="text-[9px] font-bold text-muted-foreground/50 uppercase tracking-widest">{t('nodes.activeWorkload')}</span>
                                                 {modelUid ? (
                                                     <Badge className="px-2 py-0 h-5 text-[9px] font-bold font-mono bg-primary/10 text-primary border border-primary/20 uppercase tracking-widest">
                                                         {modelUid}
@@ -178,7 +178,7 @@ export function NodesView() {
                                                 ) : (
                                                     <div className="flex items-center gap-1.5">
                                                         <Activity className="h-3 w-3 text-success/50" />
-                                                        <span className="text-[9px] font-bold text-success/70 uppercase tracking-widest">IDLE READY</span>
+                                                         <span className="text-[9px] font-bold text-success/70 uppercase tracking-widest">{t('nodes.idleReady')}</span>
                                                     </div>
                                                 )}
                                             </div>

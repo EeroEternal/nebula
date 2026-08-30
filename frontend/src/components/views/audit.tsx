@@ -10,8 +10,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { useI18n } from "@/lib/i18n"
-import { useAuditLogs } from "@/hooks/useAuditLogs"
+import { useI18n } from "@/lib/useI18n"
+import { useAuditLogs, type AuditLogEntry } from "@/hooks/useAuditLogs"
 import { cn } from "@/lib/utils"
 
 export function AuditView() {
@@ -37,13 +37,13 @@ export function AuditView() {
     } catch { return iso }
   }
 
-  const getStatus = (t: any): number | undefined => {
+  const getStatus = (t: AuditLogEntry): number | undefined => {
     if (t.output?.status) return t.output.status
     if (t.metadata?.status) return t.metadata.status
     return undefined
   }
 
-  const getRole = (t: any): string => {
+  const getRole = (t: AuditLogEntry): string => {
     const tag = t.tags?.find((s: string) => s.startsWith("role:"))
     if (tag) return tag.slice(5)
     return t.metadata?.role || "SYSTEM"
@@ -64,7 +64,7 @@ export function AuditView() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
             <input
               type="text"
-              placeholder="SEARCH BY IDENTITY..."
+               placeholder={t('audit.searchPlaceholder')}
               value={filterUser}
               onChange={(e) => setFilterUser(e.target.value)}
               className="w-full bg-black/20 border border-border/50 rounded-lg pl-10 pr-4 py-2 text-xs font-mono focus:outline-none focus:border-primary/50 transition-all"
@@ -84,21 +84,21 @@ export function AuditView() {
 
       <div className="bg-card/40 backdrop-blur-xl border border-border rounded-xl overflow-hidden">
         <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between bg-white/5">
-            <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground">Historical Operation Ledger</h3>
+            <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground">{t('audit.operationLedger')}</h3>
             <Badge variant="outline" className="font-mono text-[10px] border-primary/20 text-primary uppercase">
-                {meta.totalItems} TOTAL ENTRIES
+                {meta.totalItems} {t('audit.totalEntries')}
             </Badge>
         </div>
 
         <Table>
           <TableHeader className="bg-black/20">
             <TableRow className="border-border/50 hover:bg-transparent">
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Timestamp</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Principal</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Authorization</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Action Sequence</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Status</TableHead>
-              <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">Performance</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('audit.timestamp')}</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('audit.principal')}</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('audit.authorization')}</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('audit.actionSequence')}</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('common.status')}</TableHead>
+              <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">{t('audit.performance')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -112,7 +112,7 @@ export function AuditView() {
                 </TableCell>
               </TableRow>
             ) : (
-                data.map((item: any) => {
+                data.map((item) => {
                     const status = getStatus(item)
                     const role = getRole(item)
                     return (

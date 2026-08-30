@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { apiPut, apiDelete } from "@/lib/api"
 import type { EngineImage } from "@/lib/types"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 import { useImages } from "@/hooks/useImages"
 import { useAuthStore } from "@/store/useAuthStore"
 import { cn } from "@/lib/utils"
@@ -85,25 +85,25 @@ export function ImagesView() {
     }
     const promise = apiPut(`/images/${form.id}`, payload, token || '')
     toast.promise(promise, {
-      loading: 'Saving engine image...',
+      loading: t('images.saving'),
       success: () => {
         setDialogOpen(false)
         refetch()
-        return 'Image saved successfully'
+        return t('images.saved')
       },
-      error: 'Failed to save image'
+      error: t('images.saveFailed')
     })
   }
 
   const handleDelete = async (id: string) => {
     const promise = apiDelete(`/images/${id}`, token || '')
     toast.promise(promise, {
-      loading: 'Deleting image...',
+      loading: t('images.deleting'),
       success: () => {
         refetch()
-        return 'Image deleted'
+        return t('images.deleted')
       },
-      error: 'Failed to delete'
+      error: t('images.deleteFailed')
     })
   }
 
@@ -155,11 +155,11 @@ export function ImagesView() {
         <Table>
           <TableHeader className="bg-black/20">
             <TableRow className="border-border/50 hover:bg-transparent">
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Image Identity</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Engine</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Docker Reference</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Node Distribution</TableHead>
-              <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">Actions</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('images.tableImageIdentity')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('images.engineType')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('images.dockerReference')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('images.nodeDistribution')}</TableHead>
+               <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">{t('common.actions')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -168,7 +168,7 @@ export function ImagesView() {
                     <TableCell colSpan={5} className="h-64 text-center">
                         <div className="flex flex-col items-center gap-3 opacity-50">
                             <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                            <p className="text-[10px] font-mono uppercase tracking-widest">LOADING IMAGES...</p>
+                            <p className="text-[10px] font-mono uppercase tracking-widest">{t('images.loading')}</p>
                         </div>
                     </TableCell>
                 </TableRow>
@@ -221,7 +221,7 @@ export function ImagesView() {
                            <Badge variant={img.version_policy === "rolling" ? "default" : "secondary"} className="text-[9px] h-4 uppercase px-1.5">
                              {img.version_policy}
                            </Badge>
-                           {img.pre_pull && <span className="text-[9px] font-mono text-primary/70 uppercase tracking-tighter">● auto-pull</span>}
+                            {img.pre_pull && <span className="text-[9px] font-mono text-primary/70 uppercase tracking-tighter">● {t('images.autoPull')}</span>}
                         </div>
                       </div>
                     </TableCell>
@@ -245,7 +245,7 @@ export function ImagesView() {
                         </div>
                         <span className="text-[10px] font-mono font-bold">
                            <span className="text-success">{readyCount}</span>
-                           <span className="text-muted-foreground">/{totalCount} OK</span>
+                            <span className="text-muted-foreground">/{totalCount} {t('images.ok')}</span>
                         </span>
                       </button>
                     </TableCell>
@@ -287,7 +287,7 @@ export function ImagesView() {
                                     </div>
                                   )) : (
                                     <div className="col-span-full py-4 text-center">
-                                        <p className="text-[10px] font-mono text-muted-foreground uppercase">No distribution data available for this image</p>
+                                         <p className="text-[10px] font-mono text-muted-foreground uppercase">{t('images.noDistribution')}</p>
                                     </div>
                                   )}
                               </div>
@@ -306,7 +306,7 @@ export function ImagesView() {
         <DialogContent className="sm:max-w-[500px] bg-card/95 backdrop-blur-2xl border-border rim-light">
           <DialogHeader>
             <DialogTitle className="font-mono uppercase tracking-tight text-2xl">
-              {editingId ? "Update Engine Image" : "Register Engine Image"}
+               {editingId ? t('images.updateTitle') : t('images.registerTitle')}
             </DialogTitle>
           </DialogHeader>
 
@@ -317,7 +317,7 @@ export function ImagesView() {
                     <Input
                         id="img-id"
                         className="bg-white/5 border-border/50 font-mono"
-                        placeholder="e.g. vllm-deepseek"
+                         placeholder={t('images.imageIdPlaceholder')}
                         value={form.id}
                         onChange={(e) => setForm({ ...form, id: e.target.value })}
                         disabled={!!editingId}
@@ -345,7 +345,7 @@ export function ImagesView() {
                     <Input
                         id="img-ref"
                         className="pl-10 bg-white/5 border-border/50 font-mono text-xs"
-                        placeholder="docker.io/library/vllm:latest"
+                         placeholder={t('images.dockerPlaceholder')}
                         value={form.image}
                         onChange={(e) => setForm({ ...form, image: e.target.value })}
                     />
@@ -361,16 +361,16 @@ export function ImagesView() {
                         onChange={(e) => setForm({ ...form, version_policy: e.target.value as "pin" | "rolling" })}
                         className="flex h-10 w-full rounded-md border border-border/50 bg-white/5 px-3 py-1 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary/30"
                     >
-                        <option value="pin">Pin (Stable)</option>
-                        <option value="rolling">Rolling (Latest)</option>
+                         <option value="pin">{t('images.pinStable')}</option>
+                         <option value="rolling">{t('images.rollingLatest')}</option>
                     </select>
                 </div>
                 <div className="space-y-2">
-                    <Label htmlFor="img-platforms" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Platforms</Label>
+                     <Label htmlFor="img-platforms" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('images.platformsLabel')}</Label>
                     <Input
                         id="img-platforms"
                         className="bg-white/5 border-border/50 font-mono text-xs"
-                        placeholder="linux/amd64"
+                         placeholder={t('images.platformPlaceholder')}
                         value={platformInput}
                         onChange={(e) => setPlatformInput(e.target.value)}
                     />
@@ -378,11 +378,11 @@ export function ImagesView() {
             </div>
 
             <div className="space-y-2">
-                <Label htmlFor="img-desc" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Description</Label>
+                 <Label htmlFor="img-desc" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('images.description')}</Label>
                 <Input
                     id="img-desc"
                     className="bg-white/5 border-border/50"
-                    placeholder="Optional image description"
+                     placeholder={t('images.descriptionPlaceholder')}
                     value={form.description || ""}
                     onChange={(e) => setForm({ ...form, description: e.target.value })}
                 />
@@ -397,8 +397,8 @@ export function ImagesView() {
                     className="h-4 w-4 rounded border-border bg-black/20 text-primary focus:ring-primary/30"
                 />
                 <div className="space-y-0.5">
-                    <Label htmlFor="img-prepull" className="text-xs font-bold uppercase tracking-tight">Automatic Pre-pull</Label>
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-widest">Eagerly pull this image to all eligible nodes</p>
+                     <Label htmlFor="img-prepull" className="text-xs font-bold uppercase tracking-tight">{t('images.prePull')}</Label>
+                     <p className="text-[10px] text-muted-foreground uppercase tracking-widest">{t('images.prePullHint')}</p>
                 </div>
             </div>
           </div>
@@ -416,7 +416,7 @@ export function ImagesView() {
               disabled={!form.id || !form.image}
               className="bg-primary text-primary-foreground rim-light h-10 px-6 font-bold uppercase tracking-widest text-xs ml-auto"
             >
-              {editingId ? "Update Registry" : "Commit Image"}
+               {editingId ? t('images.update') : t('images.commit')}
             </Button>
           </DialogFooter>
         </DialogContent>

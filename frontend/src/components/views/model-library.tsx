@@ -7,8 +7,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { v2 } from '@/lib/api'
-import type { ModelView } from '@/lib/types'
-import { useI18n } from '@/lib/i18n'
+import type { ModelCacheEntry, ModelView } from '@/lib/types'
+import { useI18n } from '@/lib/useI18n'
 import { useModels } from '@/hooks/useModels'
 import { useCacheSummary } from '@/hooks/useCacheSummary'
 import { useAuthStore } from '@/store/useAuthStore'
@@ -36,24 +36,24 @@ export function ModelLibraryView() {
     setActingUid(uid)
     const promise = v2.deleteModel(uid, token || '')
     toast.promise(promise, {
-      loading: `Deleting model ${uid}...`,
+      loading: t('library.deletingModel', { uid }),
       success: () => {
         refresh()
-        return 'Model deleted'
+        return t('library.modelDeleted')
       },
-      error: 'Delete failed'
+      error: t('library.deleteFailed')
     })
     try { await promise } finally { setActingUid(null) }
   }
 
   const getCacheStats = useCallback((modelUid: string, modelName: string) => {
-    const matched = (cacheSummary?.caches || []).filter((item: any) => {
+    const matched = (cacheSummary?.caches || []).filter((item: ModelCacheEntry & { matched_model_uids?: string[] }) => {
       if ((item.matched_model_uids || []).includes(modelUid)) return true
       return item.model_name === modelName
     })
     return {
-      nodes: new Set(matched.map((item: any) => item.node_id)).size,
-      bytes: matched.reduce((sum: number, item: any) => sum + item.size_bytes, 0),
+      nodes: new Set(matched.map((item) => item.node_id)).size,
+      bytes: matched.reduce((sum, item) => sum + item.size_bytes, 0),
     }
   }, [cacheSummary])
 
@@ -62,13 +62,13 @@ export function ModelLibraryView() {
     setActingUid(selectedModel.model_uid)
     const promise = v2.updateModel(selectedModel.model_uid, { model_path: newPath.trim() }, token || '')
     toast.promise(promise, {
-      loading: 'Updating storage path...',
+       loading: t('library.updatingPath'),
       success: () => {
         setMoveDialogOpen(false)
         refresh()
-        return 'Path updated'
+         return t('library.pathUpdated')
       },
-      error: 'Update failed'
+      error: t('library.updateFailed')
     })
     try { await promise } finally { setActingUid(null) }
   }
@@ -101,7 +101,7 @@ export function ModelLibraryView() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
             <input
               type="text"
-              placeholder="SEARCH ASSETS..."
+               placeholder={t('library.searchPlaceholder')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full bg-black/20 border border-border/50 rounded-lg pl-10 pr-4 py-2 text-xs font-mono focus:outline-none focus:border-primary/50 transition-all"
@@ -130,11 +130,11 @@ export function ModelLibraryView() {
         <Table>
           <TableHeader className="bg-black/20">
             <TableRow className="border-border/50 hover:bg-transparent">
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Asset Identity</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Storage Status</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Service Level</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Provisioning</TableHead>
-              <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">Management</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('library.assetIdentity')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('library.storageStatus')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('library.serviceLevel')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('library.provisioning')}</TableHead>
+               <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">{t('library.management')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -177,7 +177,7 @@ export function ModelLibraryView() {
                             </span>
                         </div>
                         <span className="text-[9px] font-mono text-muted-foreground uppercase tracking-widest">
-                            {formatSize(stats.bytes)} ● {stats.nodes} NODES
+                             {formatSize(stats.bytes)} ● {t('library.nodesCount', { count: stats.nodes })}
                         </span>
                       </div>
                     </TableCell>
@@ -198,7 +198,7 @@ export function ModelLibraryView() {
                             variant="ghost" size="sm" 
                             className="h-9 px-4 hover:bg-white/10 font-bold text-[10px] uppercase tracking-widest border border-transparent hover:border-border/50 transition-all"
                         >
-                          OPEN SERVICE
+                           {t('library.openService')}
                           <ArrowUpRight className="ml-2 h-3.5 w-3.5" />
                         </Button>
                         <Button
@@ -232,37 +232,37 @@ export function ModelLibraryView() {
           <DialogHeader>
             <DialogTitle className="font-mono uppercase tracking-tight text-2xl flex items-center gap-3">
               <HardDrive className="h-6 w-6 text-primary" />
-              Relocate Asset
+               {t('library.relocateAsset')}
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-6 py-4">
             <div className="space-y-1 p-3 rounded-lg bg-white/5 border border-border/30">
-              <p className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Target Asset</p>
+               <p className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('library.targetAsset')}</p>
               <p className="text-sm font-mono font-bold text-foreground break-all">{selectedModel?.model_uid || '—'}</p>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="library-move-path" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">New Storage Path</Label>
+               <Label htmlFor="library-move-path" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('library.newStoragePath')}</Label>
               <div className="relative">
                   <Box className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input
                     id="library-move-path"
                     className="pl-10 bg-white/5 border-border/50 font-mono text-xs"
-                    placeholder="/mnt/fast-storage/..."
+                     placeholder={t('library.pathPlaceholder')}
                     value={newPath}
                     onChange={(e) => setNewPath(e.target.value)}
                   />
               </div>
               <p className="text-[9px] text-muted-foreground uppercase tracking-widest mt-1">
-                 Ensure the target path is accessible from all compute nodes
+                  {t('library.pathAccessibility')}
               </p>
             </div>
             
             <div className="p-4 rounded-lg bg-primary/5 border border-primary/10 flex gap-3">
                 <Info className="h-4 w-4 text-primary shrink-0 mt-0.5" />
                 <p className="text-[10px] text-muted-foreground uppercase leading-relaxed tracking-wider">
-                    Relocating an asset updates its internal metadata pointer. Actual data migration must be handled at the storage layer if paths are not shared.
+                     {t('library.relocateHint')}
                 </p>
             </div>
           </div>
@@ -272,7 +272,7 @@ export function ModelLibraryView() {
               {t('common.cancel')}
             </Button>
             <Button onClick={handleMove} disabled={!newPath.trim() || !selectedModel} className="bg-primary text-primary-foreground rim-light h-10 px-8 font-bold uppercase tracking-widest text-xs ml-auto">
-              COMMIT RELOCATION
+               {t('library.commitRelocation')}
             </Button>
           </DialogFooter>
         </DialogContent>

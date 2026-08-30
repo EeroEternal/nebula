@@ -8,11 +8,12 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { v2 } from "@/lib/api"
 import type { ModelTemplate } from "@/lib/types"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 import { useTemplates } from "@/hooks/useTemplates"
 import { useAuthStore } from "@/store/useAuthStore"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import type { SVGProps } from "react"
 
 const EMPTY_DEPLOY_FORM = {
   model_uid: "",
@@ -52,12 +53,12 @@ export function TemplatesView() {
     
     const promise = v2.deployTemplate(selectedTemplate.template_id, body, token || '')
     toast.promise(promise, {
-      loading: `Deploying ${selectedTemplate.name}...`,
+       loading: t('templates.deploying', { name: selectedTemplate.name }),
       success: () => {
         setDeployDialogOpen(false)
-        return 'Deployment initiated'
+         return t('templates.deploymentStarted')
       },
-      error: 'Deployment failed'
+      error: t('templates.deployFailed')
     })
   }
 
@@ -82,7 +83,7 @@ export function TemplatesView() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
             <input
               type="text"
-              placeholder="FILTER TEMPLATES..."
+               placeholder={t('templates.filterPlaceholder')}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full bg-black/20 border border-border/50 rounded-lg pl-10 pr-4 py-2 text-xs font-mono focus:outline-none focus:border-primary/50 transition-all"
@@ -113,12 +114,12 @@ export function TemplatesView() {
         <Table>
           <TableHeader className="bg-black/20">
             <TableRow className="border-border/50 hover:bg-transparent">
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Protocol Identity</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Base Model</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Infrastructure</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Category</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Source</TableHead>
-              <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">Operations</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('templates.protocolIdentity')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('templates.baseModel')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('templates.infrastructure')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('templates.category')}</TableHead>
+               <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('templates.source')}</TableHead>
+               <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">{t('templates.operations')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -127,7 +128,7 @@ export function TemplatesView() {
                     <TableCell colSpan={6} className="h-64 text-center">
                         <div className="flex flex-col items-center gap-3 opacity-50">
                             <Loader2 className="h-8 w-8 animate-spin text-primary" />
-                            <p className="text-[10px] font-mono uppercase tracking-widest">LOADING TEMPLATES...</p>
+                            <p className="text-[10px] font-mono uppercase tracking-widest">{t('templates.loading')}</p>
                         </div>
                     </TableCell>
                 </TableRow>
@@ -168,7 +169,7 @@ export function TemplatesView() {
                             {tpl.engine_type || "AUTO"}
                         </Badge>
                         <span className="text-[9px] font-mono text-muted-foreground uppercase tracking-widest">
-                            DEFAULT SCALE: {tpl.default_replicas}
+                             {t('templates.defaultScale')}: {tpl.default_replicas}
                         </span>
                     </div>
                   </TableCell>
@@ -213,20 +214,20 @@ export function TemplatesView() {
           <DialogHeader>
             <DialogTitle className="font-mono uppercase tracking-tight text-2xl flex items-center gap-3">
               <Rocket className="h-6 w-6 text-primary animate-signal" />
-              DEPLOY {selectedTemplate?.name}
+               {t('templates.deployTitle', { name: selectedTemplate?.name || '' })}
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-6 py-4">
             <div className="space-y-2">
               <Label htmlFor="deploy-uid" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">
-                Model Instance Identity
-                <span className="text-muted-foreground/50 font-normal ml-2">(OPTIONAL OVERRIDE)</span>
+                 {t('templates.instanceIdentity')}
+                 <span className="text-muted-foreground/50 font-normal ml-2">({t('templates.optionalOverrideLabel')})</span>
               </Label>
               <Input
                 id="deploy-uid"
                 className="bg-white/5 border-border/50 font-mono"
-                placeholder="Auto-generated if empty"
+                 placeholder={t('templates.leaveEmptyAuto')}
                 value={deployForm.model_uid}
                 onChange={(e) => setDeployForm({ ...deployForm, model_uid: e.target.value })}
               />
@@ -234,7 +235,7 @@ export function TemplatesView() {
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="deploy-replicas" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Target Scale</Label>
+                 <Label htmlFor="deploy-replicas" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('templates.targetScale')}</Label>
                 <div className="relative">
                     <Layout className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                     <Input
@@ -249,13 +250,13 @@ export function TemplatesView() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="deploy-node" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Target Node</Label>
+                 <Label htmlFor="deploy-node" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('templates.targetNode')}</Label>
                 <div className="relative">
                     <Server className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                     <Input
                         id="deploy-node"
                         className="pl-10 bg-white/5 border-border/50 font-mono"
-                        placeholder="Automatic scheduling"
+                         placeholder={t('templates.autoScheduling')}
                         value={deployForm.node_id}
                         onChange={(e) => setDeployForm({ ...deployForm, node_id: e.target.value })}
                     />
@@ -265,15 +266,15 @@ export function TemplatesView() {
 
             <div className="space-y-2">
               <Label htmlFor="deploy-gpus" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">
-                GPU Affinity
-                <span className="text-muted-foreground/50 font-normal ml-2">(COMMA SEPARATED INDICES)</span>
+                 {t('templates.gpuAffinity')}
+                 <span className="text-muted-foreground/50 font-normal ml-2">({t('templates.commaSeparatedIndices')})</span>
               </Label>
               <div className="relative">
                   <Cpu className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input
                     id="deploy-gpus"
                     className="pl-10 bg-white/5 border-border/50 font-mono"
-                    placeholder="e.g. 0,1"
+                     placeholder={t('templates.gpuExample')}
                     value={deployForm.gpu_indices}
                     onChange={(e) => setDeployForm({ ...deployForm, gpu_indices: e.target.value })}
                   />
@@ -283,8 +284,7 @@ export function TemplatesView() {
             <div className="p-4 rounded-lg bg-primary/5 border border-primary/10 flex gap-3">
                 <Info className="h-4 w-4 text-primary shrink-0 mt-0.5" />
                 <p className="text-[10px] text-muted-foreground uppercase leading-relaxed tracking-wider">
-                    Deploying a template will provision the necessary engine resources and start the model service. 
-                    The scheduler will attempt to satisfy all resource constraints.
+                     {t('templates.deployNotice')}
                 </p>
             </div>
           </div>
@@ -311,7 +311,7 @@ export function TemplatesView() {
   )
 }
 
-function Server(props: any) {
+function Server(props: SVGProps<SVGSVGElement>) {
   return (
     <svg
       {...props}

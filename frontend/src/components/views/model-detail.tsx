@@ -14,7 +14,7 @@ import { endpointStatusTone, formatNodeGpu } from "@/lib/endpoint-status"
 import { EngineAlertsBanner } from "@/components/engine-alerts-banner"
 import { v2 } from "@/lib/api"
 import type { ModelDetailView, AggregatedModelState } from "@/lib/types"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 
 const STATE_BADGE: Record<AggregatedModelState, { key: string; cls: string }> = {
     running: { key: "state.running", cls: "bg-success/10 text-success border-success/20" },
@@ -147,8 +147,8 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                             return (
                                 <div key={`${dp.replica_id}-${dp.node_id}`} className="space-y-1">
                                     <div className="flex items-center justify-between text-xs">
-                                        <span className="font-medium">Replica {dp.replica_id} on {dp.node_id}</span>
-                                        <span className="text-muted-foreground">{fmtBytes(dp.downloaded_bytes)} / {fmtBytes(dp.total_bytes)} ({pct}%) · {dp.files_done}/{dp.files_total} files</span>
+                                         <span className="font-medium">{t('modelDetail.replicaOnNode', { replica: dp.replica_id, node: dp.node_id })}</span>
+                                         <span className="text-muted-foreground">{fmtBytes(dp.downloaded_bytes)} / {fmtBytes(dp.total_bytes)} ({pct}%) · {dp.files_done}/{dp.files_total} {t('modelDetail.files')}</span>
                                     </div>
                                     <Progress value={pct} className="h-2" />
                                 </div>
@@ -223,19 +223,19 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                         {detail.capabilities.map((rc) => (
                             <div key={rc.replica_id} className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm border border-border/40 rounded-xl p-3">
                                 <div>
-                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Replica</p>
+                                     <p className="text-[10px] uppercase text-muted-foreground tracking-widest">{t('endpoints.replica')}</p>
                                     <p className="font-mono font-bold">{rc.replica_id}</p>
                                 </div>
                                 <div>
-                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Source</p>
+                                     <p className="text-[10px] uppercase text-muted-foreground tracking-widest">{t('modelDetail.source')}</p>
                                     <p className="font-mono">{rc.capability.source}</p>
                                 </div>
                                 <div>
-                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Engine</p>
+                                     <p className="text-[10px] uppercase text-muted-foreground tracking-widest">{t('modelDetail.engine')}</p>
                                     <p className="font-mono">{rc.capability.engine_type}{rc.capability.engine_version ? ` @ ${rc.capability.engine_version}` : ""}</p>
                                 </div>
                                 <div>
-                                    <p className="text-[10px] uppercase text-muted-foreground tracking-widest">Obs</p>
+                                     <p className="text-[10px] uppercase text-muted-foreground tracking-widest">{t('modelDetail.observability')}</p>
                                     <p className="font-mono text-xs">
                                         kv={rc.capability.observability?.kv_cache_usage ?? "n/a"} ·
                                         pending={rc.capability.observability?.pending_requests ?? "n/a"}

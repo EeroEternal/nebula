@@ -124,6 +124,7 @@ import type {
   CapacitySnapshot,
   ManagedUser,
   ModelSlo,
+  ModelSpec,
   ModelView,
   ModelDetailView,
   ModelTemplate,
@@ -174,7 +175,7 @@ export const v2 = {
     apiGet<ModelDetailView>(`/v2/models/${uid}`, token),
 
   createModel: (body: Record<string, unknown>, token?: string) =>
-    apiPost<unknown, Record<string, unknown>>('/v2/models', body, token),
+    apiPost<ModelSpec, Record<string, unknown>>('/v2/models', body, token),
 
   updateModel: (uid: string, body: Record<string, unknown>, token?: string) =>
     apiPut<unknown, Record<string, unknown>>(`/v2/models/${uid}`, body, token),

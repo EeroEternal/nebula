@@ -6,8 +6,10 @@ import { useClusterOverview } from "@/hooks/useClusterOverview"
 import { useAuthStore } from "@/store/useAuthStore"
 import { cn } from "@/lib/utils"
 import { endpointStatusTone, formatNodeGpu } from "@/lib/endpoint-status"
+import { useI18n } from "@/lib/useI18n"
 
 export function EndpointsView() {
+    const { t } = useI18n()
     const { data: overview } = useClusterOverview()
     const { token } = useAuthStore()
 
@@ -23,10 +25,10 @@ export function EndpointsView() {
         <div className="space-y-8 animate-in fade-in duration-500">
             <div className="flex justify-between items-end">
                 <div>
-                    <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">API Endpoints</h2>
+                    <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('endpoints.apiTitle')}</h2>
                     <p className="text-muted-foreground mt-2 flex items-center gap-2">
                         <Globe className="h-4 w-4 text-primary" />
-                        Access points and protocol interfaces for model inference
+                         {t('endpoints.apiDesc')}
                     </p>
                 </div>
             </div>
@@ -35,14 +37,14 @@ export function EndpointsView() {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">Total Endpoints</p>
+                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('endpoints.total')}</p>
                     <h3 className="text-2xl font-mono font-bold text-foreground">{overview?.endpoints.length || 0}</h3>
                     <div className="mt-4 flex items-center gap-2 text-[10px] text-muted-foreground uppercase font-bold">
-                        <Activity className="h-3 w-3 text-success" /> Load Balanced
+                        <Activity className="h-3 w-3 text-success" /> {t('endpoints.loadBalanced')}
                     </div>
                 </div>
                 <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">Active Protocols</p>
+                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('endpoints.activeProtocols')}</p>
                     <h3 className="text-2xl font-mono font-bold text-foreground">2</h3>
                     <div className="mt-4 flex gap-2">
                         <Badge className="bg-primary/10 text-primary border-primary/20 text-[9px]">REST/OAI</Badge>
@@ -50,33 +52,33 @@ export function EndpointsView() {
                     </div>
                 </div>
                 <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">Mesh Health</p>
-                    <h3 className="text-2xl font-mono font-bold text-success">NOMINAL</h3>
+                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('endpoints.meshHealth')}</p>
+                    <h3 className="text-2xl font-mono font-bold text-success">{t('endpoints.nominal')}</h3>
                     <div className="mt-4 flex items-center gap-2 text-[10px] text-muted-foreground uppercase font-bold">
-                        <Shield className="h-3 w-3 text-success" /> Traffic Encrypted
+                         <Shield className="h-3 w-3 text-success" /> {t('endpoints.trafficEncrypted')}
                     </div>
                 </div>
             </div>
 
             <div className="bg-card/40 backdrop-blur-xl border border-border rounded-xl overflow-hidden">
                 <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between bg-white/5">
-                    <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground">Endpoint Distribution</h3>
+                     <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground">{t('endpoints.distribution')}</h3>
                 </div>
                 <Table>
                     <TableHeader className="bg-black/20">
                         <TableRow className="border-border/50 hover:bg-transparent">
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Identity</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Computing Resource</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Interface</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Target URL</TableHead>
-                            <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">Connectivity</TableHead>
+                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('endpoints.identity')}</TableHead>
+                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.computingResource')}</TableHead>
+                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.interface')}</TableHead>
+                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.targetUrl')}</TableHead>
+                             <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">{t('endpoints.connectivity')}</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
                         {!overview || overview.endpoints.length === 0 ? (
                             <TableRow>
                                 <TableCell colSpan={5} className="h-64 text-center text-[10px] font-mono uppercase tracking-widest text-muted-foreground opacity-50">
-                                    No active endpoints detected in the mesh
+                                     {t('endpoints.noActive')}
                                 </TableCell>
                             </TableRow>
                         ) : (
@@ -85,7 +87,7 @@ export function EndpointsView() {
                                     <TableCell className="px-6 py-5">
                                         <div className="flex flex-col gap-1">
                                             <span className="font-mono text-sm font-bold text-foreground uppercase">{ep.model_uid}</span>
-                                            <span className="text-[9px] font-mono text-muted-foreground uppercase tracking-widest">REPLICA ID: {ep.replica_id}</span>
+                                             <span className="text-[9px] font-mono text-muted-foreground uppercase tracking-widest">{t('endpoints.replicaId')}: {ep.replica_id}</span>
                                         </div>
                                     </TableCell>
                                     <TableCell>

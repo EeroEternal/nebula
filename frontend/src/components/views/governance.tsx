@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { Shield, Activity, RefreshCw, Loader2, Database, Gauge, FlaskConical } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -23,7 +23,7 @@ import type {
     CostPriceConfig,
 } from "@/lib/types"
 import { useAuthStore } from "@/store/useAuthStore"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 
@@ -56,7 +56,7 @@ export function GovernanceView() {
     const [canaryStable, setCanaryStable] = useState("")
     const [loading, setLoading] = useState(true)
 
-    const refresh = async () => {
+    const refresh = useCallback(async () => {
         setLoading(true)
         try {
             const [r, inv, cap, s, e, br, c, tn, pr] = await Promise.all([
@@ -91,13 +91,13 @@ export function GovernanceView() {
             )
             setCostByTenant(costs)
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "load failed")
+            toast.error(err instanceof Error ? err.message : t("governance.loadFailed"))
         } finally {
             setLoading(false)
         }
-    }
+    }, [token])
 
-    useEffect(() => { void refresh() }, [token])
+    useEffect(() => { void refresh() }, [refresh])
 
     const seed = async () => {
         try {
@@ -105,7 +105,7 @@ export function GovernanceView() {
             setRules(r)
             toast.success(t("governance.seeded"))
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "seed failed")
+            toast.error(err instanceof Error ? err.message : t("governance.seedFailed"))
         }
     }
 
@@ -123,7 +123,7 @@ export function GovernanceView() {
             })
             toast.success(t("governance.sloSaved"))
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "slo save failed")
+            toast.error(err instanceof Error ? err.message : t("governance.sloSaveFailed"))
         }
     }
 
@@ -134,7 +134,7 @@ export function GovernanceView() {
             const ev = await v2.evaluateSlo(evalUid.trim(), token || "")
             setEvaluation(ev)
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "evaluate failed")
+            toast.error(err instanceof Error ? err.message : t("governance.evaluateFailed"))
         }
     }
 
@@ -164,7 +164,7 @@ export function GovernanceView() {
                 toast.message(resp.message || t("governance.recInsufficient"))
             }
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "recommend failed")
+            toast.error(err instanceof Error ? err.message : t("governance.recommendFailed"))
         }
     }
 
@@ -192,7 +192,7 @@ export function GovernanceView() {
             setDraft(d)
             toast.success(t("governance.selectionDraftReady"))
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "draft failed")
+            toast.error(err instanceof Error ? err.message : t("governance.draftFailed"))
         }
     }
 
@@ -203,7 +203,7 @@ export function GovernanceView() {
             setDraft(applied)
             toast.success(t("governance.selectionApplied"))
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "apply failed")
+            toast.error(err instanceof Error ? err.message : t("governance.applyFailed"))
         }
     }
 
@@ -219,7 +219,7 @@ export function GovernanceView() {
             toast.success(t("governance.canaryCreated"))
             setCanaries(await v2.listCanaries(token || ""))
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "canary create failed")
+            toast.error(err instanceof Error ? err.message : t("governance.canaryCreateFailed"))
         }
     }
 
@@ -237,7 +237,7 @@ export function GovernanceView() {
             setNewTenantId("")
             await refresh()
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "tenant save failed")
+            toast.error(err instanceof Error ? err.message : t("governance.tenantSaveFailed"))
         }
     }
 
@@ -254,7 +254,7 @@ export function GovernanceView() {
             toast.success(t("governance.pricingSaved"))
             setPricing(await v2.listPricing(token || ""))
         } catch (err) {
-            toast.error(err instanceof Error ? err.message : "pricing save failed")
+            toast.error(err instanceof Error ? err.message : t("governance.pricingSaveFailed"))
         }
     }
 
@@ -282,11 +282,11 @@ export function GovernanceView() {
                 <Table>
                     <TableHeader>
                         <TableRow className="hover:bg-transparent">
-                            <TableHead className="text-[10px] uppercase">ID</TableHead>
-                            <TableHead className="text-[10px] uppercase">Engine</TableHead>
-                            <TableHead className="text-[10px] uppercase">Platforms</TableHead>
-                            <TableHead className="text-[10px] uppercase">Verdict</TableHead>
-                            <TableHead className="text-[10px] uppercase">Driver/CUDA</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.id")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.engine")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.platforms")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.verdict")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.driverCuda")}</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -393,7 +393,7 @@ export function GovernanceView() {
                 <div className="flex gap-2 max-w-md">
                     <Input
                         className="font-mono"
-                        placeholder="model_uid"
+                        placeholder={t("governance.modelUidPlaceholder")}
                         value={evalUid}
                         onChange={(e) => setEvalUid(e.target.value)}
                     />
@@ -454,12 +454,12 @@ export function GovernanceView() {
                 <Table>
                     <TableHeader>
                         <TableRow className="hover:bg-transparent">
-                            <TableHead className="text-[10px] uppercase">Run</TableHead>
-                            <TableHead className="text-[10px] uppercase">Model / Engine</TableHead>
-                            <TableHead className="text-[10px] uppercase">Workload</TableHead>
-                            <TableHead className="text-[10px] uppercase">TTFT p95</TableHead>
-                            <TableHead className="text-[10px] uppercase">TPS</TableHead>
-                            <TableHead className="text-[10px] uppercase">Status</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.run")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.modelEngine")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.workload")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.ttftP95")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.tps")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("common.status")}</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -499,19 +499,19 @@ export function GovernanceView() {
                 <div className="flex flex-wrap gap-2 max-w-3xl items-center">
                     <Input
                         className="font-mono max-w-[200px]"
-                        placeholder="model_name"
+                        placeholder={t("governance.modelNamePlaceholder")}
                         value={recModel}
                         onChange={(e) => setRecModel(e.target.value)}
                     />
                     <Input
                         className="font-mono max-w-[160px]"
-                        placeholder="model_uid"
+                        placeholder={t("governance.modelUidPlaceholder")}
                         value={recUid}
                         onChange={(e) => setRecUid(e.target.value)}
                     />
                     <Input
                         className="font-mono max-w-[180px]"
-                        placeholder="workload_id"
+                        placeholder={t("governance.workloadIdPlaceholder")}
                         value={recWorkload}
                         onChange={(e) => setRecWorkload(e.target.value)}
                     />
@@ -521,9 +521,9 @@ export function GovernanceView() {
                         onChange={(e) => setRecPreference(e.target.value as "latency" | "throughput" | "cost")}
                         aria-label={t("governance.selectionPreference")}
                     >
-                        <option value="latency">latency</option>
-                        <option value="throughput">throughput</option>
-                        <option value="cost">cost</option>
+                        <option value="latency">{t("governance.latency")}</option>
+                        <option value="throughput">{t("governance.throughput")}</option>
+                        <option value="cost">{t("governance.cost")}</option>
                     </select>
                     <Input
                         className="font-mono max-w-[140px]"
@@ -564,7 +564,7 @@ export function GovernanceView() {
                                 </div>
                                 {(c.score_breakdown?.length || c.reasons.length) > 0 && (
                                     <details className="text-[11px] font-mono text-muted-foreground/90">
-                                        <summary className="cursor-pointer select-none">breakdown / reasons</summary>
+                                        <summary className="cursor-pointer select-none">{t("governance.breakdownReasons")}</summary>
                                         <ul className="mt-1 list-disc pl-4 space-y-0.5">
                                             {(c.score_breakdown?.length ? c.score_breakdown : c.reasons).map((line) => (
                                                 <li key={line}>{line}</li>
@@ -600,19 +600,19 @@ export function GovernanceView() {
                 <div className="flex flex-wrap gap-2 max-w-3xl">
                     <Input
                         className="font-mono max-w-[160px]"
-                        placeholder="model_uid"
+                        placeholder={t("governance.modelUidPlaceholder")}
                         value={canaryModel}
                         onChange={(e) => setCanaryModel(e.target.value)}
                     />
                     <Input
                         className="font-mono max-w-[180px]"
-                        placeholder="candidate_image_id"
+                        placeholder={t("governance.candidateImagePlaceholder")}
                         value={canaryCandidate}
                         onChange={(e) => setCanaryCandidate(e.target.value)}
                     />
                     <Input
                         className="font-mono max-w-[180px]"
-                        placeholder="stable_image_id"
+                        placeholder={t("governance.stableImagePlaceholder")}
                         value={canaryStable}
                         onChange={(e) => setCanaryStable(e.target.value)}
                     />
@@ -645,7 +645,7 @@ export function GovernanceView() {
                                                 await v2.evaluateCanary(c.canary_id, false, token || "")
                                                 setCanaries(await v2.listCanaries(token || ""))
                                             } catch (err) {
-                                                toast.error(err instanceof Error ? err.message : "evaluate failed")
+                                                toast.error(err instanceof Error ? err.message : t("governance.evaluateFailed"))
                                             }
                                         }}
                                     >
@@ -660,7 +660,7 @@ export function GovernanceView() {
                                                 setCanaries(await v2.listCanaries(token || ""))
                                                 toast.message(t("governance.canaryRolled"))
                                             } catch (err) {
-                                                toast.error(err instanceof Error ? err.message : "evaluate failed")
+                                                toast.error(err instanceof Error ? err.message : t("governance.evaluateFailed"))
                                             }
                                         }}
                                     >
@@ -674,7 +674,7 @@ export function GovernanceView() {
                                                 setCanaries(await v2.listCanaries(token || ""))
                                                 toast.success(t("governance.canaryPromoted"))
                                             } catch (err) {
-                                                toast.error(err instanceof Error ? err.message : "promote failed")
+                                                 toast.error(err instanceof Error ? err.message : t("governance.promoteFailed"))
                                             }
                                         }}
                                     >
@@ -689,7 +689,7 @@ export function GovernanceView() {
                                                 setCanaries(await v2.listCanaries(token || ""))
                                                 toast.message(t("governance.canaryRolled"))
                                             } catch (err) {
-                                                toast.error(err instanceof Error ? err.message : "rollback failed")
+                                                 toast.error(err instanceof Error ? err.message : t("governance.rollbackFailed"))
                                             }
                                         }}
                                     >
@@ -717,13 +717,13 @@ export function GovernanceView() {
                 <div className="flex flex-wrap gap-2 max-w-xl">
                     <Input
                         className="font-mono max-w-[160px]"
-                        placeholder="tenant_id"
+                        placeholder={t("governance.tenantIdPlaceholder")}
                         value={newTenantId}
                         onChange={(e) => setNewTenantId(e.target.value)}
                     />
                     <Input
                         className="font-mono max-w-[100px]"
-                        placeholder="rps/min"
+                        placeholder={t("governance.rpsPlaceholder")}
                         value={newTenantRps}
                         onChange={(e) => setNewTenantRps(e.target.value)}
                     />
@@ -756,7 +756,7 @@ export function GovernanceView() {
                                                 ? "bg-success/10 text-success border-success/20"
                                                 : "bg-destructive/10 text-destructive border-destructive/20",
                                         )}>
-                                            {tn.enabled ? "enabled" : "disabled"}
+                                            {tn.enabled ? t("governance.enabled") : t("governance.disabled")}
                                         </Badge>
                                     </div>
                                     {cost ? (
@@ -780,7 +780,7 @@ export function GovernanceView() {
                                                 await v2.deleteTenant(tn.tenant_id, token || "")
                                                 await refresh()
                                             } catch (err) {
-                                                toast.error(err instanceof Error ? err.message : "delete failed")
+                                                 toast.error(err instanceof Error ? err.message : t("governance.deleteFailed"))
                                             }
                                         }}
                                     >
@@ -800,10 +800,10 @@ export function GovernanceView() {
                 <Table>
                     <TableHeader>
                         <TableRow className="hover:bg-transparent">
-                            <TableHead className="text-[10px] uppercase">Time</TableHead>
-                            <TableHead className="text-[10px] uppercase">Kind</TableHead>
-                            <TableHead className="text-[10px] uppercase">Summary</TableHead>
-                            <TableHead className="text-[10px] uppercase">Model</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.time")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.kind")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.summary")}</TableHead>
+                            <TableHead className="text-[10px] uppercase">{t("governance.model")}</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>

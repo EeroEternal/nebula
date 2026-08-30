@@ -17,7 +17,18 @@ git clone --depth 1 --branch main https://github.com/EeroEternal/nebula.git
 
 ## 依赖项
 
-### 1. etcd
+### 1. Rust
+
+Nebula 需要 Rust 1.92。仓库中的 `rust-toolchain.toml` 会在已安装 `rustup` 的环境中自动选择该版本。
+
+**验证安装：**
+
+```bash
+rustc --version
+cargo --version
+```
+
+### 2. etcd
 
 Nebula 使用 etcd 作为元数据存储。
 
@@ -50,7 +61,7 @@ cp /tmp/etcd-${ETCD_VER}-darwin-amd64/etcd* ~/bin/
 etcd --version
 ```
 
-### 2. protoc (Protocol Buffers Compiler)
+### 3. protoc (Protocol Buffers Compiler)
 
 如果项目使用 Protocol Buffers，您需要安装 protoc。
 
@@ -83,7 +94,7 @@ protoc --version
 安装完依赖后，您可以构建项目：
 
 ```bash
-cargo build --release
+cargo build --workspace --release
 ```
 
 ## 运行服务

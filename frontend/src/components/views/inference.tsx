@@ -4,11 +4,14 @@ import { Activity, Zap, TrendingUp, Gauge, Timer, AlertTriangle, ShieldCheck, Se
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { useI18n } from "@/lib/i18n";
+import { useI18n } from "@/lib/useI18n";
 import { useClusterOverview } from "@/hooks/useClusterOverview";
 import { useEngineStats } from "@/hooks/useEngineStats";
 import { useMetricsRaw } from "@/hooks/useMetricsRaw";
 import { cn } from "@/lib/utils";
+import type { EndpointStats } from "@/lib/types";
+import type { LucideIcon } from "lucide-react";
+import type { ReactNode } from "react";
 
 interface AccessMetrics {
   requests_total: number;
@@ -144,7 +147,7 @@ export function InferenceView() {
     : "—";
 
   const overloadedModels = useMemo(() => {
-    const byModel = new Map<string, any[]>();
+    const byModel = new Map<string, EndpointStats[]>();
     for (const s of engineStats) {
       if (!byModel.has(s.model_uid)) byModel.set(s.model_uid, []);
       byModel.get(s.model_uid)!.push(s);
@@ -243,7 +246,7 @@ export function InferenceView() {
           </div>
           ) : (
             <div className="h-64 flex items-center justify-center text-xs font-mono text-muted-foreground">
-              n/a — Gateway auth metrics not in this scrape ({access.data_source})
+               {t('inference.noGatewayAuthMetrics', { source: access.data_source })}
             </div>
           )}
         </div>
@@ -257,11 +260,11 @@ export function InferenceView() {
             <Table>
                 <TableHeader className="bg-black/20">
                     <TableRow className="border-border/50 hover:bg-transparent">
-                        <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Model ID</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Volume</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Response Profile</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Avg Latency</TableHead>
-                        <TableHead className="text-[10px] uppercase font-bold text-muted-foreground text-right pr-6">Avg TTFT</TableHead>
+                         <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('inference.modelId')}</TableHead>
+                         <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('inference.volume')}</TableHead>
+                         <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('inference.responseProfile')}</TableHead>
+                         <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('inference.avgLatency')}</TableHead>
+                         <TableHead className="text-[10px] uppercase font-bold text-muted-foreground text-right pr-6">{t('inference.avgTtft')}</TableHead>
                     </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -314,7 +317,7 @@ export function InferenceView() {
                       </div>
                       <div className="space-y-2.5">
                         <div className="flex items-center justify-between text-[10px] font-bold text-muted-foreground/60 uppercase tracking-widest">
-                          <span>KV CACHE</span>
+                           <span>{t('inference.kvCache')}</span>
                           <span className={cn("font-mono", isOverloaded ? "text-destructive" : hasKv ? "text-primary" : "text-muted-foreground")}>
                             {kvPct != null ? `${kvPct}%` : 'n/a'}
                           </span>
@@ -323,12 +326,12 @@ export function InferenceView() {
                       </div>
                       <div className="grid grid-cols-2 gap-4 pt-1">
                           <div className="flex flex-col">
-                             <span className="text-[9px] font-bold text-muted-foreground/50 uppercase">PENDING</span>
+                              <span className="text-[9px] font-bold text-muted-foreground/50 uppercase">{t('inference.pending')}</span>
                              <span className="text-xs font-mono font-bold text-foreground">{s.pending_requests}</span>
                           </div>
                           {s.prefix_cache_hit_rate != null && (
                             <div className="flex flex-col text-right">
-                                <span className="text-[9px] font-bold text-muted-foreground/50 uppercase">CACHE HIT</span>
+                                 <span className="text-[9px] font-bold text-muted-foreground/50 uppercase">{t('inference.cacheHit')}</span>
                                 <span className="text-xs font-mono font-bold text-success">{(s.prefix_cache_hit_rate * 100).toFixed(1)}%</span>
                             </div>
                           )}
@@ -347,11 +350,11 @@ export function InferenceView() {
         <Table>
             <TableHeader className="bg-black/20">
                 <TableRow className="border-border/50 hover:bg-transparent">
-                    <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Identity</TableHead>
-                    <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Replica</TableHead>
-                    <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Computing Node</TableHead>
-                    <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">API Protocol</TableHead>
-                    <TableHead className="text-[10px] uppercase font-bold text-muted-foreground text-right pr-6">Status</TableHead>
+                     <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('inference.statusIdentity')}</TableHead>
+                     <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('inference.statusReplica')}</TableHead>
+                     <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('inference.statusNode')}</TableHead>
+                     <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('inference.statusProtocol')}</TableHead>
+                     <TableHead className="text-[10px] uppercase font-bold text-muted-foreground text-right pr-6">{t('inference.status')}</TableHead>
                 </TableRow>
             </TableHeader>
             <TableBody>
@@ -393,7 +396,14 @@ export function InferenceView() {
   );
 }
 
-function MetricCard({ label, value, icon: Icon, color = "text-foreground" }: any) {
+interface MetricCardProps {
+    label: string
+    value: ReactNode
+    icon: LucideIcon
+    color?: string
+}
+
+function MetricCard({ label, value, icon: Icon, color = "text-foreground" }: MetricCardProps) {
     return (
         <div className="bg-card/40 backdrop-blur-xl border border-border p-5 rounded-xl rim-light relative overflow-hidden group">
             <div className="flex items-center justify-between mb-4">

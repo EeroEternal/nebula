@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { apiGetWithParams, v2 } from '@/lib/api'
 import type { ModelView } from '@/lib/types'
-import { useI18n } from '@/lib/i18n'
+import { useI18n } from '@/lib/useI18n'
 import { useModels } from '@/hooks/useModels'
 import { useAuthStore } from '@/store/useAuthStore'
 import { cn } from '@/lib/utils'
@@ -108,14 +108,14 @@ export function ModelCatalogView() {
     )
     
     toast.promise(promise, {
-      loading: 'Initiating model import...',
-      success: (data: any) => {
+      loading: t('catalog.initiatingImport'),
+      success: (data) => {
         setActiveDownloadUid(data.model_uid)
         setDownloadDialogOpen(false)
         refetchModels()
-        return 'Import started'
+        return t('catalog.importStarted')
       },
-      error: 'Import failed'
+      error: t('catalog.importFailed')
     })
   }
 
@@ -139,7 +139,7 @@ export function ModelCatalogView() {
              </div>
              <div>
                 <p className="text-xs font-bold font-mono uppercase tracking-widest text-foreground">{t('catalog.downloadTask')}</p>
-                <p className="text-[10px] font-mono text-muted-foreground uppercase mt-1">{activeDownloadUid} ● PULLING FROM {source.replace('_', ' ')}</p>
+            <p className="text-[10px] font-mono text-muted-foreground uppercase mt-1">{activeDownloadUid} ● PULLING FROM {source.replace('_', ' ')}</p>
              </div>
           </div>
           <Button
@@ -192,7 +192,7 @@ export function ModelCatalogView() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
           <input
             type="text"
-            placeholder="SEARCH REGISTRY..."
+           placeholder={t('catalog.searchRegistry')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-black/20 border border-border/50 rounded-lg pl-10 pr-4 py-2 text-xs font-mono focus:outline-none focus:border-primary/50 transition-all"
@@ -204,17 +204,17 @@ export function ModelCatalogView() {
         <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between bg-white/5">
             <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground">{t('catalog.browse')}</h3>
             <Badge variant="outline" className="font-mono text-[10px] border-primary/20 text-primary uppercase">
-                {visibleResults.length} RESULTS
+                {visibleResults.length} {t('catalog.results')}
             </Badge>
         </div>
 
         <Table>
           <TableHeader className="bg-black/20">
             <TableRow className="border-border/50 hover:bg-transparent">
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Registry ID</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Capabilities</TableHead>
-              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Popularity</TableHead>
-              <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">Engagement</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('catalog.provider')} ID</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('modelDetail.capabilities')}</TableHead>
+              <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('catalog.downloads')}</TableHead>
+              <TableHead className="text-right text-[10px] uppercase font-bold text-muted-foreground pr-6">{t('catalog.likes')}</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -272,7 +272,7 @@ export function ModelCatalogView() {
                             {compactNumber.format(result.downloads)}
                          </div>
                          <div className="flex items-center gap-2 text-[9px] text-muted-foreground uppercase tracking-tighter">
-                            TRENDING
+                           {t('catalog.trending')}
                          </div>
                       </div>
                     </TableCell>
@@ -301,7 +301,7 @@ export function ModelCatalogView() {
                                 setDownloadDialogOpen(true)
                             }}
                         >
-                            {isImported ? "SYNCED" : "IMPORT"}
+                            {isImported ? t('catalog.synced') : t('catalog.import')}
                             {!isImported && <ArrowUpRight className="ml-2 h-3 w-3" />}
                         </Button>
                       </div>
@@ -319,50 +319,50 @@ export function ModelCatalogView() {
           <DialogHeader>
             <DialogTitle className="font-mono uppercase tracking-tight text-2xl flex items-center gap-3">
               <Download className="h-6 w-6 text-primary animate-signal" />
-              IMPORT REGISTRY ASSET
+               {t('catalog.importAsset')}
             </DialogTitle>
           </DialogHeader>
 
           <div className="space-y-6 py-4">
             <div className="space-y-1 p-3 rounded-lg bg-white/5 border border-border/30">
-              <p className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Target Identifier</p>
+               <p className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('catalog.targetIdentifier')}</p>
               <p className="text-sm font-mono font-bold text-foreground break-all">
                 {selectedResult?.id || '—'}
               </p>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="download-model-uid" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Local Instance Identity</Label>
+               <Label htmlFor="download-model-uid" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('catalog.localIdentity')}</Label>
               <Input
                 id="download-model-uid"
                 className="bg-white/5 border-border/50 font-mono"
-                placeholder="Auto-generated if empty"
+                 placeholder={t('catalog.localIdentityPlaceholder')}
                 value={downloadModelUid}
                 onChange={(e) => setDownloadModelUid(e.target.value)}
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="download-model-path" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">Storage Path</Label>
+               <Label htmlFor="download-model-path" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('catalog.storagePath')}</Label>
               <div className="relative">
                   <Box className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                   <Input
                     id="download-model-path"
                     className="pl-10 bg-white/5 border-border/50 font-mono text-xs"
-                    placeholder="/mnt/models/..."
+                     placeholder={t('catalog.storagePathPlaceholder')}
                     value={downloadPath}
                     onChange={(e) => setDownloadPath(e.target.value)}
                   />
               </div>
               <p className="text-[9px] text-muted-foreground uppercase tracking-widest mt-1">
-                 Leave empty to use global default model repository
+                  {t('catalog.leaveEmpty')}
               </p>
             </div>
             
             <div className="p-4 rounded-lg bg-primary/5 border border-primary/10 flex gap-3">
                 <Info className="h-4 w-4 text-primary shrink-0 mt-0.5" />
                 <p className="text-[10px] text-muted-foreground uppercase leading-relaxed tracking-wider">
-                    Nebula will provision a background pulling task. The asset will be verified and mapped into the local model plane for immediate deployment.
+                     {t('catalog.importNotice')}
                 </p>
             </div>
           </div>
@@ -380,7 +380,7 @@ export function ModelCatalogView() {
                 className="bg-primary text-primary-foreground rim-light h-10 px-8 font-bold uppercase tracking-widest text-xs ml-auto"
             >
               <Download className="mr-2 h-4 w-4" />
-              START IMPORT
+               {t('catalog.startImport')}
             </Button>
           </DialogFooter>
         </DialogContent>

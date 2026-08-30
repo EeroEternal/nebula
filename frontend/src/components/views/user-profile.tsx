@@ -6,7 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { authApi } from '@/lib/api'
 import type { AuthUser } from '@/lib/types'
-import { useI18n } from '@/lib/i18n'
+import { useI18n } from '@/lib/useI18n'
 
 interface UserProfileViewProps {
   token: string

@@ -7,7 +7,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import type { AggregatedModelState } from "@/lib/types"
 import { v2 } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 import { useModels } from "@/hooks/useModels"
 import { useAuthStore } from "@/store/useAuthStore"
 import { toast } from "sonner"
@@ -35,12 +35,12 @@ export function ModelsView() {
         setActing(uid)
         const promise = fn()
         toast.promise(promise, {
-            loading: `${actionName} ${uid}...`,
+            loading: t('models.actionLoading', { action: actionName, uid }),
             success: () => {
                 refetch()
-                return `${actionName} success`
+                return t('models.actionSuccess', { action: actionName })
             },
-            error: (err) => err instanceof Error ? err.message : `${actionName} failed`,
+            error: (err) => err instanceof Error ? err.message : t('models.actionFailedFor', { action: actionName }),
         })
         try {
             await promise
@@ -53,10 +53,10 @@ export function ModelsView() {
         try {
             await navigator.clipboard.writeText(modelName)
             setCopiedModelUid(uid)
-            toast.success("Model name copied to clipboard")
+            toast.success(t('models.copySuccess'))
             setTimeout(() => setCopiedModelUid(null), 2000)
         } catch {
-            toast.error("Failed to copy")
+            toast.error(t('models.copyFail'))
         }
     }
 
@@ -107,7 +107,7 @@ export function ModelsView() {
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
                     <input
                         type="text"
-                        placeholder="SEARCH MODELS..."
+                        placeholder={t('models.searchPlaceholder')}
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
                         className="w-full bg-black/20 border border-border/50 rounded-lg pl-10 pr-4 py-2 text-xs font-mono focus:outline-none focus:border-primary/50 transition-all"
@@ -120,11 +120,11 @@ export function ModelsView() {
                 <Table>
                     <TableHeader className="bg-black/20">
                         <TableRow className="border-border/50 hover:bg-transparent">
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">Model Identity</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Status</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Provisioning</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Engine</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground text-right pr-6">Management</TableHead>
+                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6 py-4">{t('models.identity')}</TableHead>
+                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('common.status')}</TableHead>
+                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('models.provisioning')}</TableHead>
+                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('models.engine')}</TableHead>
+                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground text-right pr-6">{t('models.management')}</TableHead>
                         </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -186,7 +186,7 @@ export function ModelsView() {
                                                 <span className="text-sm font-bold text-foreground">{model.replicas.ready}</span>
                                                 <span className="text-[10px] text-muted-foreground">/ {model.replicas.desired}</span>
                                                 {model.replicas.unhealthy > 0 && (
-                                                    <Badge variant="destructive" className="ml-2 text-[9px] h-4">{model.replicas.unhealthy} UNHEALTHY</Badge>
+                                                     <Badge variant="destructive" className="ml-2 text-[9px] h-4">{model.replicas.unhealthy} {t('models.unhealthy')}</Badge>
                                                 )}
                                             </div>
                                         </TableCell>

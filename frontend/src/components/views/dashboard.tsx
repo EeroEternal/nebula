@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { Cpu, Activity, ArrowUpRight } from "lucide-react"
+import { Link } from "react-router-dom"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import {
@@ -12,13 +13,22 @@ import { apiGet } from "@/lib/api"
 import type { EndpointStats } from "@/lib/types"
 import { endpointStatusTone } from "@/lib/endpoint-status"
 import { EngineAlertsBanner } from "@/components/engine-alerts-banner"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 import { useClusterOverview } from "@/hooks/useClusterOverview"
 import { useEngineStats } from "@/hooks/useEngineStats"
 import { useAuthStore } from "@/store/useAuthStore"
 import { cn } from "@/lib/utils"
 
 import { Skeleton } from "@/components/ui/skeleton"
+
+interface MetricPoint {
+    timestamp: string
+    value: number
+}
+
+interface MetricQueryResponse {
+    points: MetricPoint[]
+}
 
 export function DashboardView() {
     const { t } = useI18n()
@@ -42,6 +52,7 @@ export function DashboardView() {
     }, [overview])
 
     const gpuUsagePct = gpuStats.count > 0 ? pct(gpuStats.used, gpuStats.total) : 0
+    const hasGpuData = gpuStats.count > 0
 
     const gpuSummary = useMemo(() => {
         if (!overview) return { avgUtil: 0, maxTemp: 0 }
@@ -71,11 +82,11 @@ export function DashboardView() {
             const to = now.toISOString()
 
             const [utilData, tempData] = await Promise.all([
-                apiGet<any>(
+                apiGet<MetricQueryResponse>(
                     `/observe/metrics/query?name=gpu_utilization&from=${from}&to=${to}&step=60`,
                     token
                 ).catch(() => ({ points: [] })),
-                apiGet<any>(
+                apiGet<MetricQueryResponse>(
                     `/observe/metrics/query?name=gpu_temperature&from=${from}&to=${to}&step=60`,
                     token
                 ).catch(() => ({ points: [] })),
@@ -111,9 +122,12 @@ export function DashboardView() {
     }, [token])
 
     useEffect(() => {
-        fetchGpuTrend()
-        const id = setInterval(fetchGpuTrend, 30000)
-        return () => clearInterval(id)
+        const initialFetch = window.setTimeout(() => { void fetchGpuTrend() }, 0)
+        const id = window.setInterval(() => { void fetchGpuTrend() }, 30000)
+        return () => {
+            window.clearTimeout(initialFetch)
+            window.clearInterval(id)
+        }
     }, [fetchGpuTrend])
 
     // Real GPU memory bar chart data
@@ -222,7 +236,7 @@ export function DashboardView() {
     return (
         <div className="space-y-8 animate-in fade-in duration-500">
             {/* Header */}
-            <div className="flex justify-between items-end">
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
                 <div>
                     <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('dashboard.title')}</h2>
                     <p className="text-muted-foreground mt-2 flex items-center gap-2">
@@ -246,8 +260,8 @@ export function DashboardView() {
             <EngineAlertsBanner token={token ?? undefined} />
 
             {/* Quick Stats Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light relative overflow-hidden group">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+                <div className="relative overflow-hidden rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light group sm:p-6">
                     <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
                         <Cpu className="h-12 w-12" />
                     </div>
@@ -256,95 +270,110 @@ export function DashboardView() {
                         <h3 className="text-2xl font-mono font-bold text-foreground">{Math.round(gpuStats.used / 1024)}GB</h3>
                         <p className="text-xs text-muted-foreground font-mono">/ {Math.round(gpuStats.total / 1024)}GB</p>
                     </div>
-                    <Progress value={gpuUsagePct} className="h-1.5 mt-4 bg-white/5" />
+                    <Progress value={gpuUsagePct} className="mt-4 h-1.5 bg-white/5" />
                 </div>
 
-                <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
+                <div className="rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light sm:p-6">
                     <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('dashboard.avgUtilization')}</p>
-                    <h3 className="text-2xl font-mono font-bold text-foreground">{gpuSummary.avgUtil}%</h3>
+                    <h3 className="text-2xl font-mono font-bold text-foreground">{hasGpuData ? `${gpuSummary.avgUtil}%` : "—"}</h3>
                     <div className="flex items-center gap-1.5 mt-4">
-                        <div className="w-1.5 h-1.5 rounded-full bg-primary" />
-                        <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">Scaling Normal</p>
+                        <div className={cn("h-1.5 w-1.5 shrink-0 rounded-full", hasGpuData ? "bg-primary" : "bg-muted-foreground/50")} />
+                        <p className="line-clamp-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                            {hasGpuData ? t('dashboard.gpusAcrossNodes', { gpus: gpuStats.count, nodes: overview?.nodes.length || 0 }) : t('dashboard.noGpuData')}
+                        </p>
                     </div>
                 </div>
 
-                <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
+                <div className="rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light sm:p-6">
                     <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('dashboard.activeEndpoints')}</p>
                     <h3 className="text-2xl font-mono font-bold text-foreground">{overview?.endpoints.length || 0}</h3>
                     <div className="flex items-center gap-1.5 mt-4">
-                        <div className="w-1.5 h-1.5 rounded-full bg-success" />
-                        <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">Latency P99: 12ms</p>
+                        <div className={cn("h-1.5 w-1.5 shrink-0 rounded-full", overview?.endpoints.length ? "bg-success" : "bg-muted-foreground/50")} />
+                        <p className="line-clamp-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                            {overview?.endpoints.length ? t('dashboard.activeEndpointsCount', { count: overview.endpoints.length }) : t('dashboard.noEndpointsOnline')}
+                        </p>
                     </div>
                 </div>
 
-                <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl rim-light">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">Mesh Health</p>
-                    <h3 className="text-2xl font-mono font-bold text-success">99.9%</h3>
+                <div className="rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light sm:p-6">
+                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('endpoints.meshHealth')}</p>
+                    <h3 className={cn("text-2xl font-mono font-bold", overview?.nodes.length ? "text-success" : "text-muted-foreground")}>{overview?.nodes.length ? "99.9%" : "—"}</h3>
                     <div className="flex items-center gap-1.5 mt-4">
-                        <div className="w-1.5 h-1.5 rounded-full bg-success" />
-                        <p className="text-[10px] text-muted-foreground uppercase tracking-widest font-bold">All nodes responding</p>
+                        <div className={cn("h-1.5 w-1.5 shrink-0 rounded-full", overview?.nodes.length ? "bg-success" : "bg-muted-foreground/50")} />
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
+                            {overview?.nodes.length ? t('dashboard.allNodesResponding') : t('dashboard.waitingForNodes')}
+                        </p>
                     </div>
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-3">
                 {/* Trend Chart */}
-                <div className="lg:col-span-2 bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl">
+                <div className="min-w-0 rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl sm:p-6 lg:col-span-2">
                     <div className="flex items-center justify-between mb-6">
-                        <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">GPU Utilization Trend</h4>
-                        <Badge variant="outline" className="font-mono text-[10px] border-primary/20 text-primary">LIVE</Badge>
+                        <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t('dashboard.gpuTrend')}</h4>
+                        <Badge variant="outline" className="font-mono text-[10px] border-primary/20 text-primary">{t('dashboard.live')}</Badge>
                     </div>
-                    <div className="h-[280px]">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <LineChart data={gpuTrend}>
-                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="oklch(30% 0.05 260 / 0.2)" />
-                                <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "oklch(75% 0.02 260)" }} />
-                                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "oklch(75% 0.02 260)" }} />
-                                <Tooltip
-                                    contentStyle={{ backgroundColor: "oklch(22% 0.03 260)", border: "1px solid oklch(30% 0.05 260 / 0.5)", borderRadius: "8px", fontSize: "12px" }}
-                                    itemStyle={{ color: "oklch(98% 0.01 260)" }}
-                                />
-                                <Line type="monotone" dataKey="utilization" stroke="oklch(70% 0.18 190)" strokeWidth={2} dot={false} name="Util %" />
-                                <Line type="monotone" dataKey="temperature" stroke="oklch(60% 0.2 25)" strokeWidth={2} dot={false} name="Temp °C" />
-                            </LineChart>
-                        </ResponsiveContainer>
+                    <div className="flex h-[280px] min-w-0 items-center justify-center">
+                        {gpuTrend.length === 0 ? (
+                            <p className="max-w-xs text-center text-xs leading-relaxed text-muted-foreground">{t('dashboard.noTrendData')}</p>
+                        ) : (
+                            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                                <LineChart data={gpuTrend}>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="oklch(30% 0.05 260 / 0.2)" />
+                                    <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "oklch(75% 0.02 260)" }} />
+                                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "oklch(75% 0.02 260)" }} />
+                                    <Tooltip
+                                        contentStyle={{ backgroundColor: "oklch(22% 0.03 260)", border: "1px solid oklch(30% 0.05 260 / 0.5)", borderRadius: "8px", fontSize: "12px" }}
+                                        itemStyle={{ color: "oklch(98% 0.01 260)" }}
+                                    />
+                                    <Line type="monotone" dataKey="utilization" stroke="oklch(70% 0.18 190)" strokeWidth={2} dot={false} name={t('dashboard.utilizationPct')} />
+                                    <Line type="monotone" dataKey="temperature" stroke="oklch(60% 0.2 25)" strokeWidth={2} dot={false} name={t('dashboard.tempC')} />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        )}
                     </div>
                 </div>
 
                 {/* GPU Distribution Bar Chart */}
-                <div className="bg-card/40 backdrop-blur-xl border border-border p-6 rounded-xl">
-                    <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-6">Memory per Node</h4>
-                    <div className="h-[280px]">
-                        <ResponsiveContainer width="100%" height="100%">
-                            <BarChart data={gpuBarData} layout="vertical">
-                                <XAxis type="number" hide />
-                                <YAxis dataKey="name" type="category" width={80} tick={{ fontSize: 9, fill: "oklch(75% 0.02 260)" }} axisLine={false} tickLine={false} />
-                                <Tooltip
-                                    cursor={{ fill: "transparent" }}
-                                    contentStyle={{ backgroundColor: "oklch(22% 0.03 260)", border: "1px solid oklch(30% 0.05 260 / 0.5)", borderRadius: "8px", fontSize: "12px" }}
-                                />
-                                <Bar dataKey="memUsed" stackId="a" fill="oklch(70% 0.18 190)" radius={[0, 0, 0, 0]} name="Used" />
-                                <Bar dataKey="memFree" stackId="a" fill="oklch(30% 0.03 260)" radius={[0, 4, 4, 0]} name="Free" />
-                            </BarChart>
-                        </ResponsiveContainer>
+                <div className="min-w-0 rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl sm:p-6">
+                    <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-6">{t('dashboard.gpuMemoryUsage')}</h4>
+                    <div className="flex h-[280px] min-w-0 items-center justify-center">
+                        {gpuBarData.length === 0 ? (
+                            <p className="max-w-xs text-center text-xs leading-relaxed text-muted-foreground">{t('dashboard.noGpuData')}</p>
+                        ) : (
+                            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
+                                <BarChart data={gpuBarData} layout="vertical">
+                                    <XAxis type="number" hide />
+                                    <YAxis dataKey="name" type="category" width={80} tick={{ fontSize: 9, fill: "oklch(75% 0.02 260)" }} axisLine={false} tickLine={false} />
+                                    <Tooltip
+                                        cursor={{ fill: "transparent" }}
+                                        contentStyle={{ backgroundColor: "oklch(22% 0.03 260)", border: "1px solid oklch(30% 0.05 260 / 0.5)", borderRadius: "8px", fontSize: "12px" }}
+                                    />
+                                    <Bar dataKey="memUsed" stackId="a" fill="oklch(70% 0.18 190)" radius={[0, 0, 0, 0]} name={t('dashboard.used')} />
+                                    <Bar dataKey="memFree" stackId="a" fill="oklch(30% 0.03 260)" radius={[0, 4, 4, 0]} name={t('dashboard.free')} />
+                                </BarChart>
+                            </ResponsiveContainer>
+                        )}
                     </div>
                 </div>
             </div>
 
             {/* Active Endpoints Table */}
             <div className="bg-card/40 backdrop-blur-xl border border-border rounded-xl overflow-hidden">
-                <div className="px-6 py-4 border-b border-border/50 flex justify-between items-center bg-white/5">
+                <div className="flex items-center justify-between border-b border-border/50 bg-white/5 px-5 py-4 sm:px-6">
                     <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t('dashboard.activeEndpoints')}</h4>
-                    <button className="text-[10px] font-bold uppercase text-primary flex items-center gap-1 hover:underline">
-                        View All <ArrowUpRight className="h-3 w-3" />
-                    </button>
+                    <Link to="/endpoints" className="flex items-center gap-1 text-[10px] font-bold uppercase text-primary hover:underline">
+                        {t('dashboard.viewAll')} <ArrowUpRight className="h-3 w-3" />
+                    </Link>
                 </div>
+                <div className="overflow-x-auto">
                 <Table>
                     <TableHeader className="bg-black/20">
                         <TableRow className="border-border/50 hover:bg-transparent">
                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6">{t('models.model')}</TableHead>
                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.nodeGpu')}</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">Resource</TableHead>
+                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('dashboard.resource')}</TableHead>
                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.vram')}</TableHead>
                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.kvCache')}</TableHead>
                             <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('common.status')}</TableHead>
@@ -403,6 +432,7 @@ export function DashboardView() {
                         )}
                     </TableBody>
                 </Table>
+                </div>
             </div>
         </div>
     )

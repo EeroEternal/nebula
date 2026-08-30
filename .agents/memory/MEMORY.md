@@ -1,0 +1,1 @@
+- [Replit workflow package preservation](replit-workflow-packages.md) — validated workflow replacements must retain package-manager-added Nix dependencies.

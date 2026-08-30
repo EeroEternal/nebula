@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { AlertTriangle } from "lucide-react"
 import { v2 } from "@/lib/api"
 import { engineAlertLabel, isEngineAlertCritical } from "@/lib/endpoint-status"
-import { useI18n } from "@/lib/i18n"
+import { useI18n } from "@/lib/useI18n"
 import type { AlertsSummary } from "@/lib/types"
 
 interface EngineAlertsBannerProps {
