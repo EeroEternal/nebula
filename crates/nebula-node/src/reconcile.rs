@@ -11,7 +11,9 @@ use nebula_common::{
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::args::Args;
-use crate::engine::{write_engine_env, wait_engine_ready, Engine, EngineHandle, EngineStartContext};
+use crate::engine::{
+    wait_engine_ready, write_engine_env, Engine, EngineHandle, EngineStartContext,
+};
 use crate::heartbeat::{
     delete_capability, delete_endpoint, delete_stats, register_capability, register_endpoint,
 };
@@ -220,8 +222,14 @@ async fn drain_then_stop(
 
     if just_started {
         // etcd write outside running lock
-        mark_endpoint_draining(store, endpoint_state, model_uid, replica_id, args.heartbeat_ttl_ms)
-            .await?;
+        mark_endpoint_draining(
+            store,
+            endpoint_state,
+            model_uid,
+            replica_id,
+            args.heartbeat_ttl_ms,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -238,8 +246,14 @@ async fn drain_then_stop(
         finish_drain_stop(store, running, endpoint_state, model_uid, replica_id).await?;
     } else {
         tracing::info!(%model_uid, replica_id, pending, "draining; waiting for in-flight to finish");
-        mark_endpoint_draining(store, endpoint_state, model_uid, replica_id, args.heartbeat_ttl_ms)
-            .await?;
+        mark_endpoint_draining(
+            store,
+            endpoint_state,
+            model_uid,
+            replica_id,
+            args.heartbeat_ttl_ms,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -776,10 +790,7 @@ mod tests {
             version: 1,
             updated_at_ms: 0,
             leader_epoch: 1,
-            assignments: vec![
-                assignment(0, "node_a", 8000),
-                assignment(1, "node_a", 8001),
-            ],
+            assignments: vec![assignment(0, "node_a", 8000), assignment(1, "node_a", 8001)],
         };
         let desired: HashSet<u32> = local_assignments(&plan, "node_a")
             .iter()

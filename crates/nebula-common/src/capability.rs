@@ -63,9 +63,7 @@ pub fn static_version_support(engine_type: &str) -> Vec<EngineVersionSupport> {
             engine_type: "vllm".into(),
             min_inclusive: Some("0.6.0".into()),
             max_exclusive: None,
-            known_issues: vec![
-                "prefix_cache metrics differ across minor versions".into(),
-            ],
+            known_issues: vec!["prefix_cache metrics differ across minor versions".into()],
         }],
         "sglang" => vec![EngineVersionSupport {
             engine_type: "sglang".into(),

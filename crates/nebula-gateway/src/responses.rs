@@ -371,7 +371,9 @@ mod tests {
             Some("get_weather".into()),
             Some("{\"x\":1}".into()),
         );
-        assert!(evs.iter().any(|e| e["type"] == "response.output_item.added"));
+        assert!(evs
+            .iter()
+            .any(|e| e["type"] == "response.output_item.added"));
         assert!(evs
             .iter()
             .any(|e| e["type"] == "response.function_call_arguments.delta"));

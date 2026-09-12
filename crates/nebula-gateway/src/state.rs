@@ -5,9 +5,9 @@ use nebula_common::DualWriteEmitter;
 use nebula_meta::EtcdMetaStore;
 
 use crate::audit::AuditWriter;
-use crate::platform_auth::GatewayAuth;
 use crate::engine::EngineClient;
 use crate::metrics::Metrics;
+use crate::platform_auth::GatewayAuth;
 
 #[derive(Clone)]
 pub struct AppState {

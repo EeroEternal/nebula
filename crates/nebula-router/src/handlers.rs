@@ -131,10 +131,9 @@ pub async fn proxy_chat_completions(
                 .router
                 .get_engine_model_name(&model_uid)
                 .unwrap_or_else(|| raw_model.clone());
-            let body_bytes =
-                nebula_common::rewrite_json_model_field(&body_bytes, &model_name)
-                    .map(Bytes::from)
-                    .unwrap_or(body_bytes);
+            let body_bytes = nebula_common::rewrite_json_model_field(&body_bytes, &model_name)
+                .map(Bytes::from)
+                .unwrap_or(body_bytes);
 
             (reqwest::Method::POST, Some(body_bytes), model_uid)
         }
@@ -389,15 +388,11 @@ fn inject_router_echo_headers(out: &mut Response, request_id: &str, replica_id: 
     use nebula_common::{HEADER_REPLICA_ID, HEADER_REQUEST_ID};
 
     if let Ok(v) = HeaderValue::from_str(request_id) {
-        out.headers_mut().insert(
-            HeaderName::from_static(HEADER_REQUEST_ID),
-            v,
-        );
+        out.headers_mut()
+            .insert(HeaderName::from_static(HEADER_REQUEST_ID), v);
     }
     if let Ok(v) = HeaderValue::from_str(&replica_id.to_string()) {
-        out.headers_mut().insert(
-            HeaderName::from_static(HEADER_REPLICA_ID),
-            v,
-        );
+        out.headers_mut()
+            .insert(HeaderName::from_static(HEADER_REPLICA_ID), v);
     }
 }

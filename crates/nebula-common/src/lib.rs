@@ -1,3 +1,4 @@
+pub mod admission;
 pub mod benchmark;
 pub mod capability;
 pub mod capacity;
@@ -19,15 +20,23 @@ pub mod pool;
 pub mod selection;
 pub mod slo;
 pub mod tenant;
-pub mod admission;
 
+pub use admission::{rate_limit_key, TenantAdmission};
+pub use benchmark::{
+    build_profile_from_runs, builtin_workloads, canary_should_rollback, recommend_from_profiles,
+    BenchmarkRun, BenchmarkRunStatus, BenchmarkWorkload, CanaryRelease, CanaryState,
+    PerformanceProfile, ProfileKey, RecommendCandidate, RecommendConfidence, RecommendRequest,
+    RecommendResponse, WorkloadClass,
+};
 pub use capability::{
     parse_version_tuple, resolve_engine_type, static_capability, static_capability_sglang,
     static_capability_vllm, static_version_support, tool_calling_for_engine,
-    validate_engine_and_config, validate_engine_type, validate_engine_version, validate_model_config,
-    CapabilitySource, EngineCapability, EngineVersionSupport, ObservabilityCapability,
-    ReplicaCapability, ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
+    validate_engine_and_config, validate_engine_type, validate_engine_version,
+    validate_model_config, CapabilitySource, EngineCapability, EngineVersionSupport,
+    ObservabilityCapability, ReplicaCapability, ServingTopologyKind, SupportLevel,
+    DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
 };
+pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
 pub use cluster::ClusterStatus;
 pub use compat::{
     default_compatibility_rules, evaluate_compatibility, CompatCheckInput, CompatVerdict,
@@ -37,9 +46,10 @@ pub use endpoint::{EndpointInfo, EndpointKind, EndpointStats, EndpointStatus};
 pub use engine_args::{build_engine_extra_args, build_engine_extra_args_lenient};
 pub use engine_image::{EngineImage, ImagePullStatus, NodeImageStatus, VersionPolicy};
 pub use execution_context::{
-    build_execution_context, inject_execution_context, ExecutionContext, HEADER_BUDGET_TOKENS,
-    HEADER_DEADLINE_MS, HEADER_PRIORITY, HEADER_REPLICA_ID, HEADER_REQUEST_ID, HEADER_SESSION_ID,
-    HEADER_TENANT_ID,
+    build_execution_context, inject_execution_context, parse_and_sanitize_inference_hint,
+    ExecutionContext, InferenceHint, HEADER_BUDGET_TOKENS, HEADER_DEADLINE_MS, HEADER_HINT_TRUSTED,
+    HEADER_INFERENCE_HINT, HEADER_PRIORITY, HEADER_REPLICA_ID, HEADER_REQUEST_ID,
+    HEADER_SESSION_ID, HEADER_TENANT_ID,
 };
 pub use json_model::{
     peek_json_model_field, rewrite_json_model_field, HEADER_NEBULA_MODEL, HEADER_NEBULA_MODEL_UID,
@@ -48,7 +58,9 @@ pub use model_cache::{
     AlertType, DiskAlert, DownloadPhase, DownloadProgress, EngineAlertType, EngineProbeAlert,
     ModelCacheEntry, NodeDiskStatus,
 };
-pub use model_deployment::{DesiredState, ModelDeployment, ReplicaPlacementSpec, validate_replica_specs};
+pub use model_deployment::{
+    validate_replica_specs, DesiredState, ModelDeployment, ReplicaPlacementSpec,
+};
 pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};
 pub use model_template::{ModelTemplate, TemplateCategory, TemplateSource};
@@ -57,28 +69,20 @@ pub use node_status::{
 };
 pub use placement::{next_placement_version, PlacementAssignment, PlacementPlan};
 pub use pool::{HardwarePool, PoolRole};
-pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
-pub use slo::{
-    evaluate_slo, DiagnosticEvent, ModelSlo, SloComplianceStatus, SloEvaluation, SloMetricSample,
-    SloSuggestion,
-};
-pub use benchmark::{
-    build_profile_from_runs, builtin_workloads, canary_should_rollback, recommend_from_profiles,
-    BenchmarkRun, BenchmarkRunStatus, BenchmarkWorkload, CanaryRelease, CanaryState,
-    PerformanceProfile, ProfileKey, RecommendCandidate, RecommendConfidence, RecommendRequest,
-    RecommendResponse, WorkloadClass,
-};
 pub use selection::{
     draft_from_candidate, select_backends, switching_cost, BackendCandidate, CurrentBackend,
     DeploymentDraft, DraftRequest, ModelArchitecture, ModelProfile, SelectionConstraints,
     SelectionPreference, SelectionRequest, SelectionResponse, WorkloadHint,
+};
+pub use slo::{
+    evaluate_slo, DiagnosticEvent, ModelSlo, SloComplianceStatus, SloEvaluation, SloMetricSample,
+    SloSuggestion,
 };
 pub use tenant::{
     admit_static, estimate_cost, summarize_usage, usage_window_start_ms, AdmitDecision,
     CostPriceConfig, Tenant, TenantCostSummary, TenantDenyBreakdown, TenantDenyCode, TenantQuota,
     UsageWindow,
 };
-pub use admission::{rate_limit_key, TenantAdmission};
 
 pub mod args;
 pub mod auth;

@@ -22,9 +22,9 @@ use nebula_meta::MetaStore;
 // ---------------------------------------------------------------------------
 
 pub use nebula_control::{
-    get_model_deployment, get_model_spec, now_ms, put_model_deployment, put_model_spec, scale_model,
-    start_model, stop_model, ScaleDeploymentRequest as ScaleModelRequest, ServiceError,
-    StartDeploymentRequest as StartModelRequest,
+    get_model_deployment, get_model_spec, now_ms, put_model_deployment, put_model_spec,
+    scale_model, start_model, stop_model, ScaleDeploymentRequest as ScaleModelRequest,
+    ServiceError, StartDeploymentRequest as StartModelRequest,
 };
 
 // ---------------------------------------------------------------------------
@@ -405,13 +405,22 @@ pub async fn put_model_template_db(
     db: &sqlx::PgPool,
     tpl: &ModelTemplate,
 ) -> Result<(), ServiceError> {
-    let model_source_json = tpl.model_source.as_ref().map(|s| serde_json::to_value(s).unwrap_or_default());
-    let config_json = tpl.config.as_ref().map(|c| serde_json::to_value(c).unwrap_or_default());
+    let model_source_json = tpl
+        .model_source
+        .as_ref()
+        .map(|s| serde_json::to_value(s).unwrap_or_default());
+    let config_json = tpl
+        .config
+        .as_ref()
+        .map(|c| serde_json::to_value(c).unwrap_or_default());
     let labels_json = serde_json::to_value(&tpl.labels).unwrap_or_default();
-    let category_str = tpl.category.as_ref().and_then(|c| match serde_json::to_value(c) {
-        Ok(serde_json::Value::String(s)) => Some(s),
-        _ => None,
-    });
+    let category_str = tpl
+        .category
+        .as_ref()
+        .and_then(|c| match serde_json::to_value(c) {
+            Ok(serde_json::Value::String(s)) => Some(s),
+            _ => None,
+        });
     let source_str = match tpl.source {
         TemplateSource::System => "system",
         TemplateSource::Saved => "saved",
@@ -935,11 +944,12 @@ pub async fn create_template_db(
         .clone()
         .unwrap_or_else(|| format!("tpl-{}", Uuid::new_v4()));
 
-    let exists: Option<String> = sqlx::query_scalar("SELECT template_id FROM bff_templates WHERE template_id = $1")
-        .bind(&tid)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("db error checking template: {e}")))?;
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT template_id FROM bff_templates WHERE template_id = $1")
+            .bind(&tid)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("db error checking template: {e}")))?;
 
     if exists.is_some() {
         return Err(ServiceError::Conflict(format!(
@@ -1147,7 +1157,9 @@ pub async fn list_node_cache(
     store: &dyn MetaStore,
     node_id: &str,
 ) -> Result<Vec<ModelCacheEntry>, ServiceError> {
-    let kvs = store.list_prefix(&format!("/model_cache/{node_id}/")).await?;
+    let kvs = store
+        .list_prefix(&format!("/model_cache/{node_id}/"))
+        .await?;
     Ok(kvs
         .into_iter()
         .filter_map(|(_, v, _)| serde_json::from_slice(&v).ok())
@@ -1808,12 +1820,8 @@ nebula_route_ttft_seconds_bucket{model_uid="b",le="+Inf"} 2
             (q - 0.05).abs() < 1e-9,
             "expected merged p95 boundary 0.05, got {q}"
         );
-        let qa = parse_histogram_quantile_filtered(
-            text,
-            "nebula_route_ttft_seconds",
-            0.95,
-            Some("a"),
-        );
+        let qa =
+            parse_histogram_quantile_filtered(text, "nebula_route_ttft_seconds", 0.95, Some("a"));
         assert!((qa - 0.05).abs() < 1e-9);
         let missing = parse_histogram_quantile_filtered(
             text,
@@ -1907,13 +1915,7 @@ nebula_router_upstream_error_total{kind="connect"} 1
         let placement = sample_placement();
         let endpoints = vec![sample_endpoint(nebula_common::EndpointStatus::Failed)];
         assert_eq!(
-            compute_aggregated_state(
-                Some(&dep),
-                Some(&placement),
-                &endpoints,
-                &[],
-                0,
-            ),
+            compute_aggregated_state(Some(&dep), Some(&placement), &endpoints, &[], 0,),
             AggregatedModelState::Failed
         );
     }
@@ -1924,15 +1926,8 @@ nebula_router_upstream_error_total{kind="connect"} 1
         let placement = sample_placement();
         let endpoints = vec![sample_endpoint(nebula_common::EndpointStatus::Unhealthy)];
         assert_eq!(
-            compute_aggregated_state(
-                Some(&dep),
-                Some(&placement),
-                &endpoints,
-                &[],
-                0,
-            ),
+            compute_aggregated_state(Some(&dep), Some(&placement), &endpoints, &[], 0,),
             AggregatedModelState::Degraded
         );
     }
 }
-

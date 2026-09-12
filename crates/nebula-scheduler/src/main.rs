@@ -13,15 +13,9 @@ use clap::Parser;
 use futures_util::StreamExt;
 use tracing::{error, info, warn};
 
-use nebula_common::{
-    DesiredState, ModelDeployment, ModelSpec, PlacementPlan,
-};
-use nebula_meta::{
-    run_election_loop, ElectionConfig, EtcdMetaStore, LeaderGate, MetaStore,
-};
-use nebula_scheduler::metrics::{
-    healthz_handler, metrics_handler, AppState, SharedMetrics,
-};
+use nebula_common::{DesiredState, ModelDeployment, ModelSpec, PlacementPlan};
+use nebula_meta::{run_election_loop, ElectionConfig, EtcdMetaStore, LeaderGate, MetaStore};
+use nebula_scheduler::metrics::{healthz_handler, metrics_handler, AppState, SharedMetrics};
 
 use crate::args::Args;
 use crate::planner::{build_plan_from_deployment, list_used_resources};
@@ -38,7 +32,10 @@ async fn write_placement_cas(
     plan.leader_epoch = leader.epoch();
 
     let existing = store.get(placement_key).await?;
-    let expected_revision = existing.as_ref().map(|(_, revision)| *revision).unwrap_or(0);
+    let expected_revision = existing
+        .as_ref()
+        .map(|(_, revision)| *revision)
+        .unwrap_or(0);
     let prev_version = existing
         .as_ref()
         .and_then(|(data, _)| serde_json::from_slice::<PlacementPlan>(data).ok())

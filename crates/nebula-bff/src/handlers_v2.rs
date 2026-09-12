@@ -205,7 +205,8 @@ pub async fn deploy_template(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let spec = service::deploy_template(&*st.store, &st.db, ctx.principal.clone(), &id, req).await?;
+    let spec =
+        service::deploy_template(&*st.store, &st.db, ctx.principal.clone(), &id, req).await?;
     Ok((StatusCode::CREATED, Json(spec)).into_response())
 }
 
@@ -459,7 +460,9 @@ pub async fn get_slo(
     }
     match crate::compat_slo::get_slo(&*st.store, &model_uid).await? {
         Some(slo) => Ok((StatusCode::OK, Json(slo)).into_response()),
-        None => Err(ServiceError::NotFound(format!("slo for {model_uid} not found"))),
+        None => Err(ServiceError::NotFound(format!(
+            "slo for {model_uid} not found"
+        ))),
     }
 }
 
@@ -800,8 +803,7 @@ pub async fn selection_apply(
     if let Some(resp) = require_role(&ctx, Role::Operator) {
         return Ok(resp);
     }
-    let draft =
-        crate::selection_svc::apply(&*st.store, ctx.principal.clone(), req).await?;
+    let draft = crate::selection_svc::apply(&*st.store, ctx.principal.clone(), req).await?;
     Ok((StatusCode::OK, Json(draft)).into_response())
 }
 

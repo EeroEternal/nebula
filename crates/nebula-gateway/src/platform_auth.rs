@@ -210,10 +210,7 @@ fn scope_allows(record: &ApiKeyRecord, path: &str) -> bool {
     if record.scopes.contains(&ApiKeyScope::Admin) {
         return true;
     }
-    record
-        .scopes
-        .iter()
-        .any(|scope| scope.allows_path(path))
+    record.scopes.iter().any(|scope| scope.allows_path(path))
 }
 
 pub async fn gateway_auth_middleware(
@@ -262,10 +259,7 @@ pub async fn gateway_auth_middleware(
                         entry.count = 0;
                     }
                     if entry.count >= auth.env.limit_per_minute {
-                        return Ok(auth::quota_denied(
-                            "tenant_rps_exceeded",
-                            "rate limited",
-                        ));
+                        return Ok(auth::quota_denied("tenant_rps_exceeded", "rate limited"));
                     }
                     entry.count += 1;
                 }

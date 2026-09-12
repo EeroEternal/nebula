@@ -3,9 +3,7 @@
 //! Probes the live engine HTTP surface and merges hints onto the static table.
 //! Discovery failures must not block serving — callers keep the static profile.
 
-use nebula_common::{
-    static_capability, CapabilitySource, EngineCapability, SupportLevel,
-};
+use nebula_common::{static_capability, CapabilitySource, EngineCapability, SupportLevel};
 
 /// Best-effort runtime hints collected from a live engine.
 #[derive(Debug, Clone, Default)]
@@ -130,20 +128,24 @@ pub async fn discover_runtime_capability(
             if let Ok(text) = resp.text().await {
                 match engine_type {
                     "vllm" => {
-                        hints.pending_requests = Some(if text.contains("num_requests_waiting")
-                            || text.contains("num_requests_running")
-                        {
-                            SupportLevel::Supported
-                        } else {
-                            SupportLevel::Unsupported
-                        });
-                        hints.kv_cache_usage = Some(if text.contains("kv_cache_usage_perc")
-                            || text.contains("gpu_cache_usage_perc")
-                        {
-                            SupportLevel::Supported
-                        } else {
-                            SupportLevel::Unsupported
-                        });
+                        hints.pending_requests = Some(
+                            if text.contains("num_requests_waiting")
+                                || text.contains("num_requests_running")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
+                        hints.kv_cache_usage = Some(
+                            if text.contains("kv_cache_usage_perc")
+                                || text.contains("gpu_cache_usage_perc")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
                         hints.prefix_cache_hit_rate = Some(
                             if text.contains("prefix_cache") || text.contains("gpu_prefix_cache") {
                                 SupportLevel::Supported
@@ -153,13 +155,15 @@ pub async fn discover_runtime_capability(
                         );
                     }
                     "sglang" => {
-                        hints.pending_requests = Some(if text.contains("num_requests_waiting")
-                            || text.contains("num_requests_running")
-                        {
-                            SupportLevel::Supported
-                        } else {
-                            SupportLevel::Unsupported
-                        });
+                        hints.pending_requests = Some(
+                            if text.contains("num_requests_waiting")
+                                || text.contains("num_requests_running")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
                         hints.kv_cache_usage = Some(
                             if text.contains("token_usage") || text.contains("cache_usage") {
                                 SupportLevel::Supported

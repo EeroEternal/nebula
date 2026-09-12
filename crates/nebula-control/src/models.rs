@@ -5,9 +5,7 @@ use nebula_meta::MetaStore;
 use serde::Deserialize;
 
 use crate::error::ServiceError;
-use crate::store::{
-    get_model_spec, is_valid_model_uid, now_ms, put_model_spec,
-};
+use crate::store::{get_model_spec, is_valid_model_uid, now_ms, put_model_spec};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateModelRequest {
@@ -71,9 +69,7 @@ pub async fn create_model(
     let spec = ModelSpec {
         model_uid: req.model_uid.clone(),
         model_name: req.model_name,
-        model_source: req
-            .model_source
-            .unwrap_or(ModelSource::HuggingFace),
+        model_source: req.model_source.unwrap_or(ModelSource::HuggingFace),
         model_path: req.model_path,
         engine_type: req.engine_type,
         docker_image: req.docker_image,
@@ -88,9 +84,6 @@ pub async fn create_model(
     Ok(spec)
 }
 
-pub async fn get_model(
-    store: &dyn MetaStore,
-    model_uid: &str,
-) -> Result<ModelSpec, ServiceError> {
+pub async fn get_model(store: &dyn MetaStore, model_uid: &str) -> Result<ModelSpec, ServiceError> {
     get_model_spec(store, model_uid).await
 }

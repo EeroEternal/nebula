@@ -175,12 +175,7 @@ fn sign_payload(secret: &str, body: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-async fn post_webhook(
-    http: &Client,
-    url: &str,
-    secret: Option<&str>,
-    op: &Operation,
-) {
+async fn post_webhook(http: &Client, url: &str, secret: Option<&str>, op: &Operation) {
     let body = match serde_json::to_string(op) {
         Ok(v) => v,
         Err(e) => {
@@ -193,7 +188,10 @@ async fn post_webhook(
         .header("Content-Type", "application/json")
         .header("X-Nebula-Event", "operation.updated");
     if let Some(secret) = secret {
-        req = req.header("X-Nebula-Signature", format!("sha256={}", sign_payload(secret, &body)));
+        req = req.header(
+            "X-Nebula-Signature",
+            format!("sha256={}", sign_payload(secret, &body)),
+        );
     }
     match req.body(body).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -290,6 +288,9 @@ mod tests {
     }
 }
 
+use crate::auth::{require_role, AuthContext, Role};
+use crate::control::control_error;
+use crate::state::AppState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -297,9 +298,6 @@ use axum::{
     Extension, Json,
 };
 use serde_json::json;
-use crate::auth::{require_role, AuthContext, Role};
-use crate::control::control_error;
-use crate::state::AppState;
 
 pub async fn platform_list_webhooks(
     State(st): State<AppState>,

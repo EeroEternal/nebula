@@ -18,6 +18,8 @@ struct TenantLive {
     concurrency: u64,
     token_window_start: Option<Instant>,
     token_count: u64,
+    pin_window_start: Option<Instant>,
+    pin_count: u64,
 }
 
 /// In-process admission state keyed by tenant_id.
@@ -95,6 +97,26 @@ impl TenantAdmission {
             tenant_id: tenant.tenant_id.clone(),
         })
     }
+
+    pub async fn try_admit_pin(&self, tenant: &Tenant) -> Result<(), TenantDenyCode> {
+        match admit_static(tenant, None) {
+            AdmitDecision::Allow => {}
+            AdmitDecision::Deny(code) => return Err(code),
+        }
+        let Some(limit) = tenant.quotas.max_pin_requests_per_minute else {
+            return Ok(());
+        };
+
+        let mut map = self.inner.lock().await;
+        let live = map.entry(tenant.tenant_id.clone()).or_default();
+        let now = Instant::now();
+        reset_minute_window(&mut live.pin_window_start, &mut live.pin_count, now);
+        if live.pin_count >= limit {
+            return Err(TenantDenyCode::PinAdmissionExceeded);
+        }
+        live.pin_count += 1;
+        Ok(())
+    }
 }
 
 fn reset_minute_window(start: &mut Option<Instant>, count: &mut u64, now: Instant) {
@@ -117,7 +139,9 @@ pub fn rate_limit_key(tenant_id: Option<&str>, principal: &str) -> String {
 
 /// Merge optional override onto defaults (used when tenant missing from etcd).
 pub fn effective_quota(tenant: Option<&Tenant>, fallback: &TenantQuota) -> TenantQuota {
-    tenant.map(|t| t.quotas.clone()).unwrap_or_else(|| fallback.clone())
+    tenant
+        .map(|t| t.quotas.clone())
+        .unwrap_or_else(|| fallback.clone())
 }
 
 #[cfg(test)]
@@ -133,6 +157,7 @@ mod tests {
                 rps_per_minute: Some(rps),
                 max_concurrency: Some(conc),
                 max_tokens_per_minute: Some(1000),
+                max_pin_requests_per_minute: Some(100),
                 allowed_models: None,
             },
             api_token_principals: vec![],
@@ -172,6 +197,18 @@ mod tests {
         // Allow Drop's spawned task to run.
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         adm.try_admit(&t, None, 0).await.expect("after drop");
+    }
+
+    #[tokio::test]
+    async fn pin_admission_quota_enforced() {
+        let adm = TenantAdmission::new();
+        let mut t = tenant(100, 10);
+        t.quotas.max_pin_requests_per_minute = Some(1);
+        adm.try_admit_pin(&t).await.expect("pin1");
+        assert_eq!(
+            adm.try_admit_pin(&t).await.err(),
+            Some(TenantDenyCode::PinAdmissionExceeded)
+        );
     }
 
     #[test]

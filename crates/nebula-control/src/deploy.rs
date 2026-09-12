@@ -187,20 +187,14 @@ pub async fn start_model(
     req: StartDeploymentRequest,
 ) -> Result<ModelDeployment, ServiceError> {
     let spec = get_model_spec(store, model_uid).await?;
-    let effective_config = req
-        .config_overrides
-        .as_ref()
-        .or(spec.config.as_ref());
+    let effective_config = req.config_overrides.as_ref().or(spec.config.as_ref());
     ensure_engine_config(spec.engine_type.as_deref(), effective_config)?;
     validate_callback_url(req.callback_url.as_deref())?;
 
     let replicas = effective_replicas(&req);
     validate_start_replica_specs(replicas, &req.replica_specs)?;
 
-    let image_id = req
-        .image_id
-        .clone()
-        .or_else(|| spec.docker_image.clone());
+    let image_id = req.image_id.clone().or_else(|| spec.docker_image.clone());
     let compat_ids = validate_compat_for_replica_specs(
         store,
         spec.engine_type.as_deref().unwrap_or("vllm"),

@@ -2,12 +2,14 @@
 
 use nebula_common::{
     draft_from_candidate, select_backends, CurrentBackend, DeploymentDraft, DesiredState,
-    DraftRequest, ModelProfile, ModelSpec, ModelSource, SelectionRequest, SelectionResponse,
+    DraftRequest, ModelProfile, ModelSource, ModelSpec, SelectionRequest, SelectionResponse,
 };
 use nebula_meta::MetaStore;
 use serde::Deserialize;
 
-use crate::service::{get_model_deployment, get_model_spec, put_model_deployment, put_model_spec, ServiceError};
+use crate::service::{
+    get_model_deployment, get_model_spec, put_model_deployment, put_model_spec, ServiceError,
+};
 
 fn current_is_empty(current: &CurrentBackend) -> bool {
     current.engine_type.is_none() && current.image_id.is_none() && current.platform.is_none()
@@ -135,16 +137,13 @@ pub async fn draft(
     req: DraftRequest,
 ) -> Result<DeploymentDraft, ServiceError> {
     let resp = recommend(store, db, req.selection.clone()).await?;
-    let candidate = resp
-        .candidates
-        .get(req.candidate_index)
-        .ok_or_else(|| {
-            ServiceError::BadRequest(format!(
-                "candidate_index {} out of range ({} candidates)",
-                req.candidate_index,
-                resp.candidates.len()
-            ))
-        })?;
+    let candidate = resp.candidates.get(req.candidate_index).ok_or_else(|| {
+        ServiceError::BadRequest(format!(
+            "candidate_index {} out of range ({} candidates)",
+            req.candidate_index,
+            resp.candidates.len()
+        ))
+    })?;
     draft_from_candidate(&req, candidate, now_ms()).map_err(ServiceError::BadRequest)
 }
 

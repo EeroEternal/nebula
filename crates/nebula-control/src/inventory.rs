@@ -1,6 +1,6 @@
 use nebula_common::{
-    ClusterStatus, EndpointInfo, EndpointStatus, ModelRequest, NodeStatus, PlacementPlan,
-    resolve_node_platform,
+    resolve_node_platform, ClusterStatus, EndpointInfo, EndpointStatus, ModelRequest, NodeStatus,
+    PlacementPlan,
 };
 use nebula_meta::MetaStore;
 use serde::{Deserialize, Serialize};

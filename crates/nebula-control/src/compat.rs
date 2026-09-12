@@ -7,7 +7,9 @@ use nebula_meta::MetaStore;
 use crate::error::ServiceError;
 use crate::store::now_ms;
 
-pub async fn list_compat_rules(store: &dyn MetaStore) -> Result<Vec<CompatibilityRule>, ServiceError> {
+pub async fn list_compat_rules(
+    store: &dyn MetaStore,
+) -> Result<Vec<CompatibilityRule>, ServiceError> {
     let entries = store.list_prefix("/compat/").await?;
     let mut out: Vec<CompatibilityRule> = entries
         .into_iter()
@@ -81,7 +83,10 @@ pub async fn validate_deploy_compat(
     match evaluate_compatibility(&rules, &input) {
         Ok(ids) => Ok(ids),
         Err(reason) => {
-            if override_reason.map(str::trim).filter(|s| !s.is_empty()).is_some()
+            if override_reason
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_some()
                 && reason.code == "compat_denied"
             {
                 tracing::warn!(
@@ -89,7 +94,10 @@ pub async fn validate_deploy_compat(
                     rule = ?reason.rule_id,
                     "compat deny overridden by operator"
                 );
-                return Ok(vec![format!("override:{}", reason.rule_id.unwrap_or_default())]);
+                return Ok(vec![format!(
+                    "override:{}",
+                    reason.rule_id.unwrap_or_default()
+                )]);
             }
             Err(ServiceError::BadRequest(reason.format_error()))
         }

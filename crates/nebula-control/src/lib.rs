@@ -17,20 +17,20 @@ pub use deploy::{
     stop_model, validate_callback_url, ScaleDeploymentRequest, StartDeploymentRequest,
 };
 pub use error::ServiceError;
-pub use governance::{
-    filter_canaries_by_model, get_canary, get_slo, list_canaries, list_slos,
+pub use governance::{filter_canaries_by_model, get_canary, get_slo, list_canaries, list_slos};
+pub use health::{
+    cluster_counts, etcd_health, ClusterCounts, ComponentHealth, ComponentStatus, HealthSummary,
 };
-pub use health::{cluster_counts, etcd_health, ClusterCounts, ComponentHealth, ComponentStatus, HealthSummary};
 pub use idempotency::{get_idempotency, hash_body, put_idempotency, IdempotencyRecord};
 pub use inventory::{
-    count_ready_replicas, drain_node, drain_replica, get_cluster_status, list_endpoints, list_nodes,
-    list_replicas, DrainNodeResponse, DrainReplicaRequest, DrainReplicaResponse, NodeInventory,
-    ReplicaView,
+    count_ready_replicas, drain_node, drain_replica, get_cluster_status, list_endpoints,
+    list_nodes, list_replicas, DrainNodeResponse, DrainReplicaRequest, DrainReplicaResponse,
+    NodeInventory, ReplicaView,
 };
 pub use models::{create_model, get_model, list_models, CreateModelRequest};
 pub use operation::{
-    create_operation, get_operation, Operation, OperationKind, OperationOptions, OperationResponse,
-    OperationStatus,
+    create_async_operation, create_operation, get_operation, Operation, OperationKind,
+    OperationOptions, OperationResponse, OperationStatus,
 };
 pub use pool::{
     create_pool, delete_pool, get_pool, list_pools, update_pool, CreatePoolRequest,

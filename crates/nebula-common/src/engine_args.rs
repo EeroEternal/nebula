@@ -146,14 +146,18 @@ mod tests {
         let args = build_engine_extra_args(Some("vllm"), &sample_cfg())
             .unwrap()
             .unwrap();
-        assert!(args.windows(2).any(|w| {
-            w[0] == "--tensor-parallel-size" && w[1] == "2"
-        }));
-        assert!(args.windows(2).any(|w| {
-            w[0] == "--gpu-memory-utilization" && w[1] == "0.85"
-        }));
-        assert!(args.windows(2).any(|w| w[0] == "--max-model-len" && w[1] == "8192"));
-        assert!(!args.iter().any(|a| a == "--tp" || a == "--mem-fraction-static"));
+        assert!(args
+            .windows(2)
+            .any(|w| { w[0] == "--tensor-parallel-size" && w[1] == "2" }));
+        assert!(args
+            .windows(2)
+            .any(|w| { w[0] == "--gpu-memory-utilization" && w[1] == "0.85" }));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--max-model-len" && w[1] == "8192"));
+        assert!(!args
+            .iter()
+            .any(|a| a == "--tp" || a == "--mem-fraction-static"));
     }
 
     #[test]
@@ -162,9 +166,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(args.windows(2).any(|w| w[0] == "--tp" && w[1] == "2"));
-        assert!(args.windows(2).any(|w| {
-            w[0] == "--mem-fraction-static" && w[1] == "0.85"
-        }));
+        assert!(args
+            .windows(2)
+            .any(|w| { w[0] == "--mem-fraction-static" && w[1] == "0.85" }));
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--context-length" && w[1] == "8192"));
@@ -190,11 +194,19 @@ mod tests {
             served_model_name: Some("deepseek-v4-flash".into()),
             ..sample_cfg()
         };
-        let args = build_engine_extra_args(Some("vllm"), &cfg).unwrap().unwrap();
-        assert!(args.windows(2).any(|w| w[0] == "--kv-cache-dtype" && w[1] == "fp8"));
+        let args = build_engine_extra_args(Some("vllm"), &cfg)
+            .unwrap()
+            .unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--kv-cache-dtype" && w[1] == "fp8"));
         assert!(args.iter().any(|a| a == "--trust-remote-code"));
         assert!(args.iter().any(|a| a == "--enable-expert-parallel"));
-        assert!(args.windows(2).any(|w| w[0] == "--block-size" && w[1] == "256"));
-        assert!(args.windows(2).any(|w| w[0] == "--tokenizer-mode" && w[1] == "deepseek_v4"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--block-size" && w[1] == "256"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--tokenizer-mode" && w[1] == "deepseek_v4"));
     }
 }

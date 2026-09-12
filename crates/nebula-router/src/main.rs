@@ -31,8 +31,7 @@ async fn main() -> anyhow::Result<()> {
         &args.common.log_format,
     );
 
-    let store =
-        nebula_meta::EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
+    let store = nebula_meta::EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
 
     let strategy =
         nebula_router::strategy::parse_strategy(&args.routing_strategy).unwrap_or_else(|e| {

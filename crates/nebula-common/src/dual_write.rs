@@ -80,12 +80,7 @@ impl DualWriteEmitter {
     }
 
     /// Counter / gauge sample at "now".
-    pub fn emit(
-        &self,
-        name: &str,
-        labels: impl IntoIterator<Item = (String, String)>,
-        value: f64,
-    ) {
+    pub fn emit(&self, name: &str, labels: impl IntoIterator<Item = (String, String)>, value: f64) {
         let mut map: HashMap<String, String> = labels.into_iter().collect();
         map.insert("service".to_string(), self.service.clone());
         self.push_points(vec![xtrace_client::MetricPoint {

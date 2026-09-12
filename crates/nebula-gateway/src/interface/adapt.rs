@@ -5,7 +5,9 @@
 //! selection here.
 
 use serde_json::{json, Value};
-use unigateway_sdk::core::{ContentBlock, Message, MessageRole, ProxyChatRequest, ProxyResponsesRequest};
+use unigateway_sdk::core::{
+    ContentBlock, Message, MessageRole, ProxyChatRequest, ProxyResponsesRequest,
+};
 use unigateway_sdk::protocol::{
     anthropic_payload_to_chat_request, openai_payload_to_responses_request,
 };
@@ -135,7 +137,11 @@ fn structured_messages_to_openai(system: &Option<Value>, messages: &[Message]) -
                 }
                 let mut m = json!({"role": "assistant"});
                 let obj = m.as_object_mut().unwrap();
-                if multimodal.len() > 1 || multimodal.iter().any(|p| p.get("type") != Some(&json!("text"))) {
+                if multimodal.len() > 1
+                    || multimodal
+                        .iter()
+                        .any(|p| p.get("type") != Some(&json!("text")))
+                {
                     obj.insert("content".into(), Value::Array(multimodal));
                 } else if !text_parts.is_empty() {
                     obj.insert("content".into(), Value::String(text_parts.join("\n")));
@@ -298,7 +304,10 @@ pub fn openai_chat_json_to_anthropic(openai: &Value, requested_model: &str) -> V
     let input_tokens = usage.get("prompt_tokens").cloned().unwrap_or(json!(0));
     let output_tokens = usage.get("completion_tokens").cloned().unwrap_or(json!(0));
 
-    let message = openai.pointer("/choices/0/message").cloned().unwrap_or(json!({}));
+    let message = openai
+        .pointer("/choices/0/message")
+        .cloned()
+        .unwrap_or(json!({}));
     let mut content_blocks: Vec<Value> = Vec::new();
 
     if let Some(text) = message.get("content").and_then(|v| v.as_str()) {
@@ -405,7 +414,9 @@ pub fn parse_openai_sse_chunk(data: &str) -> Vec<OpenAiStreamChunk> {
                 .pointer("/function/arguments")
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string());
-            if id.is_none() && name.is_none() && arguments.as_ref().map(|s| s.is_empty()).unwrap_or(true)
+            if id.is_none()
+                && name.is_none()
+                && arguments.as_ref().map(|s| s.is_empty()).unwrap_or(true)
             {
                 continue;
             }
@@ -432,10 +443,12 @@ pub fn parse_openai_sse_chunk(data: &str) -> Vec<OpenAiStreamChunk> {
 
 /// Extract text delta from an OpenAI chat SSE `data:` JSON payload.
 pub fn openai_sse_content_delta(data: &str) -> Option<String> {
-    parse_openai_sse_chunk(data).into_iter().find_map(|c| match c {
-        OpenAiStreamChunk::Text(t) => Some(t),
-        _ => None,
-    })
+    parse_openai_sse_chunk(data)
+        .into_iter()
+        .find_map(|c| match c {
+            OpenAiStreamChunk::Text(t) => Some(t),
+            _ => None,
+        })
 }
 
 /// Maps OpenAI chat SSE chunks into Anthropic Messages SSE event payloads.
@@ -582,10 +595,7 @@ impl AnthropicSseMapper {
                 "usage": {"output_tokens": 0}
             }),
         ));
-        evs.push((
-            "message_stop".into(),
-            json!({"type": "message_stop"}),
-        ));
+        evs.push(("message_stop".into(), json!({"type": "message_stop"})));
         evs
     }
 }
@@ -740,10 +750,7 @@ mod tests {
         assert!(fin.is_empty());
         let done = m.push(OpenAiStreamChunk::Done);
         assert_eq!(done.last().unwrap().0, "message_stop");
-        let delta = done
-            .iter()
-            .find(|(e, _)| e == "message_delta")
-            .unwrap();
+        let delta = done.iter().find(|(e, _)| e == "message_delta").unwrap();
         assert_eq!(delta.1["delta"]["stop_reason"], "tool_use");
     }
 }

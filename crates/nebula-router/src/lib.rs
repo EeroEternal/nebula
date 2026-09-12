@@ -3,7 +3,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use nebula_common::{EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext, ModelSpec};
+use nebula_common::{
+    EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext, InferenceHint, ModelSpec,
+};
 
 pub mod strategy;
 
@@ -61,6 +63,13 @@ pub struct Router {
     route_stale_stats_dropped_total: AtomicU64,
     route_circuit_skipped_total: AtomicU64,
     circuit_open_total: AtomicU64,
+    hint_received_total: AtomicU64,
+    hint_adopted_total: AtomicU64,
+    hint_conflict_rejected_total: AtomicU64,
+    hint_expired_total: AtomicU64,
+    hint_stale_degraded_total: AtomicU64,
+    session_affinity_hit_total: AtomicU64,
+    prefix_hint_hit_total: AtomicU64,
     stats_max_age_ms: u64,
     circuit_failure_threshold: u32,
     circuit_open_ms: u64,
@@ -112,6 +121,13 @@ impl Router {
             route_stale_stats_dropped_total: AtomicU64::new(0),
             route_circuit_skipped_total: AtomicU64::new(0),
             circuit_open_total: AtomicU64::new(0),
+            hint_received_total: AtomicU64::new(0),
+            hint_adopted_total: AtomicU64::new(0),
+            hint_conflict_rejected_total: AtomicU64::new(0),
+            hint_expired_total: AtomicU64::new(0),
+            hint_stale_degraded_total: AtomicU64::new(0),
+            session_affinity_hit_total: AtomicU64::new(0),
+            prefix_hint_hit_total: AtomicU64::new(0),
             stats_max_age_ms,
             circuit_failure_threshold,
             circuit_open_ms,
@@ -172,6 +188,34 @@ impl Router {
 
     pub fn circuit_open_total(&self) -> u64 {
         self.circuit_open_total.load(Ordering::Relaxed)
+    }
+
+    pub fn hint_received_total(&self) -> u64 {
+        self.hint_received_total.load(Ordering::Relaxed)
+    }
+
+    pub fn hint_adopted_total(&self) -> u64 {
+        self.hint_adopted_total.load(Ordering::Relaxed)
+    }
+
+    pub fn hint_conflict_rejected_total(&self) -> u64 {
+        self.hint_conflict_rejected_total.load(Ordering::Relaxed)
+    }
+
+    pub fn hint_expired_total(&self) -> u64 {
+        self.hint_expired_total.load(Ordering::Relaxed)
+    }
+
+    pub fn hint_stale_degraded_total(&self) -> u64 {
+        self.hint_stale_degraded_total.load(Ordering::Relaxed)
+    }
+
+    pub fn session_affinity_hit_total(&self) -> u64 {
+        self.session_affinity_hit_total.load(Ordering::Relaxed)
+    }
+
+    pub fn prefix_hint_hit_total(&self) -> u64 {
+        self.prefix_hint_hit_total.load(Ordering::Relaxed)
     }
 
     pub fn record_endpoint_success(&self, model_uid: &str, replica_id: u32) {
@@ -383,8 +427,33 @@ impl Router {
         plan_version: Option<u64>,
         exclude: Option<(&str, u32)>,
     ) -> Result<EndpointInfo, RouteError> {
+        if ctx.inference_hint.is_some() {
+            self.hint_received_total.fetch_add(1, Ordering::Relaxed);
+        }
+        let now = now_ms();
+        let active_hint = if let Some(h) = ctx.inference_hint.clone() {
+            if h.expires_at_ms.map(|ts| ts <= now).unwrap_or(false) {
+                self.hint_expired_total.fetch_add(1, Ordering::Relaxed);
+                None
+            } else {
+                if h.prefer_session_affinity == Some(true) && ctx.session_id.is_none() {
+                    self.hint_conflict_rejected_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    None
+                } else {
+                    Some(h)
+                }
+            }
+        } else {
+            None
+        };
+
         // Explicit replica pin (opt-in via x-nebula-replica-id).
         if let Some(replica_id) = ctx.pinned_replica_id {
+            if active_hint.is_some() {
+                self.hint_conflict_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             if let Some(ep) = self
                 .endpoints
                 .get(&(model_uid.to_string(), replica_id))
@@ -422,6 +491,8 @@ impl Router {
                     {
                         let plan_ok = plan_version.map(|v| ep.plan_version == v).unwrap_or(true);
                         if ep.status == EndpointStatus::Ready && plan_ok {
+                            self.session_affinity_hit_total
+                                .fetch_add(1, Ordering::Relaxed);
                             return Ok(ep);
                         }
                     }
@@ -483,12 +554,17 @@ impl Router {
         // Stats-missing degradation: when any fresh stats exist, deprioritize stale/missing stats
         // by dropping missing-stats candidates from this routing decision.
         if candidates_data.iter().any(|(_, s)| s.is_some()) {
+            let before_len = candidates_data.len();
             let with_stats: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
                 .iter()
                 .filter(|(_, s)| s.is_some())
                 .map(|(ep, s)| (ep.clone(), s.clone()))
                 .collect();
             if !with_stats.is_empty() {
+                if active_hint.is_some() && with_stats.len() < before_len {
+                    self.hint_stale_degraded_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 candidates_data = with_stats;
             }
         }
@@ -527,11 +603,25 @@ impl Router {
             })
             .collect();
 
-        let selected = self
-            .strategy
-            .select(&candidates)
-            .map(|i| candidates_data[i].0.clone())
-            .ok_or(RouteError::NoEndpoint)?;
+        let selected = if let Some(hint) = active_hint.as_ref() {
+            if let Some(idx) = Self::select_hint_biased_endpoint(&candidates_data, hint) {
+                self.hint_adopted_total.fetch_add(1, Ordering::Relaxed);
+                if hint.prefer_prefix_key.is_some() {
+                    self.prefix_hint_hit_total.fetch_add(1, Ordering::Relaxed);
+                }
+                candidates_data[idx].0.clone()
+            } else {
+                self.strategy
+                    .select(&candidates)
+                    .map(|i| candidates_data[i].0.clone())
+                    .ok_or(RouteError::NoEndpoint)?
+            }
+        } else {
+            self.strategy
+                .select(&candidates)
+                .map(|i| candidates_data[i].0.clone())
+                .ok_or(RouteError::NoEndpoint)?
+        };
 
         if let Some(session_id) = ctx.session_id.clone() {
             self.session_affinity.insert(
@@ -550,6 +640,37 @@ impl Router {
         plan_version: u64,
     ) -> Result<EndpointInfo, RouteError> {
         self.route_internal(ctx, model_uid, Some(plan_version), None)
+    }
+
+    fn select_hint_biased_endpoint(
+        candidates_data: &[(EndpointInfo, Option<EndpointStats>)],
+        hint: &InferenceHint,
+    ) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for (idx, (_, stats)) in candidates_data.iter().enumerate() {
+            let mut score = 0.0_f64;
+            if let Some(st) = stats {
+                if hint.prefer_low_latency.unwrap_or(false) {
+                    score += 1.0 / (1.0 + st.pending_requests as f64);
+                }
+                if hint.prefer_low_cost.unwrap_or(false) {
+                    score += 1.0 - st.kv_cache_usage.unwrap_or(0.5).clamp(0.0, 1.0);
+                }
+                if hint.prefer_prefix_key.is_some() {
+                    score += st.prefix_cache_hit_rate.unwrap_or(0.0).clamp(0.0, 1.0) * 2.0;
+                }
+            }
+            if score > 0.0 {
+                if let Some((_, current)) = best {
+                    if score > current {
+                        best = Some((idx, score));
+                    }
+                } else {
+                    best = Some((idx, score));
+                }
+            }
+        }
+        best.map(|(idx, _)| idx)
     }
 
     pub fn route_with_plan_version_excluding(
@@ -614,6 +735,8 @@ mod plan_version_tests {
             deadline_ms: None,
             budget_tokens: None,
             pinned_replica_id: Some(1),
+            inference_hint: None,
+            hint_trusted: false,
         };
         let ep = router.route(&ctx, "m1").unwrap();
         assert_eq!(ep.replica_id, 1);
@@ -632,6 +755,8 @@ mod plan_version_tests {
             deadline_ms: None,
             budget_tokens: None,
             pinned_replica_id: None,
+            inference_hint: None,
+            hint_trusted: false,
         };
 
         let ep = router.route_with_plan_version(&ctx, "m1", 2).unwrap();
@@ -663,6 +788,8 @@ mod plan_version_tests {
             deadline_ms: None,
             budget_tokens: None,
             pinned_replica_id: None,
+            inference_hint: None,
+            hint_trusted: false,
         };
         let ep = router.route_with_plan_version(&ctx, "m2", 7).unwrap();
         assert_eq!(ep.replica_id, 0);
@@ -682,6 +809,8 @@ mod plan_version_tests {
             deadline_ms: None,
             budget_tokens: None,
             pinned_replica_id: None,
+            inference_hint: None,
+            hint_trusted: false,
         };
         assert!(matches!(
             router.route_with_plan_version(&ctx, "m1", 1).unwrap_err(),
@@ -724,10 +853,7 @@ mod model_alias_tests {
             Some("/home/bodesi/models/Qwen1.5-MoE-A2.7B-Chat"),
         ));
 
-        assert_eq!(
-            router.resolve_model("qwen15-moe-vllm"),
-            "qwen15_moe_vllm"
-        );
+        assert_eq!(router.resolve_model("qwen15-moe-vllm"), "qwen15_moe_vllm");
         assert_eq!(
             router.resolve_model("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
             "qwen15_moe_vllm"

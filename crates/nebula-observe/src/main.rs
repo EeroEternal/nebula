@@ -41,12 +41,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     // Align with other Nebula components (stdout + optional OTLP later).
-    let _otel_guard = nebula_common::telemetry::init_tracing(
-        "nebula-observe",
-        None,
-        None,
-        &args.log_format,
-    );
+    let _otel_guard =
+        nebula_common::telemetry::init_tracing("nebula-observe", None, None, &args.log_format);
 
     if args.token.is_empty() {
         tracing::warn!(

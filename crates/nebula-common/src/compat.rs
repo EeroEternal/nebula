@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::capability::{parse_version_tuple, validate_engine_version};
-use crate::node_status::{image_platforms_match, NodeStatus, resolve_node_platform};
+use crate::node_status::{image_platforms_match, resolve_node_platform, NodeStatus};
 
 /// Allow or deny a combination in the compatibility matrix.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]

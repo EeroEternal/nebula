@@ -7,7 +7,8 @@ use axum::{
 };
 use bytes::Bytes;
 use nebula_common::{
-    build_execution_context, inject_execution_context, peek_json_model_field, Tenant, TenantDenyCode,
+    build_execution_context, inject_execution_context, parse_and_sanitize_inference_hint,
+    peek_json_model_field, Tenant, TenantDenyCode, HEADER_HINT_TRUSTED, HEADER_INFERENCE_HINT,
 };
 use nebula_meta::MetaStore;
 use serde_json::Value;
@@ -31,12 +32,23 @@ pub async fn prepare_upstream(
     body_bytes: &[u8],
 ) -> Result<PreparedUpstream, Response> {
     let model = peek_json_model_field(body_bytes);
+    if headers.contains_key(HEADER_INFERENCE_HINT) {
+        st.metrics
+            .hint_received_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let ctx = build_execution_context(headers, auth.tenant_id.as_deref(), None);
 
     let _conc_guard = if st.auth.env.multi_tenant {
         if let Some(ref tenant_id) = ctx.tenant_id {
             match load_tenant(&*st.store, tenant_id).await {
                 Ok(Some(tenant)) => {
+                    if ctx.pinned_replica_id.is_some() {
+                        if let Err(code) = st.tenant_admission.try_admit_pin(&tenant).await {
+                            st.metrics.record_tenant_deny(code.as_str());
+                            return Err(deny_response(code));
+                        }
+                    }
                     let est = ctx.budget_tokens.unwrap_or(0);
                     match st
                         .tenant_admission
@@ -63,7 +75,43 @@ pub async fn prepare_upstream(
         None
     };
 
+    let hint_trusted = matches!(
+        auth.role,
+        nebula_common::auth::Role::Operator | nebula_common::auth::Role::Admin
+    );
     let mut outbound = headers.clone();
+    if let Some(raw_hint) = headers
+        .get(HEADER_INFERENCE_HINT)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(hint) = parse_and_sanitize_inference_hint(raw_hint) {
+            if hint_trusted {
+                if let Ok(hint_text) = serde_json::to_string(&hint) {
+                    if let Ok(v) = HeaderValue::from_str(&hint_text) {
+                        outbound.insert(HeaderName::from_static(HEADER_INFERENCE_HINT), v);
+                        st.metrics
+                            .hint_forwarded_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            } else {
+                outbound.remove(HeaderName::from_static(HEADER_INFERENCE_HINT));
+                st.metrics
+                    .hint_untrusted_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        } else {
+            outbound.remove(HeaderName::from_static(HEADER_INFERENCE_HINT));
+            st.metrics
+                .hint_rejected_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    outbound.insert(
+        HeaderName::from_static(HEADER_HINT_TRUSTED),
+        HeaderValue::from_static(if hint_trusted { "1" } else { "0" }),
+    );
+
     if let Some(ref model) = model {
         if let Ok(v) = HeaderValue::from_str(model) {
             outbound.insert(
@@ -142,10 +190,8 @@ pub async fn load_tenant(store: &dyn MetaStore, tenant_id: &str) -> anyhow::Resu
 pub fn deny_response(code: TenantDenyCode) -> Response {
     let mut resp = nebula_common::auth::tenant_denied(code.as_str(), code.message());
     if let Ok(v) = HeaderValue::from_str(code.as_str()) {
-        resp.headers_mut().insert(
-            HeaderName::from_static("x-nebula-deny-code"),
-            v,
-        );
+        resp.headers_mut()
+            .insert(HeaderName::from_static("x-nebula-deny-code"), v);
     }
     resp
 }
@@ -272,10 +318,8 @@ fn inject_nebula_echo_headers(out: &mut Response, request_id: Option<&str>) {
 
     if let Some(rid) = request_id {
         if let Ok(v) = HeaderValue::from_str(rid) {
-            out.headers_mut().insert(
-                HeaderName::from_static(HEADER_REQUEST_ID),
-                v,
-            );
+            out.headers_mut()
+                .insert(HeaderName::from_static(HEADER_REQUEST_ID), v);
         }
     }
 }

@@ -65,7 +65,9 @@ pub async fn get_run_db(db: &sqlx::PgPool, run_id: &str) -> Result<BenchmarkRun,
             let val: serde_json::Value = r.get("run_json");
             serde_json::from_value(val).map_err(Into::into)
         }
-        None => Err(ServiceError::NotFound(format!("benchmark run {run_id} not found"))),
+        None => Err(ServiceError::NotFound(format!(
+            "benchmark run {run_id} not found"
+        ))),
     }
 }
 
@@ -77,7 +79,9 @@ pub async fn ingest_run_db(
         return Err(ServiceError::BadRequest("run_id required".into()));
     }
     if run.profile_key.model_name.trim().is_empty() {
-        return Err(ServiceError::BadRequest("profile_key.model_name required".into()));
+        return Err(ServiceError::BadRequest(
+            "profile_key.model_name required".into(),
+        ));
     }
     if run.finished_at_ms == 0 {
         run.finished_at_ms = now_ms();
@@ -221,7 +225,11 @@ pub async fn create_canary(
         updated_at_ms: now,
     };
     store
-        .put(&canary_key(&canary.canary_id), serde_json::to_vec(&canary)?, None)
+        .put(
+            &canary_key(&canary.canary_id),
+            serde_json::to_vec(&canary)?,
+            None,
+        )
         .await?;
     Ok(canary)
 }
@@ -241,7 +249,9 @@ pub async fn evaluate_canary(
 ) -> Result<CanaryRelease, ServiceError> {
     let key = canary_key(canary_id);
     let Some((data, _)) = store.get(&key).await? else {
-        return Err(ServiceError::NotFound(format!("canary {canary_id} not found")));
+        return Err(ServiceError::NotFound(format!(
+            "canary {canary_id} not found"
+        )));
     };
     let mut canary: CanaryRelease = serde_json::from_slice(&data)?;
     canary.slo_breach = Some(req.slo_breaching);
@@ -258,7 +268,8 @@ pub async fn evaluate_canary(
                 .get(&format!("/deployments/{}", canary.model_uid))
                 .await?
             {
-                if let Ok(mut dep) = serde_json::from_slice::<nebula_common::ModelDeployment>(&dep_data)
+                if let Ok(mut dep) =
+                    serde_json::from_slice::<nebula_common::ModelDeployment>(&dep_data)
                 {
                     dep.image_id = Some(stable.clone());
                     dep.image_override_reason =
@@ -279,9 +290,7 @@ pub async fn evaluate_canary(
         // Hold state; promotion is explicit.
     }
     canary.updated_at_ms = now_ms();
-    store
-        .put(&key, serde_json::to_vec(&canary)?, None)
-        .await?;
+    store.put(&key, serde_json::to_vec(&canary)?, None).await?;
     Ok(canary)
 }
 
@@ -291,7 +300,9 @@ pub async fn promote_canary(
 ) -> Result<CanaryRelease, ServiceError> {
     let key = canary_key(canary_id);
     let Some((data, _)) = store.get(&key).await? else {
-        return Err(ServiceError::NotFound(format!("canary {canary_id} not found")));
+        return Err(ServiceError::NotFound(format!(
+            "canary {canary_id} not found"
+        )));
     };
     let mut canary: CanaryRelease = serde_json::from_slice(&data)?;
     if canary.state == CanaryState::RolledBack {
@@ -327,9 +338,7 @@ pub async fn promote_canary(
         }
     }
 
-    store
-        .put(&key, serde_json::to_vec(&canary)?, None)
-        .await?;
+    store.put(&key, serde_json::to_vec(&canary)?, None).await?;
     Ok(canary)
 }
 
@@ -351,11 +360,7 @@ pub async fn rollback_canary(
         canary.rollback_reason = Some(r);
         canary.updated_at_ms = now_ms();
         store
-            .put(
-                &canary_key(canary_id),
-                serde_json::to_vec(&canary)?,
-                None,
-            )
+            .put(&canary_key(canary_id), serde_json::to_vec(&canary)?, None)
             .await?;
     }
     Ok(canary)

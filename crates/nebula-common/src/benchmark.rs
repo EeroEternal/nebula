@@ -248,14 +248,9 @@ pub fn builtin_workloads() -> Vec<BenchmarkWorkload> {
 }
 
 fn profile_matches_request(key: &ProfileKey, req: &RecommendRequest) -> bool {
-    if !key
-        .model_name
-        .eq_ignore_ascii_case(req.model_name.trim())
-    {
+    if !key.model_name.eq_ignore_ascii_case(req.model_name.trim()) {
         // Allow suffix / contains match for HF ids vs short names.
-        if !key.model_name.contains(&req.model_name)
-            && !req.model_name.contains(&key.model_name)
-        {
+        if !key.model_name.contains(&req.model_name) && !req.model_name.contains(&key.model_name) {
             return false;
         }
     }
@@ -311,10 +306,12 @@ pub fn recommend_from_profiles(
             .iter()
             .filter(|r| profile.run_ids.contains(&r.run_id))
             .collect();
-        let cost = related.iter().filter_map(|r| r.cost_per_1k_tokens).fold(
-            None,
-            |acc: Option<f64>, v| Some(acc.map(|a| a.min(v)).unwrap_or(v)),
-        );
+        let cost = related
+            .iter()
+            .filter_map(|r| r.cost_per_1k_tokens)
+            .fold(None, |acc: Option<f64>, v| {
+                Some(acc.map(|a| a.min(v)).unwrap_or(v))
+            });
         if let Some(budget) = req.budget_cost_per_1k {
             if cost.map(|c| c > budget).unwrap_or(false) {
                 continue;
@@ -341,9 +338,7 @@ pub fn recommend_from_profiles(
             cost_per_1k_tokens: cost,
             rationale: format!(
                 "matched workload={} samples={} platform={:?}",
-                profile.profile_key.workload_id,
-                profile.sample_count,
-                profile.profile_key.platform
+                profile.profile_key.workload_id, profile.sample_count, profile.profile_key.platform
             ),
         });
     }
@@ -390,22 +385,28 @@ pub fn recommend_from_profiles(
 }
 
 /// Rebuild a profile from succeeded runs sharing the same ProfileKey.
-pub fn build_profile_from_runs(key: &ProfileKey, runs: &[BenchmarkRun], now_ms: u64) -> PerformanceProfile {
+pub fn build_profile_from_runs(
+    key: &ProfileKey,
+    runs: &[BenchmarkRun],
+    now_ms: u64,
+) -> PerformanceProfile {
     let matched: Vec<&BenchmarkRun> = runs
         .iter()
-        .filter(|r| {
-            r.profile_key == *key && r.status == BenchmarkRunStatus::Succeeded
-        })
+        .filter(|r| r.profile_key == *key && r.status == BenchmarkRunStatus::Succeeded)
         .collect();
     let run_ids: Vec<String> = matched.iter().map(|r| r.run_id.clone()).collect();
-    let best_ttft = matched.iter().filter_map(|r| r.ttft_p95_ms).fold(
-        None,
-        |acc: Option<f64>, v| Some(acc.map(|a| a.min(v)).unwrap_or(v)),
-    );
-    let best_tps = matched.iter().filter_map(|r| r.throughput_tps).fold(
-        None,
-        |acc: Option<f64>, v| Some(acc.map(|a| a.max(v)).unwrap_or(v)),
-    );
+    let best_ttft = matched
+        .iter()
+        .filter_map(|r| r.ttft_p95_ms)
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map(|a| a.min(v)).unwrap_or(v))
+        });
+    let best_tps = matched
+        .iter()
+        .filter_map(|r| r.throughput_tps)
+        .fold(None, |acc: Option<f64>, v| {
+            Some(acc.map(|a| a.max(v)).unwrap_or(v))
+        });
     let mut errors: Vec<f64> = matched.iter().filter_map(|r| r.error_rate).collect();
     errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let median_error = if errors.is_empty() {
@@ -484,7 +485,10 @@ mod tests {
 
     #[test]
     fn recommend_ranks_by_ttft() {
-        let runs = vec![sample_run("sglang", 800.0, 40.0), sample_run("vllm", 500.0, 35.0)];
+        let runs = vec![
+            sample_run("sglang", 800.0, 40.0),
+            sample_run("vllm", 500.0, 35.0),
+        ];
         let profiles: Vec<_> = runs
             .iter()
             .map(|r| build_profile_from_runs(&r.profile_key, &runs, 10))

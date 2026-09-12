@@ -236,7 +236,11 @@ fn preference_label(pref: SelectionPreference) -> &'static str {
     }
 }
 
-fn build_score_breakdown(pref: SelectionPreference, c: &BackendCandidate, score: f64) -> Vec<String> {
+fn build_score_breakdown(
+    pref: SelectionPreference,
+    c: &BackendCandidate,
+    score: f64,
+) -> Vec<String> {
     let switch_penalty = c.switching_cost * 10.0;
     let mut parts = vec![format!("preference={}", preference_label(pref))];
     match pref {
@@ -561,8 +565,14 @@ mod tests {
             .expect("sglang");
         assert!(vllm.switching_cost < sglang.switching_cost);
         assert!(vllm.switching_cost <= 0.2);
-        assert!(sglang.score_breakdown.iter().any(|s| s.starts_with("switch_penalty=")));
-        assert!(sglang.score_breakdown.iter().any(|s| s.contains("switching_cost=")));
+        assert!(sglang
+            .score_breakdown
+            .iter()
+            .any(|s| s.starts_with("switch_penalty=")));
+        assert!(sglang
+            .score_breakdown
+            .iter()
+            .any(|s| s.contains("switching_cost=")));
         assert!(vllm.reasons.iter().any(|r| r == "preference=latency"));
         assert!(vllm.score >= sglang.score);
     }

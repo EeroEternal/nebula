@@ -13,19 +13,22 @@ use axum::{
     },
     Extension, Json,
 };
+use nebula_meta::MetaStore;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use nebula_control::{
-    callback_url_from_scale, callback_url_from_start, cluster_counts, create_model, create_operation,
-    create_pool, delete_pool, drain_node, drain_replica, etcd_health, evaluate_slo_from_router_metrics,
-    filter_canaries_by_model, get_canary, get_cluster_status, get_model, get_model_deployment,
-    get_operation, get_pool, get_slo, list_canaries, list_models, list_nodes, list_pools,
-    list_replicas, load_model, scale_model, start_model, stop_model, update_pool, ComponentHealth,
-    ComponentStatus, CreateModelRequest, CreatePoolRequest, DrainReplicaRequest, HealthSummary,
-    OperationKind, OperationOptions, OperationStatus, ScaleDeploymentRequest, ServiceError,
-    StartDeploymentRequest, UpdatePoolRequest,
+    callback_url_from_scale, callback_url_from_start, cluster_counts, create_async_operation,
+    create_model, create_operation, create_pool, delete_pool, drain_node, drain_replica,
+    etcd_health, evaluate_slo_from_router_metrics, filter_canaries_by_model, get_canary,
+    get_cluster_status, get_model, get_model_deployment, get_operation, get_pool, get_slo,
+    list_canaries, list_models, list_nodes, list_pools, list_replicas, load_model, scale_model,
+    start_model, stop_model, update_pool, ComponentHealth, ComponentStatus, CreateModelRequest,
+    CreatePoolRequest, DrainReplicaRequest, HealthSummary, OperationKind, OperationOptions,
+    OperationStatus, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
+    UpdatePoolRequest,
 };
 
 use crate::audit::{fetch_audit_logs, AuditLogQuery};
@@ -33,6 +36,31 @@ use crate::auth::{require_role, AuthContext, Role};
 use crate::control::control_error;
 use crate::platform_idempotency::{check_idempotency, record_idempotency};
 use crate::state::AppState;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AsyncActionRequest {
+    #[serde(default)]
+    pub node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PrefetchQueueRequest {
+    operation_id: String,
+    model_uid: String,
+    model_name: String,
+    model_source: nebula_common::ModelSource,
+    model_path: Option<String>,
+    requested_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EvictQueueRequest {
+    operation_id: String,
+    model_uid: String,
+    model_name: String,
+    model_path: Option<String>,
+    requested_at_ms: u64,
+}
 
 fn require_control_read(ctx: &AuthContext, st: &AppState) -> Option<Response> {
     require_role(&st.metrics, ctx, Role::Viewer)
@@ -97,10 +125,7 @@ pub async fn platform_health_summary(
         Err(e) => return control_error(e),
     };
 
-    let router_url = format!(
-        "{}/healthz",
-        st.router_base_url.trim_end_matches('/')
-    );
+    let router_url = format!("{}/healthz", st.router_base_url.trim_end_matches('/'));
     let router = match st.http.get(&router_url).send().await {
         Ok(r) if r.status().is_success() => ComponentHealth {
             status: ComponentStatus::Ok,
@@ -290,6 +315,160 @@ pub async fn platform_stop_model(
         }
         Err(e) => control_error(e),
     }
+}
+
+pub async fn platform_prefetch_model(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(model_uid): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_write(&ctx, &st) {
+        return resp;
+    }
+    let path = format!("/platform/v1/models/{model_uid}/prefetch");
+    match check_idempotency(&st.store, &ctx.principal, &headers, &path, &body).await {
+        Ok(Some(r)) => return r,
+        Ok(None) => {}
+        Err(e) => return control_error(e),
+    }
+    let req: AsyncActionRequest =
+        serde_json::from_slice(&body).unwrap_or(AsyncActionRequest { node_id: None });
+    let callback_url = callback_from_headers(&headers);
+    if let Err(e) = nebula_control::validate_callback_url(callback_url.as_deref()) {
+        return control_error(e);
+    }
+
+    let spec = match get_model(&*st.store, &model_uid).await {
+        Ok(s) => s,
+        Err(e) => return control_error(e),
+    };
+    let op = match create_async_operation(
+        &*st.store,
+        OperationKind::Prefetch,
+        &model_uid,
+        OperationOptions { callback_url },
+    )
+    .await
+    {
+        Ok(op) => op,
+        Err(e) => return control_error(e),
+    };
+    let now = nebula_control::now_ms();
+    let nodes = match resolve_target_nodes(&*st.store, req.node_id.as_deref()).await {
+        Ok(v) => v,
+        Err(e) => return control_error(e),
+    };
+    let queue = PrefetchQueueRequest {
+        operation_id: op.operation_id.clone(),
+        model_uid: model_uid.clone(),
+        model_name: spec.model_name.clone(),
+        model_source: spec.model_source.clone(),
+        model_path: spec.model_path.clone(),
+        requested_at_ms: now,
+    };
+    let payload = match serde_json::to_vec(&queue) {
+        Ok(v) => v,
+        Err(e) => return control_error(ServiceError::Internal(format!("serialize queue: {e}"))),
+    };
+    for node_id in nodes {
+        let key = format!(
+            "/model_prefetch_requests/{}/{}/{}",
+            node_id, model_uid, op.operation_id
+        );
+        if let Err(e) = st.store.put(&key, payload.clone(), Some(300_000)).await {
+            return control_error(ServiceError::Internal(format!(
+                "enqueue prefetch failed: {e}"
+            )));
+        }
+    }
+    finish_write(&st, &ctx, &headers, &path, &body, op).await
+}
+
+pub async fn platform_evict_model(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(model_uid): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    if let Some(resp) = require_control_write(&ctx, &st) {
+        return resp;
+    }
+    let path = format!("/platform/v1/models/{model_uid}/evict");
+    match check_idempotency(&st.store, &ctx.principal, &headers, &path, &body).await {
+        Ok(Some(r)) => return r,
+        Ok(None) => {}
+        Err(e) => return control_error(e),
+    }
+    let callback_url = callback_from_headers(&headers);
+    if let Err(e) = nebula_control::validate_callback_url(callback_url.as_deref()) {
+        return control_error(e);
+    }
+    let req: AsyncActionRequest =
+        serde_json::from_slice(&body).unwrap_or(AsyncActionRequest { node_id: None });
+    let spec = match get_model(&*st.store, &model_uid).await {
+        Ok(s) => s,
+        Err(e) => return control_error(e),
+    };
+    let op = match create_async_operation(
+        &*st.store,
+        OperationKind::Evict,
+        &model_uid,
+        OperationOptions { callback_url },
+    )
+    .await
+    {
+        Ok(op) => op,
+        Err(e) => return control_error(e),
+    };
+    let now = nebula_control::now_ms();
+    let nodes = match resolve_target_nodes(&*st.store, req.node_id.as_deref()).await {
+        Ok(v) => v,
+        Err(e) => return control_error(e),
+    };
+    let queue = EvictQueueRequest {
+        operation_id: op.operation_id.clone(),
+        model_uid: model_uid.clone(),
+        model_name: spec.model_name.clone(),
+        model_path: spec.model_path.clone(),
+        requested_at_ms: now,
+    };
+    let payload = match serde_json::to_vec(&queue) {
+        Ok(v) => v,
+        Err(e) => return control_error(ServiceError::Internal(format!("serialize queue: {e}"))),
+    };
+    for node_id in nodes {
+        let key = format!(
+            "/model_gc_requests/{}/{}/{}",
+            node_id, model_uid, op.operation_id
+        );
+        if let Err(e) = st.store.put(&key, payload.clone(), Some(300_000)).await {
+            return control_error(ServiceError::Internal(format!("enqueue evict failed: {e}")));
+        }
+    }
+    finish_write(&st, &ctx, &headers, &path, &body, op).await
+}
+
+async fn resolve_target_nodes(
+    store: &dyn nebula_meta::MetaStore,
+    node_id: Option<&str>,
+) -> Result<Vec<String>, ServiceError> {
+    let nodes = list_nodes(store).await?;
+    if let Some(node) = node_id {
+        if nodes.iter().any(|n| n.status.node_id == node) {
+            return Ok(vec![node.to_string()]);
+        }
+        return Err(ServiceError::BadRequest(format!(
+            "node '{node}' not found or inactive"
+        )));
+    }
+    let ids: Vec<String> = nodes.into_iter().map(|n| n.status.node_id).collect();
+    if ids.is_empty() {
+        return Err(ServiceError::BadRequest("no active nodes".to_string()));
+    }
+    Ok(ids)
 }
 
 pub async fn platform_scale_deployment(

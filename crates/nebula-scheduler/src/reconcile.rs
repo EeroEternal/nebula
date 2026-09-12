@@ -9,8 +9,8 @@ use nebula_common::{
     DesiredState, EndpointInfo, EndpointStats, EndpointStatus, ModelDeployment, ModelRequest,
     ModelRequestStatus, PlacementPlan,
 };
-use nebula_meta::{EtcdMetaStore, MetaStore};
 use nebula_meta::LeaderGate;
+use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use nebula_scheduler::metrics::SharedMetrics;
 use nebula_scheduler::scale::select_replicas_to_remove;
@@ -232,8 +232,8 @@ async fn reconcile_once(
             let _ = store.delete(&stats_key).await;
         }
 
-        let need_update = !stale_replica_ids.is_empty()
-            || (healthy_assignments.len() as u32) != desired_replicas;
+        let need_update =
+            !stale_replica_ids.is_empty() || (healthy_assignments.len() as u32) != desired_replicas;
 
         if !need_update {
             continue;

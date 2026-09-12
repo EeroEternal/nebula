@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::{
     middleware,
-    routing::{get, post, put},
+    routing::{get, post},
     Router,
 };
 use clap::Parser;
@@ -37,11 +37,12 @@ use crate::platform_auth::build_gateway_auth;
 use crate::platform_v1::{
     platform_audit_logs, platform_cluster_status, platform_create_model, platform_create_pool,
     platform_delete_pool, platform_drain_node, platform_drain_replica, platform_evaluate_slo,
-    platform_get_canary, platform_get_deployment, platform_get_model, platform_get_operation,
-    platform_get_pool, platform_get_slo, platform_health_summary, platform_list_canaries,
-    platform_list_models, platform_list_nodes, platform_list_pools, platform_list_replicas,
-    platform_load_model, platform_operation_events, platform_put_deployment,
-    platform_scale_deployment, platform_stop_model, platform_update_pool, platform_whoami,
+    platform_evict_model, platform_get_canary, platform_get_deployment, platform_get_model,
+    platform_get_operation, platform_get_pool, platform_get_slo, platform_health_summary,
+    platform_list_canaries, platform_list_models, platform_list_nodes, platform_list_pools,
+    platform_list_replicas, platform_load_model, platform_operation_events,
+    platform_prefetch_model, platform_put_deployment, platform_scale_deployment,
+    platform_stop_model, platform_update_pool, platform_whoami,
 };
 use crate::platform_webhooks::{
     platform_create_webhook, platform_delete_webhook, platform_list_webhooks,
@@ -126,7 +127,10 @@ async fn main() {
     };
 
     let platform_routes = Router::new()
-        .route("/models", get(platform_list_models).post(platform_create_model))
+        .route(
+            "/models",
+            get(platform_list_models).post(platform_create_model),
+        )
         .route("/models/load", post(platform_load_model))
         .route("/models/:model_uid", get(platform_get_model))
         .route(
@@ -138,16 +142,24 @@ async fn main() {
             post(platform_scale_deployment),
         )
         .route("/models/:model_uid/stop", post(platform_stop_model))
+        .route("/models/:model_uid/prefetch", post(platform_prefetch_model))
+        .route("/models/:model_uid/evict", post(platform_evict_model))
         .route("/models/:model_uid/replicas", get(platform_list_replicas))
         .route("/nodes", get(platform_list_nodes))
         .route("/operations/:operation_id", get(platform_get_operation))
-        .route("/operations/:operation_id/events", get(platform_operation_events))
+        .route(
+            "/operations/:operation_id/events",
+            get(platform_operation_events),
+        )
         .route("/health/summary", get(platform_health_summary))
         .route("/cluster/status", get(platform_cluster_status))
         .route("/whoami", get(platform_whoami))
         .route("/replicas/drain", post(platform_drain_replica))
         .route("/nodes/:node_id/drain", post(platform_drain_node))
-        .route("/pools", get(platform_list_pools).post(platform_create_pool))
+        .route(
+            "/pools",
+            get(platform_list_pools).post(platform_create_pool),
+        )
         .route(
             "/pools/:pool_id",
             get(platform_get_pool)
@@ -155,12 +167,21 @@ async fn main() {
                 .delete(platform_delete_pool),
         )
         .route("/audit-logs", get(platform_audit_logs))
-        .route("/models/:model_uid/slo/evaluation", get(platform_evaluate_slo))
+        .route(
+            "/models/:model_uid/slo/evaluation",
+            get(platform_evaluate_slo),
+        )
         .route("/models/:model_uid/slo", get(platform_get_slo))
         .route("/canaries", get(platform_list_canaries))
         .route("/canaries/:canary_id", get(platform_get_canary))
-        .route("/webhooks", get(platform_list_webhooks).post(platform_create_webhook))
-        .route("/webhooks/:webhook_id", axum::routing::delete(platform_delete_webhook))
+        .route(
+            "/webhooks",
+            get(platform_list_webhooks).post(platform_create_webhook),
+        )
+        .route(
+            "/webhooks/:webhook_id",
+            axum::routing::delete(platform_delete_webhook),
+        )
         .with_state(st.clone());
 
     let secure_routes = Router::new()
