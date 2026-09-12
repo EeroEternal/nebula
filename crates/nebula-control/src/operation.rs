@@ -17,6 +17,8 @@ pub enum OperationKind {
     Deploy,
     Scale,
     Stop,
+    Prefetch,
+    Evict,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +86,31 @@ pub async fn create_operation(
     Ok(op)
 }
 
+pub async fn create_async_operation(
+    store: &dyn MetaStore,
+    kind: OperationKind,
+    model_uid: &str,
+    opts: OperationOptions,
+) -> Result<Operation, ServiceError> {
+    let now = now_ms();
+    let operation_id = format!("op_{}", Uuid::new_v4());
+    let op = Operation {
+        operation_id,
+        kind,
+        model_uid: model_uid.to_string(),
+        status: OperationStatus::Pending,
+        deployment_version: 0,
+        desired_replicas: 0,
+        ready_replicas: 0,
+        message: Some("queued".to_string()),
+        callback_url: opts.callback_url,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    put_operation(store, &op).await?;
+    Ok(op)
+}
+
 pub async fn get_operation(
     store: &dyn MetaStore,
     operation_id: &str,
@@ -113,6 +140,14 @@ pub async fn refresh_operation_status(
     store: &dyn MetaStore,
     op: &mut Operation,
 ) -> Result<(), ServiceError> {
+    if matches!(op.kind, OperationKind::Prefetch | OperationKind::Evict) {
+        op.updated_at_ms = now_ms();
+        if op.message.is_none() {
+            op.message = Some("queued".to_string());
+        }
+        return Ok(());
+    }
+
     let deployment = get_model_deployment(store, &op.model_uid).await?;
     let replicas = list_replicas(store, &op.model_uid).await?;
     let ready = count_ready_replicas(&replicas);
@@ -148,7 +183,10 @@ pub async fn refresh_operation_status(
         dep.replicas
     };
 
-    if replicas.iter().any(|r| r.status == nebula_common::EndpointStatus::Failed) {
+    if replicas
+        .iter()
+        .any(|r| r.status == nebula_common::EndpointStatus::Failed)
+    {
         op.status = OperationStatus::Failed;
         op.message = Some("one or more replicas failed".to_string());
         return Ok(());
@@ -169,14 +207,22 @@ pub async fn refresh_operation_status(
             } else if ready >= dep.replicas {
                 op.status = OperationStatus::Succeeded;
                 op.message = None;
-            } else if ready > 0 || replicas.iter().any(|r| {
-                r.status == nebula_common::EndpointStatus::Starting
-            }) {
+            } else if ready > 0
+                || replicas
+                    .iter()
+                    .any(|r| r.status == nebula_common::EndpointStatus::Starting)
+            {
                 op.status = OperationStatus::Running;
                 op.message = None;
             } else {
                 op.status = OperationStatus::Pending;
                 op.message = None;
+            }
+        }
+        OperationKind::Prefetch | OperationKind::Evict => {
+            op.status = OperationStatus::Running;
+            if op.message.is_none() {
+                op.message = Some("queued".to_string());
             }
         }
     }

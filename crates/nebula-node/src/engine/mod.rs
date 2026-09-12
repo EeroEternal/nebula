@@ -7,7 +7,9 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nebula_common::{static_capability, validate_engine_type, EngineCapability, EndpointStats, ModelConfig};
+use nebula_common::{
+    static_capability, validate_engine_type, EndpointStats, EngineCapability, ModelConfig,
+};
 use tokio::fs;
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};

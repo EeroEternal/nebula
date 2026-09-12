@@ -36,7 +36,11 @@ struct ProbeTarget {
 /// Outcome of container-level probe before HTTP health check.
 enum ContainerProbeOutcome {
     Ok,
-    Failed { reason: String, alert_type: EngineAlertType, exit_code: Option<i32> },
+    Failed {
+        reason: String,
+        alert_type: EngineAlertType,
+        exit_code: Option<i32>,
+    },
 }
 
 fn probe_handle(base_url: &str) -> EngineHandle {
@@ -75,7 +79,8 @@ impl RestartBudget {
 
     /// Returns Ok(cooldown_secs) if a restart is allowed, Err(reason) if budget exhausted.
     fn try_consume(&mut self, now: u64) -> Result<u64, &'static str> {
-        if self.window_start_ms == 0 || now.saturating_sub(self.window_start_ms) > RESTART_BUDGET_WINDOW_MS
+        if self.window_start_ms == 0
+            || now.saturating_sub(self.window_start_ms) > RESTART_BUDGET_WINDOW_MS
         {
             self.window_start_ms = now;
             self.attempts = 0;
@@ -123,10 +128,7 @@ mod budget_tests {
 }
 
 fn engine_probe_alert_key(node_id: &str, model_uid: &str, replica_id: u32) -> String {
-    format!(
-        "/alerts/{}/engine_{}_{}",
-        node_id, model_uid, replica_id
-    )
+    format!("/alerts/{}/engine_{}_{}", node_id, model_uid, replica_id)
 }
 
 async fn emit_engine_probe_alert(
@@ -539,8 +541,8 @@ pub async fn heartbeat_loop(
                     for &idx in indices {
                         if let Some(gpu) = gpus_for_metrics.iter().find(|g| g.index == idx) {
                             if gpu.memory_total_mb > 0 {
-                                let pct = gpu.memory_used_mb as f64 * 100.0
-                                    / gpu.memory_total_mb as f64;
+                                let pct =
+                                    gpu.memory_used_mb as f64 * 100.0 / gpu.memory_total_mb as f64;
                                 if pct >= GPU_MEMORY_PRESSURE_PCT {
                                     let msg = format!(
                                         "GPU {idx} memory at {pct:.1}% ({}/{})",
@@ -561,10 +563,9 @@ pub async fn heartbeat_loop(
                                         exit_code: None,
                                         created_at_ms: now_ms(),
                                     };
-                                    let _ = emit_engine_probe_alert(
-                                        &store, &alert, ttl_ms, lease_id,
-                                    )
-                                    .await;
+                                    let _ =
+                                        emit_engine_probe_alert(&store, &alert, ttl_ms, lease_id)
+                                            .await;
                                     probe_alert_emitted = true;
                                 }
                             }
@@ -593,8 +594,7 @@ pub async fn heartbeat_loop(
                                 exit_code: None,
                                 created_at_ms: now_ms(),
                             };
-                            let _ =
-                                emit_engine_probe_alert(&store, &alert, ttl_ms, lease_id).await;
+                            let _ = emit_engine_probe_alert(&store, &alert, ttl_ms, lease_id).await;
                             probe_alert_emitted = true;
                         }
                         scrape_outcomes.push(ScrapeOutcomeRecord {
@@ -689,8 +689,7 @@ pub async fn heartbeat_loop(
                     if let Some(info) = ep_guard.get_mut(&target.rkey) {
                         info.status = EndpointStatus::Unhealthy;
                         if info.status_detail.is_none() {
-                            info.status_detail =
-                                Some("engine health probe failed".to_string());
+                            info.status_detail = Some("engine health probe failed".to_string());
                         }
                         let detail = info.status_detail.clone();
                         let _ = register_endpoint(&store, info, ttl_ms, lease_id).await;

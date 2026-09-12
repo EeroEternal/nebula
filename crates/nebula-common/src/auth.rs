@@ -126,13 +126,7 @@ pub fn parse_auth_from_env() -> AuthConfig {
                     continue;
                 }
             };
-            tokens.insert(
-                token.to_string(),
-                TokenBinding {
-                    role,
-                    tenant_id,
-                },
-            );
+            tokens.insert(token.to_string(), TokenBinding { role, tenant_id });
         }
     }
 
@@ -216,10 +210,7 @@ where
             entry.count = 0;
         }
         if entry.count >= auth.limit_per_minute {
-            return Ok(quota_denied(
-                "tenant_rps_exceeded",
-                "rate limited",
-            ));
+            return Ok(quota_denied("tenant_rps_exceeded", "rate limited"));
         }
         entry.count += 1;
     }
@@ -365,8 +356,14 @@ mod tests {
         let auth = parse_auth_from_env();
 
         assert!(auth.enabled);
-        assert_eq!(auth.tokens.get("admin-token").map(|b| b.role), Some(Role::Admin));
-        assert_eq!(auth.tokens.get("view-token").map(|b| b.role), Some(Role::Viewer));
+        assert_eq!(
+            auth.tokens.get("admin-token").map(|b| b.role),
+            Some(Role::Admin)
+        );
+        assert_eq!(
+            auth.tokens.get("view-token").map(|b| b.role),
+            Some(Role::Viewer)
+        );
         assert!(auth.tokens.get("admin-token").unwrap().tenant_id.is_none());
     }
 
@@ -374,10 +371,7 @@ mod tests {
     fn parses_token_with_tenant_binding() {
         let _guard = env_lock().lock().unwrap();
         clear_auth_env();
-        std::env::set_var(
-            "NEBULA_AUTH_TOKENS",
-            "t1-token:operator:acme,legacy:admin",
-        );
+        std::env::set_var("NEBULA_AUTH_TOKENS", "t1-token:operator:acme,legacy:admin");
         std::env::set_var("NEBULA_MULTI_TENANT", "1");
 
         let auth = parse_auth_from_env();
@@ -418,12 +412,7 @@ mod tests {
 
         let missing = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .uri("/x")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(missing.status(), axum::http::StatusCode::UNAUTHORIZED);

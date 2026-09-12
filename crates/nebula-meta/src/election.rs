@@ -120,9 +120,7 @@ pub async fn election_step<S: MetaStore + ?Sized>(
                     expires_at_ms: now.saturating_add(cfg.ttl_ms),
                 };
                 let val = serde_json::to_vec(&renewed)?;
-                let (ok, _) = store
-                    .compare_and_swap(&cfg.key, rev, val)
-                    .await?;
+                let (ok, _) = store.compare_and_swap(&cfg.key, rev, val).await?;
                 if ok {
                     if !gate.is_leader() || gate.epoch() != record.epoch {
                         info!(

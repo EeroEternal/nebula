@@ -44,8 +44,7 @@ async fn main() -> anyhow::Result<()> {
         &args.common.log_format,
     );
 
-    let store =
-        nebula_meta::EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
+    let store = nebula_meta::EtcdMetaStore::connect(&args.common.etcd_endpoints()).await?;
 
     let http = control_plane_http_client().unwrap_or_else(|e| {
         tracing::error!(error=%e, "failed to build reqwest client");
@@ -182,24 +181,33 @@ async fn main() -> anyhow::Result<()> {
                 .put(handlers_v2::upsert_slo)
                 .delete(handlers_v2::delete_slo),
         )
-        .route(
-            "/slos/:model_uid/evaluate",
-            get(handlers_v2::evaluate_slo),
-        )
+        .route("/slos/:model_uid/evaluate", get(handlers_v2::evaluate_slo))
         .route("/diagnostics/events", get(handlers_v2::list_diagnostics))
         .route("/benchmarks/workloads", get(handlers_v2::list_workloads))
         .route(
             "/benchmarks/runs",
             get(handlers_v2::list_benchmark_runs).post(handlers_v2::ingest_benchmark_run),
         )
-        .route("/benchmarks/runs/:run_id", get(handlers_v2::get_benchmark_run))
-        .route("/benchmarks/profiles", get(handlers_v2::list_benchmark_profiles))
-        .route("/benchmarks/recommend", post(handlers_v2::recommend_engines))
+        .route(
+            "/benchmarks/runs/:run_id",
+            get(handlers_v2::get_benchmark_run),
+        )
+        .route(
+            "/benchmarks/profiles",
+            get(handlers_v2::list_benchmark_profiles),
+        )
+        .route(
+            "/benchmarks/recommend",
+            post(handlers_v2::recommend_engines),
+        )
         .route(
             "/model-profiles/:profile_id",
             get(handlers_v2::get_model_profile).put(handlers_v2::put_model_profile),
         )
-        .route("/selection/recommend", post(handlers_v2::selection_recommend))
+        .route(
+            "/selection/recommend",
+            post(handlers_v2::selection_recommend),
+        )
         .route("/selection/draft", post(handlers_v2::selection_draft))
         .route("/selection/apply", post(handlers_v2::selection_apply))
         .route(

@@ -59,12 +59,7 @@ pub fn build_capacity_snapshot(
             .count() as u32;
         let unhealthy = eps
             .iter()
-            .filter(|e| {
-                matches!(
-                    e.status,
-                    EndpointStatus::Unhealthy | EndpointStatus::Failed
-                )
-            })
+            .filter(|e| matches!(e.status, EndpointStatus::Unhealthy | EndpointStatus::Failed))
             .count() as u32;
 
         let model_stats: Vec<&EndpointStats> = stats
@@ -72,7 +67,10 @@ pub fn build_capacity_snapshot(
             .filter(|s| s.model_uid == dep.model_uid)
             .collect();
         let pending_total: u64 = model_stats.iter().map(|s| s.pending_requests).sum();
-        let kv_vals: Vec<f64> = model_stats.iter().filter_map(|s| s.kv_cache_usage).collect();
+        let kv_vals: Vec<f64> = model_stats
+            .iter()
+            .filter_map(|s| s.kv_cache_usage)
+            .collect();
         let avg_kv_usage = if kv_vals.is_empty() {
             None
         } else {

@@ -19,13 +19,13 @@ use nebula_meta::MetaStore;
 
 use crate::auth::AuthContext;
 use crate::interface::{
-    anthropic_json_to_openai_chat, check_tooling_gate, openai_chat_json_to_anthropic,
-    parse_openai_sse_chunk, payload_too_large_response, responses_json_to_openai_chat,
-    maybe_normalize_router_error, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
+    anthropic_json_to_openai_chat, check_tooling_gate, maybe_normalize_router_error,
+    openai_chat_json_to_anthropic, parse_openai_sse_chunk, payload_too_large_response,
+    responses_json_to_openai_chat, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
-    append_headers, classify_reqwest_error, forward_upstream_response, prepare_upstream,
-    prepare_upstream_from_json, post_router_chat,
+    append_headers, classify_reqwest_error, forward_upstream_response, post_router_chat,
+    prepare_upstream, prepare_upstream_from_json,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
@@ -78,14 +78,7 @@ pub async fn create_responses(
         stream: Some(resp_req.stream),
     };
 
-    proxy_chat_as_responses(
-        st,
-        prepared,
-        chat_body,
-        builder_seed,
-        resp_req.stream,
-    )
-    .await
+    proxy_chat_as_responses(st, prepared, chat_body, builder_seed, resp_req.stream).await
 }
 
 /// Anthropic Messages API → OpenAI chat via UniGateway protocol → Router → Anthropic-shaped reply.

@@ -70,9 +70,7 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         metrics.scale_down_total.load(Ordering::Relaxed),
         if is_leader { 1 } else { 0 },
         epoch,
-        metrics
-            .placement_cas_conflict_total
-            .load(Ordering::Relaxed),
+        metrics.placement_cas_conflict_total.load(Ordering::Relaxed),
     );
     (axum::http::StatusCode::OK, body)
 }
@@ -109,7 +107,12 @@ mod tests {
 
         let resp = app
             .clone()
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -122,7 +125,12 @@ mod tests {
                 leader,
             });
         let resp = app
-            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);

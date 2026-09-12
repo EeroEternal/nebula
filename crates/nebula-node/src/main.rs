@@ -20,7 +20,9 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 
 use crate::args::Args;
 use crate::heartbeat::heartbeat_loop;
-use crate::reconcile::{has_local_replica, local_assignments, reconcile_model, ReplicaKey, RunningModel};
+use crate::reconcile::{
+    has_local_replica, local_assignments, reconcile_model, ReplicaKey, RunningModel,
+};
 
 /// Interval for periodic full reconcile (drain progression + watch gap fill).
 const PERIODIC_RECONCILE_INTERVAL: Duration = Duration::from_secs(3);
@@ -137,7 +139,11 @@ async fn main() -> anyhow::Result<()> {
     let lease_ttl_secs = ((args.heartbeat_ttl_ms as f64 / 1000.0).ceil() as i64).max(10);
     let lease_id = match store.grant_lease(lease_ttl_secs).await {
         Ok(id) => {
-            tracing::info!(lease_id=id, ttl_secs=lease_ttl_secs, "granted etcd lease for node-ephemeral keys");
+            tracing::info!(
+                lease_id = id,
+                ttl_secs = lease_ttl_secs,
+                "granted etcd lease for node-ephemeral keys"
+            );
             store.spawn_lease_keepalive(id, lease_ttl_secs);
             Some(id)
         }

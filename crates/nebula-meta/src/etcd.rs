@@ -50,7 +50,8 @@ impl EtcdMetaStore {
     /// Background keepalive for a lease. Interval ≈ ttl/3 (min 2s).
     pub fn spawn_lease_keepalive(&self, lease_id: i64, ttl_secs: i64) {
         let store = self.clone();
-        let interval = Duration::from_secs(((ttl_secs.max(3)) / 3) as u64).max(Duration::from_secs(2));
+        let interval =
+            Duration::from_secs(((ttl_secs.max(3)) / 3) as u64).max(Duration::from_secs(2));
         tokio::spawn(async move {
             loop {
                 if let Err(e) = store.keep_alive_once(lease_id).await {

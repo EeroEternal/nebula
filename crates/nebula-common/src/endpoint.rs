@@ -86,19 +86,19 @@ struct EndpointStatsDe {
 
 impl From<EndpointStatsDe> for EndpointStats {
     fn from(d: EndpointStatsDe) -> Self {
-        let kv_cache_usage = d.kv_cache_usage.or_else(|| {
-            match (d.kv_cache_used_bytes, d.kv_cache_free_bytes) {
-                (Some(used), Some(free)) => {
-                    let total = used.saturating_add(free);
-                    if total > 0 {
-                        Some(used as f64 / total as f64)
-                    } else {
-                        None
+        let kv_cache_usage =
+            d.kv_cache_usage
+                .or_else(|| match (d.kv_cache_used_bytes, d.kv_cache_free_bytes) {
+                    (Some(used), Some(free)) => {
+                        let total = used.saturating_add(free);
+                        if total > 0 {
+                            Some(used as f64 / total as f64)
+                        } else {
+                            None
+                        }
                     }
-                }
-                _ => None,
-            }
-        });
+                    _ => None,
+                });
         Self {
             model_uid: d.model_uid,
             replica_id: d.replica_id,

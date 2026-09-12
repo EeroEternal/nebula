@@ -3,12 +3,11 @@
 use serde::{Deserialize, Serialize};
 
 use nebula_common::{
-    default_compatibility_rules, CapacitySnapshot, DiagnosticEvent, ModelSlo,
-    NodeStatus, PlacementPlan, PlacementRejectReason, SloEvaluation, DesiredState,
-    CompatibilityRule,
+    default_compatibility_rules, CapacitySnapshot, CompatibilityRule, DesiredState,
+    DiagnosticEvent, ModelSlo, NodeStatus, PlacementPlan, PlacementRejectReason, SloEvaluation,
 };
-use nebula_meta::MetaStore;
 use nebula_control::{now_ms, ServiceError};
+use nebula_meta::MetaStore;
 
 pub use nebula_control::list_compat_rules;
 
@@ -40,7 +39,9 @@ pub async fn put_compat_rule(
 pub async fn delete_compat_rule(store: &dyn MetaStore, id: &str) -> Result<(), ServiceError> {
     let key = compat_key(id);
     if store.get(&key).await?.is_none() {
-        return Err(ServiceError::NotFound(format!("compat rule {id} not found")));
+        return Err(ServiceError::NotFound(format!(
+            "compat rule {id} not found"
+        )));
     }
     store.delete(&key).await?;
     Ok(())
@@ -153,9 +154,7 @@ pub async fn hardware_inventory(store: &dyn MetaStore) -> Result<HardwareInvento
 }
 
 pub async fn capacity_snapshot(store: &dyn MetaStore) -> Result<CapacitySnapshot, ServiceError> {
-    use nebula_common::{
-        build_capacity_snapshot, EndpointInfo, EndpointStats, ModelDeployment,
-    };
+    use nebula_common::{build_capacity_snapshot, EndpointInfo, EndpointStats, ModelDeployment};
 
     let inv = hardware_inventory(store).await?;
     let gpu_total = inv.nodes.iter().map(|n| n.gpus.len() as u32).sum::<u32>();
@@ -220,7 +219,10 @@ pub struct UpsertSloRequest {
     pub notes: Option<String>,
 }
 
-pub async fn get_slo(store: &dyn MetaStore, model_uid: &str) -> Result<Option<ModelSlo>, ServiceError> {
+pub async fn get_slo(
+    store: &dyn MetaStore,
+    model_uid: &str,
+) -> Result<Option<ModelSlo>, ServiceError> {
     match store.get(&slo_key(model_uid)).await? {
         Some((data, _)) => Ok(Some(serde_json::from_slice(&data)?)),
         None => Ok(None),
@@ -243,8 +245,14 @@ pub async fn upsert_slo(
     req: UpsertSloRequest,
 ) -> Result<ModelSlo, ServiceError> {
     // Model must exist.
-    if store.get(&format!("/models/{model_uid}/spec")).await?.is_none() {
-        return Err(ServiceError::NotFound(format!("model {model_uid} not found")));
+    if store
+        .get(&format!("/models/{model_uid}/spec"))
+        .await?
+        .is_none()
+    {
+        return Err(ServiceError::NotFound(format!(
+            "model {model_uid} not found"
+        )));
     }
     let mut slo = get_slo(store, model_uid).await?.unwrap_or(ModelSlo {
         model_uid: model_uid.to_string(),
@@ -296,7 +304,9 @@ pub async fn upsert_slo(
 pub async fn delete_slo(store: &dyn MetaStore, model_uid: &str) -> Result<(), ServiceError> {
     let key = slo_key(model_uid);
     if store.get(&key).await?.is_none() {
-        return Err(ServiceError::NotFound(format!("slo for {model_uid} not found")));
+        return Err(ServiceError::NotFound(format!(
+            "slo for {model_uid} not found"
+        )));
     }
     store.delete(&key).await?;
     Ok(())
@@ -306,10 +316,7 @@ pub async fn delete_slo(store: &dyn MetaStore, model_uid: &str) -> Result<(), Se
 ///
 /// Histograms are filtered by `slo.model_uid` so multi-model scrapes do not
 /// collapse to a bogus zero quantile (see `parse_histogram_quantile_filtered`).
-pub fn evaluate_slo_from_router_metrics(
-    slo: &ModelSlo,
-    metrics_text: &str,
-) -> SloEvaluation {
+pub fn evaluate_slo_from_router_metrics(slo: &ModelSlo, metrics_text: &str) -> SloEvaluation {
     nebula_control::evaluate_slo_from_router_metrics(slo, metrics_text)
 }
 

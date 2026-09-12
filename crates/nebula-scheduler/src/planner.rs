@@ -46,10 +46,7 @@ async fn load_allowed_pool_nodes(
     Ok(Some(allowed_node_ids))
 }
 
-async fn load_image_platforms(
-    store: &EtcdMetaStore,
-    docker_image: Option<&str>,
-) -> Vec<String> {
+async fn load_image_platforms(store: &EtcdMetaStore, docker_image: Option<&str>) -> Vec<String> {
     let Some(wanted) = docker_image.map(str::trim).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
@@ -221,7 +218,10 @@ pub async fn select_node_and_gpus(
 
 #[allow(dead_code)] // kept for offline tooling / emergency rebuilds of legacy plans
 pub fn build_extra_args(req: &ModelRequest) -> Option<Vec<String>> {
-    build_extra_args_from_config(req.request.engine_type.as_deref(), req.request.config.as_ref()?)
+    build_extra_args_from_config(
+        req.request.engine_type.as_deref(),
+        req.request.config.as_ref()?,
+    )
 }
 
 /// Build engine CLI extra args from a ModelConfig for the given engine dialect.
@@ -344,11 +344,17 @@ pub fn merge_config(
                 .served_model_name
                 .clone()
                 .or_else(|| b.served_model_name.clone()),
-            kv_cache_dtype: o.kv_cache_dtype.clone().or_else(|| b.kv_cache_dtype.clone()),
+            kv_cache_dtype: o
+                .kv_cache_dtype
+                .clone()
+                .or_else(|| b.kv_cache_dtype.clone()),
             trust_remote_code: o.trust_remote_code.or(b.trust_remote_code),
             enable_expert_parallel: o.enable_expert_parallel.or(b.enable_expert_parallel),
             block_size: o.block_size.or(b.block_size),
-            tokenizer_mode: o.tokenizer_mode.clone().or_else(|| b.tokenizer_mode.clone()),
+            tokenizer_mode: o
+                .tokenizer_mode
+                .clone()
+                .or_else(|| b.tokenizer_mode.clone()),
         }),
     }
 }

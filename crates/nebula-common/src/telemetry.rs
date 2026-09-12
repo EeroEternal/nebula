@@ -28,8 +28,7 @@ pub fn init_tracing(
     opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
     let use_json = log_format.eq_ignore_ascii_case("json");
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let Some(endpoint) = otlp_endpoint else {
         init_stdout_only(use_json, env_filter, service_name);

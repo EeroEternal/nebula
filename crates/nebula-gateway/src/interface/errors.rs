@@ -128,7 +128,11 @@ mod tests {
     fn payload_too_large_envelope() {
         let resp = payload_too_large_response();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        let v = openai_error_json("invalid_request_error", "payload_too_large", "request body too large");
+        let v = openai_error_json(
+            "invalid_request_error",
+            "payload_too_large",
+            "request body too large",
+        );
         assert_eq!(v["error"]["type"], "invalid_request_error");
         assert_eq!(v["error"]["code"], "payload_too_large");
     }
@@ -143,9 +147,7 @@ mod tests {
         assert_eq!(plain.status(), StatusCode::TOO_MANY_REQUESTS);
 
         let json_body = br#"{"error":{"message":"x","type":"rate_limit_error"}}"#;
-        assert!(
-            maybe_normalize_router_error(StatusCode::TOO_MANY_REQUESTS, json_body).is_none()
-        );
+        assert!(maybe_normalize_router_error(StatusCode::TOO_MANY_REQUESTS, json_body).is_none());
     }
 
     #[test]

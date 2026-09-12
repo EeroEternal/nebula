@@ -55,7 +55,10 @@ impl SglangEngine {
     fn split_bin(&self) -> (String, Vec<String>) {
         let parts: Vec<&str> = self.config.bin.split_whitespace().collect();
         if parts.is_empty() {
-            return ("python3".into(), vec!["-m".into(), "sglang.launch_server".into()]);
+            return (
+                "python3".into(),
+                vec!["-m".into(), "sglang.launch_server".into()],
+            );
         }
         let program = parts[0].to_string();
         let prefix = parts[1..].iter().map(|s| (*s).to_string()).collect();

@@ -61,7 +61,9 @@ pub async fn list_pools(store: &dyn MetaStore) -> Result<Vec<HardwarePool>, Serv
 pub async fn get_pool(store: &dyn MetaStore, pool_id: &str) -> Result<HardwarePool, ServiceError> {
     match store.get(&pool_key(pool_id)).await? {
         Some((val, _)) => Ok(serde_json::from_slice(&val)?),
-        None => Err(ServiceError::NotFound(format!("pool '{pool_id}' not found"))),
+        None => Err(ServiceError::NotFound(format!(
+            "pool '{pool_id}' not found"
+        ))),
     }
 }
 
@@ -75,7 +77,9 @@ pub async fn create_pool(
     }
     let key = pool_key(pool_id);
     if store.get(&key).await?.is_some() {
-        return Err(ServiceError::Conflict(format!("pool '{pool_id}' already exists")));
+        return Err(ServiceError::Conflict(format!(
+            "pool '{pool_id}' already exists"
+        )));
     }
 
     let pool = HardwarePool {
@@ -131,7 +135,9 @@ pub async fn update_pool(
 pub async fn delete_pool(store: &dyn MetaStore, pool_id: &str) -> Result<(), ServiceError> {
     let key = pool_key(pool_id);
     if store.get(&key).await?.is_none() {
-        return Err(ServiceError::NotFound(format!("pool '{pool_id}' not found")));
+        return Err(ServiceError::NotFound(format!(
+            "pool '{pool_id}' not found"
+        )));
     }
     store.delete(&key).await?;
     Ok(())

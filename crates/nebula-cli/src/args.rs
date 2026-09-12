@@ -13,11 +13,7 @@ pub struct Args {
     pub gateway_url: String,
 
     /// BFF URL (console API for templates, cache, v2 model CRUD)
-    #[arg(
-        long,
-        env = "NEBULA_BFF_URL",
-        default_value = "http://127.0.0.1:18090"
-    )]
+    #[arg(long, env = "NEBULA_BFF_URL", default_value = "http://127.0.0.1:18090")]
     pub bff_url: String,
 
     /// Gateway API token (Authorization: Bearer)

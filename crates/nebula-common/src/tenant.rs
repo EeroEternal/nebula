@@ -11,6 +11,7 @@ pub enum TenantDenyCode {
     ConcurrencyExceeded,
     TokenBudgetExceeded,
     ModelDenied,
+    PinAdmissionExceeded,
 }
 
 impl TenantDenyCode {
@@ -21,6 +22,7 @@ impl TenantDenyCode {
             Self::ConcurrencyExceeded => "tenant_concurrency_exceeded",
             Self::TokenBudgetExceeded => "tenant_token_budget_exceeded",
             Self::ModelDenied => "tenant_model_denied",
+            Self::PinAdmissionExceeded => "tenant_pin_admission_exceeded",
         }
     }
 
@@ -31,6 +33,7 @@ impl TenantDenyCode {
             Self::ConcurrencyExceeded => "tenant concurrency quota exceeded",
             Self::TokenBudgetExceeded => "tenant token budget exceeded",
             Self::ModelDenied => "model not allowed for tenant",
+            Self::PinAdmissionExceeded => "tenant pin admission quota exceeded",
         }
     }
 }
@@ -44,6 +47,8 @@ pub struct TenantQuota {
     pub max_concurrency: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens_per_minute: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pin_requests_per_minute: Option<u64>,
     /// When set, only listed model names / uids are allowed. Empty vec denies all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
@@ -55,6 +60,7 @@ impl Default for TenantQuota {
             rps_per_minute: None,
             max_concurrency: None,
             max_tokens_per_minute: None,
+            max_pin_requests_per_minute: None,
             allowed_models: None,
         }
     }
@@ -199,11 +205,7 @@ pub fn admit_static(tenant: &Tenant, model: Option<&str>) -> AdmitDecision {
 }
 
 /// Estimate cost from token counts and a price row.
-pub fn estimate_cost(
-    price: &CostPriceConfig,
-    input_tokens: u64,
-    output_tokens: u64,
-) -> f64 {
+pub fn estimate_cost(price: &CostPriceConfig, input_tokens: u64, output_tokens: u64) -> f64 {
     (input_tokens as f64 / 1000.0) * price.price_per_1k_input
         + (output_tokens as f64 / 1000.0) * price.price_per_1k_output
 }

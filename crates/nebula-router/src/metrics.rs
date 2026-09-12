@@ -242,6 +242,42 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
          nebula_router_circuit_open_total {}\n",
         st.router.circuit_open_total(),
     ));
+    body.push_str(
+        "# HELP nebula_router_hint_total Hint lifecycle counters by stage.\n\
+         # TYPE nebula_router_hint_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_router_hint_total{{stage=\"received\"}} {}\n",
+        st.router.hint_received_total(),
+    ));
+    body.push_str(&format!(
+        "nebula_router_hint_total{{stage=\"adopted\"}} {}\n",
+        st.router.hint_adopted_total(),
+    ));
+    body.push_str(&format!(
+        "nebula_router_hint_total{{stage=\"conflict_rejected\"}} {}\n",
+        st.router.hint_conflict_rejected_total(),
+    ));
+    body.push_str(&format!(
+        "nebula_router_hint_total{{stage=\"expired\"}} {}\n",
+        st.router.hint_expired_total(),
+    ));
+    body.push_str(&format!(
+        "nebula_router_hint_total{{stage=\"stale_degraded\"}} {}\n",
+        st.router.hint_stale_degraded_total(),
+    ));
+    body.push_str(
+        "# HELP nebula_router_affinity_hit_total Affinity/hint hits by kind.\n\
+         # TYPE nebula_router_affinity_hit_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_router_affinity_hit_total{{kind=\"session\"}} {}\n",
+        st.router.session_affinity_hit_total(),
+    ));
+    body.push_str(&format!(
+        "nebula_router_affinity_hit_total{{kind=\"prefix_hint\"}} {}\n",
+        st.router.prefix_hint_hit_total(),
+    ));
 
     // Per-model counters
     body.push_str(

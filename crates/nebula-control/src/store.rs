@@ -16,7 +16,9 @@ pub async fn get_model_spec(
 ) -> Result<ModelSpec, ServiceError> {
     match store.get(&format!("/models/{model_uid}/spec")).await? {
         Some((data, _)) => serde_json::from_slice(&data).map_err(Into::into),
-        None => Err(ServiceError::NotFound(format!("model '{model_uid}' not found"))),
+        None => Err(ServiceError::NotFound(format!(
+            "model '{model_uid}' not found"
+        ))),
     }
 }
 
@@ -71,7 +73,10 @@ pub fn is_valid_model_uid(uid: &str) -> bool {
     true
 }
 
-pub fn infer_model_source(model_name: &str, model_path: Option<&str>) -> nebula_common::ModelSource {
+pub fn infer_model_source(
+    model_name: &str,
+    model_path: Option<&str>,
+) -> nebula_common::ModelSource {
     let pathish = model_path.unwrap_or(model_name);
     if pathish.starts_with('/') || pathish.starts_with('.') {
         nebula_common::ModelSource::Local

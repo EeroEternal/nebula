@@ -23,11 +23,7 @@ use crate::output::{
 };
 
 fn platform_url(gateway_url: &str, path: &str) -> String {
-    format!(
-        "{}/platform/v1{}",
-        gateway_url.trim_end_matches('/'),
-        path
-    )
+    format!("{}/platform/v1{}", gateway_url.trim_end_matches('/'), path)
 }
 
 fn bff_v2_url(bff_url: &str, path: &str) -> String {
@@ -109,10 +105,7 @@ async fn main() -> Result<()> {
                 model_uid,
                 replicas,
             } => {
-                let url = bff_v2_url(
-                    &args.bff_url,
-                    &format!("/models/{}/start", model_uid),
-                );
+                let url = bff_v2_url(&args.bff_url, &format!("/models/{}/start", model_uid));
                 let body = serde_json::json!({ "replicas": replicas });
                 let resp = auth(client.post(&url), token.as_ref())
                     .json(&body)
@@ -160,7 +153,10 @@ async fn main() -> Result<()> {
                     .send()
                     .await?;
                 if resp.status().is_success() {
-                    println!("✓ Model '{}' scale accepted → {} replicas", model_uid, replicas);
+                    println!(
+                        "✓ Model '{}' scale accepted → {} replicas",
+                        model_uid, replicas
+                    );
                     println!("{}", resp.text().await?);
                 } else {
                     eprintln!("✗ Failed to scale model: {}", resp.text().await?);
@@ -261,10 +257,7 @@ async fn main() -> Result<()> {
                 uid,
                 replicas,
             } => {
-                let url = bff_v2_url(
-                    &args.bff_url,
-                    &format!("/templates/{}/deploy", template_id),
-                );
+                let url = bff_v2_url(&args.bff_url, &format!("/templates/{}/deploy", template_id));
                 let mut body = serde_json::json!({ "replicas": replicas });
                 if let Some(u) = &uid {
                     body["model_uid"] = serde_json::json!(u);
@@ -369,10 +362,7 @@ async fn main() -> Result<()> {
             .await?;
         }
         Command::Scale { id, replicas } => {
-            let url = platform_url(
-                &args.gateway_url,
-                &format!("/models/{id}/deployment/scale"),
-            );
+            let url = platform_url(&args.gateway_url, &format!("/models/{id}/deployment/scale"));
             let body = serde_json::json!({ "replicas": replicas });
             let resp = auth(client.post(&url), token.as_ref())
                 .json(&body)

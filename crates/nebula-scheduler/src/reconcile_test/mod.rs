@@ -108,7 +108,11 @@ mod tests {
         };
         // Old leader still holds an older revision snapshot (rev-1) — CAS must fail.
         let (ok, _) = store
-            .compare_and_swap(&key, rev.saturating_sub(1), serde_json::to_vec(&stale).unwrap())
+            .compare_and_swap(
+                &key,
+                rev.saturating_sub(1),
+                serde_json::to_vec(&stale).unwrap(),
+            )
             .await
             .unwrap();
         assert!(!ok);

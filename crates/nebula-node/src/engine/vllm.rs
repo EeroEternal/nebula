@@ -408,8 +408,7 @@ impl Engine for VllmEngine {
         let engine_model = if healthy {
             match http.get(&models_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    let v: serde_json::Value =
-                        resp.json().await.unwrap_or(serde_json::Value::Null);
+                    let v: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
                     v.get("data")
                         .and_then(|d| d.get(0))
                         .and_then(|m| m.get("id"))
@@ -688,8 +687,7 @@ mod docker_mount_tests {
 
     #[test]
     fn model_dir_prefix_remaps_container_path() {
-        let (host, container) =
-            resolve_docker_model_mount("/data/models/foo/bar", "/data/models");
+        let (host, container) = resolve_docker_model_mount("/data/models/foo/bar", "/data/models");
         assert_eq!(host, "/data/models/foo/bar");
         assert_eq!(container, "/model");
     }

@@ -3,8 +3,8 @@
 use serde::Deserialize;
 
 use nebula_common::{
-    estimate_cost, summarize_usage, usage_window_start_ms, CostPriceConfig, Tenant, TenantCostSummary,
-    TenantQuota, UsageWindow,
+    estimate_cost, summarize_usage, usage_window_start_ms, CostPriceConfig, Tenant,
+    TenantCostSummary, TenantQuota, UsageWindow,
 };
 use nebula_meta::MetaStore;
 
@@ -27,7 +27,9 @@ pub async fn list_tenants(store: &dyn MetaStore) -> Result<Vec<Tenant>, ServiceE
 pub async fn get_tenant(store: &dyn MetaStore, tenant_id: &str) -> Result<Tenant, ServiceError> {
     match store.get(&tenant_key(tenant_id)).await? {
         Some((data, _)) => Ok(serde_json::from_slice(&data)?),
-        None => Err(ServiceError::NotFound(format!("tenant {tenant_id} not found"))),
+        None => Err(ServiceError::NotFound(format!(
+            "tenant {tenant_id} not found"
+        ))),
     }
 }
 

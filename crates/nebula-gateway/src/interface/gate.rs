@@ -1,9 +1,6 @@
 //! C5 tooling capability gate.
 
-use axum::{
-    http::StatusCode,
-    response::Response,
-};
+use axum::{http::StatusCode, response::Response};
 use nebula_common::{tool_calling_for_engine, ModelSpec, SupportLevel};
 use nebula_meta::MetaStore;
 use serde_json::{json, Value};

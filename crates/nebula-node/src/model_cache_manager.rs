@@ -35,6 +35,16 @@ struct ModelGcRequest {
     requested_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelPrefetchRequest {
+    operation_id: String,
+    model_uid: String,
+    model_name: String,
+    model_source: ModelSource,
+    model_path: Option<String>,
+    requested_at_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Cache scan loop (spawned at startup)
 // ---------------------------------------------------------------------------
@@ -64,6 +74,7 @@ async fn scan_and_report(
     ttl_ms: u64,
     lease_id: Option<i64>,
 ) -> anyhow::Result<()> {
+    process_prefetch_requests(store, node_id, model_dir).await;
     process_gc_requests(store, node_id, model_dir).await;
 
     let base = Path::new(model_dir);
@@ -132,6 +143,56 @@ async fn scan_and_report(
 
     tracing::debug!(model_count, total_cache_bytes, "model cache scan complete");
     Ok(())
+}
+
+async fn process_prefetch_requests(store: &EtcdMetaStore, node_id: &str, model_dir: &str) {
+    let prefix = format!("/model_prefetch_requests/{node_id}/");
+    let requests = match store.list_prefix(&prefix).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error=%e, node_id, "failed to list prefetch requests");
+            return;
+        }
+    };
+
+    for (key, data, _) in requests {
+        let req: ModelPrefetchRequest = match serde_json::from_slice(&data) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error=%e, %key, "invalid prefetch request payload");
+                let _ = store.delete(&key).await;
+                continue;
+            }
+        };
+        match download_model_if_needed(
+            store,
+            node_id,
+            &req.model_uid,
+            &req.model_name,
+            &req.model_source,
+            req.model_path.as_deref(),
+            model_dir,
+            0,
+            None,
+            false,
+        )
+        .await
+        {
+            Ok(path) => tracing::info!(
+                operation_id=%req.operation_id,
+                model_uid=%req.model_uid,
+                cache_path=%path,
+                "prefetch request completed"
+            ),
+            Err(e) => tracing::warn!(
+                error=%e,
+                operation_id=%req.operation_id,
+                model_uid=%req.model_uid,
+                "prefetch request failed"
+            ),
+        }
+        let _ = store.delete(&key).await;
+    }
 }
 
 async fn process_gc_requests(store: &EtcdMetaStore, node_id: &str, model_dir: &str) {

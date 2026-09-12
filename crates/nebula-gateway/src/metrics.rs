@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::state::AppState;
 use axum::{
     body::Body,
     extract::State,
@@ -7,7 +8,6 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use crate::state::AppState;
 
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -26,10 +26,15 @@ pub struct Metrics {
     pub tenant_denied_model: AtomicU64,
     pub tenant_denied_token_budget: AtomicU64,
     pub tenant_denied_disabled: AtomicU64,
+    pub tenant_denied_pin_admission: AtomicU64,
     pub request_too_large_total: AtomicU64,
     pub upstream_error_connect_total: AtomicU64,
     pub upstream_error_timeout_total: AtomicU64,
     pub upstream_error_other_total: AtomicU64,
+    pub hint_received_total: AtomicU64,
+    pub hint_forwarded_total: AtomicU64,
+    pub hint_rejected_total: AtomicU64,
+    pub hint_untrusted_total: AtomicU64,
     /// Client disconnect / explicit abort — not counted as 5xx error budget.
     pub requests_aborted_total: AtomicU64,
 }
@@ -53,7 +58,10 @@ impl Metrics {
                     .fetch_add(1, Ordering::Relaxed);
             }
             "tenant_disabled" => {
-                self.tenant_denied_disabled
+                self.tenant_denied_disabled.fetch_add(1, Ordering::Relaxed);
+            }
+            "tenant_pin_admission_exceeded" => {
+                self.tenant_denied_pin_admission
                     .fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
@@ -160,6 +168,10 @@ pub fn render_metrics(metrics: &Metrics) -> String {
         metrics.tenant_denied_disabled.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
+        "nebula_gateway_tenant_denied_total{{reason=\"pin_admission\"}} {}\n",
+        metrics.tenant_denied_pin_admission.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
         "# HELP nebula_gateway_request_too_large_total Requests rejected due to max body size.\n\
          # TYPE nebula_gateway_request_too_large_total counter\n\
          nebula_gateway_request_too_large_total {}\n",
@@ -177,6 +189,26 @@ pub fn render_metrics(metrics: &Metrics) -> String {
     body.push_str(&format!(
         "nebula_gateway_upstream_error_total{{kind=\"other\"}} {}\n",
         metrics.upstream_error_other_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(
+        "# HELP nebula_gateway_hint_total Hint processing counters by stage.\n\
+         # TYPE nebula_gateway_hint_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_hint_total{{stage=\"received\"}} {}\n",
+        metrics.hint_received_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_hint_total{{stage=\"forwarded\"}} {}\n",
+        metrics.hint_forwarded_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_hint_total{{stage=\"rejected\"}} {}\n",
+        metrics.hint_rejected_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_hint_total{{stage=\"untrusted\"}} {}\n",
+        metrics.hint_untrusted_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_gateway_requests_aborted_total Client disconnect/abort (excluded from 5xx error budget).\n\

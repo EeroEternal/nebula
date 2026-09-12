@@ -50,7 +50,12 @@ pub const DEFAULT_NODE_PLATFORM: &str = "nvidia-cuda";
 
 /// Resolve node platform: explicit field, else `NEBULA_NODE_PLATFORM`, else default.
 pub fn resolve_node_platform(node: &NodeStatus) -> String {
-    if let Some(p) = node.platform.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(p) = node
+        .platform
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return p.to_string();
     }
     std::env::var("NEBULA_NODE_PLATFORM")

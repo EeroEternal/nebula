@@ -358,8 +358,14 @@ mod tests {
         assert_eq!(ev.status, SloComplianceStatus::Breaching);
         assert!(ev.suggestions.iter().any(|s| s.kind == "review_load"));
         assert!(ev.suggestions.iter().any(|s| s.kind == "check_endpoints"));
-        assert!(ev.suggestions.iter().any(|s| s.message.contains("ttft_p95")));
-        assert!(!ev.suggestions.iter().any(|s| s.message.to_lowercase().contains("selection")));
+        assert!(ev
+            .suggestions
+            .iter()
+            .any(|s| s.message.contains("ttft_p95")));
+        assert!(!ev
+            .suggestions
+            .iter()
+            .any(|s| s.message.to_lowercase().contains("selection")));
     }
 
     #[test]

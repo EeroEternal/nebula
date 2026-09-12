@@ -207,7 +207,9 @@ pub async fn fetch_audit_logs(
         _ => {
             return Err((
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(serde_json::json!({"error": "audit logging not configured (xtrace not set)"})),
+                axum::Json(
+                    serde_json::json!({"error": "audit logging not configured (xtrace not set)"}),
+                ),
             )
                 .into_response());
         }
