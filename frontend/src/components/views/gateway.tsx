@@ -15,6 +15,9 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useGatewayStats } from '@/hooks/useGatewayStats'
 import { cn } from '@/lib/utils'
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
 
 const WINDOW_OPTIONS = ['5m', '15m', '1h', '6h', '24h'] as const
 
@@ -99,10 +102,15 @@ export function GatewayView() {
   }, [trafficSummary, reliabilitySummary, latencySummary, protection])
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
+    <PageShell className="overflow-y-auto">
+    <PageContainer>
+      <PageHeader
+        title={t('gateway.title')}
+      />
+      <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('gateway.title')}</h2>
+        <div className="hidden">
+          <h2 className="sr-only">{t('gateway.title')}</h2>
           <p className="text-muted-foreground mt-2 flex items-center gap-2">
             <Shield className="h-4 w-4 text-primary" />
             {t('gateway.subtitle')}
@@ -186,9 +194,11 @@ export function GatewayView() {
         <ChartCard title={t('gateway.traffic')} data={chartData.traffic} color="oklch(70% 0.18 190)" window={windowValue} />
         <ChartCard title={t('gateway.reliability')} data={chartData.reliability} color="oklch(75% 0.12 280)" window={windowValue} />
         <ChartCard title={t('gateway.latency')} data={chartData.latency} color="oklch(68% 0.22 150)" window={windowValue} unit="ms" />
-        <ChartCard title={t('gateway.protection')} data={chartData.protection} color="oklch(60% 0.2 25)" window={windowValue} />
+        <ChartCard title={t('gateway.protection')} data={chartData.protection} color="hsl(var(--destructive))" window={windowValue} />
       </div>
-    </div>
+      </div>
+    </PageContainer>
+    </PageShell>
   )
 }
 

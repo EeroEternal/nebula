@@ -97,6 +97,18 @@ protoc --version
 cargo build --workspace --release
 ```
 
+## 本地 CI
+
+推送前在本机跑门禁（不再使用 GitHub Actions）：
+
+```bash
+./scripts/ci.sh
+# 可选：release 构建 gateway/router/bff + mock 引擎冒烟（需 docker compose / etcd）
+RUN_SMOKE=1 ./scripts/ci.sh
+```
+
+需要 `cargo`（`rust-toolchain.toml` 钉死 1.92）和 `protoc`。冒烟脚本见 `scripts/ci_smoke.sh`。
+
 ## 运行服务
 
 使用提供的脚本启动所有服务：

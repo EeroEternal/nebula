@@ -13,6 +13,11 @@ import { useModels } from '@/hooks/useModels'
 import { useAuthStore } from '@/store/useAuthStore'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
+
+
 import { useQuery } from '@tanstack/react-query'
 
 interface ModelSearchResult {
@@ -120,16 +125,9 @@ export function ModelCatalogView() {
   }
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('catalog.title')}</h2>
-          <p className="text-muted-foreground mt-2 flex items-center gap-2">
-            <Globe className="h-4 w-4 text-primary" />
-            {t('catalog.subtitle')}
-          </p>
-        </div>
-      </div>
+    <PageShell className="overflow-y-auto">
+    <PageContainer>
+      <PageHeader title={t('catalog.title')} />
 
       {activeDownloadUid && (
         <div className="bg-primary/5 border border-primary/20 rounded-xl p-5 flex items-center justify-between gap-4 rim-light animate-pulse">
@@ -385,6 +383,7 @@ export function ModelCatalogView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </PageContainer>
+    </PageShell>
   )
 }

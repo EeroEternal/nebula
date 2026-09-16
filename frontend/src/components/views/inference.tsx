@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, CartesianGrid, Tooltip } from "recharts";
-import { Activity, Zap, TrendingUp, Gauge, Timer, AlertTriangle, ShieldCheck, Server, Globe, BarChart3 } from "lucide-react";
+import { Zap, TrendingUp, Gauge, Timer, AlertTriangle, ShieldCheck, Server, Globe, BarChart3 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -12,6 +12,9 @@ import { cn } from "@/lib/utils";
 import type { EndpointStats } from "@/lib/types";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
 
 interface AccessMetrics {
   requests_total: number;
@@ -169,16 +172,10 @@ export function InferenceView() {
   };
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('inference.title')}</h2>
-          <p className="text-muted-foreground mt-2 flex items-center gap-2">
-            <Activity className="h-4 w-4 text-primary animate-signal" />
-            {t('inference.subtitle')}
-          </p>
-        </div>
-      </div>
+    <PageShell className="overflow-y-auto">
+    <PageContainer>
+      <PageHeader title={t('inference.title')} />
+      <div className="space-y-6 pb-6">
 
       {overloadedModels.length > 0 && (
         <div className="bg-destructive/5 border border-destructive/30 rounded-xl p-5 flex items-center gap-4 rim-light">
@@ -392,7 +389,9 @@ export function InferenceView() {
             </TableBody>
         </Table>
       </div>
-    </div>
+      </div>
+    </PageContainer>
+    </PageShell>
   );
 }
 

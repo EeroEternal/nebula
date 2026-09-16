@@ -23,6 +23,18 @@
 | [`versions/v1.5.0.md`](versions/v1.5.0.md) | v1.5.0 集成 Control API |
 | [`versions/v1.3.0.md`](versions/v1.3.0.md) / [`v1.1.0.md`](versions/v1.1.0.md) / [`v0.2.0.md`](versions/v0.2.0.md) | 历史版本说明 |
 
+## Agent 与 UI 规范（console-kit）
+
+给编码 Agent 与前端改动：按需加载，不要整目录塞进上下文。
+
+| 文档 | 说明 |
+|------|------|
+| [`../AGENTS.md`](../AGENTS.md) | Agent 站立约束与阅读地图（≤80 行） |
+| [`design.md`](design.md) | Admin UI 设计入口；章节在 `design/` |
+| [`ai/agents/docs-layout.md`](ai/agents/docs-layout.md) | `docs/` 目录生命周期 |
+| [`ai/cloud.md`](ai/cloud.md) | 本机/云端环境桥 |
+| [`dev/setup.md`](dev/setup.md) | 开发环境 |
+
 ## 架构与工程
 
 给研发看的设计与排期。

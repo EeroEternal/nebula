@@ -14,6 +14,9 @@ import { useCacheSummary } from '@/hooks/useCacheSummary'
 import { useAuthStore } from '@/store/useAuthStore'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
 
 export function ModelLibraryView() {
   const { t } = useI18n()
@@ -87,10 +90,13 @@ export function ModelLibraryView() {
   }
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
+    <PageShell className="overflow-y-auto">
+    <PageContainer>
+      <PageHeader title={t('library.title')} />
+      <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('library.title')}</h2>
+          <h2 className="sr-only">{t('library.title')}</h2>
           <p className="text-muted-foreground mt-2 flex items-center gap-2">
             <Database className="h-4 w-4 text-primary" />
             {t('library.subtitle')}
@@ -277,6 +283,8 @@ export function ModelLibraryView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+      </div>
+    </PageContainer>
+    </PageShell>
   )
 }

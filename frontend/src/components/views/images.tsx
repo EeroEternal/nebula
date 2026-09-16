@@ -13,6 +13,10 @@ import { useImages } from "@/hooks/useImages"
 import { useAuthStore } from "@/store/useAuthStore"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
+import { Card } from "@/components/ui/card"
 
 const StatusIcon = ({ status }: { status: string }) => {
   switch (status) {
@@ -111,36 +115,24 @@ export function ImagesView() {
     statuses.filter((s) => s.image_id === imageId)
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('images.title')}</h2>
-          <p className="text-muted-foreground mt-2 flex items-center gap-2">
-            <Container className="h-4 w-4 text-primary" />
-            {t('images.subtitle')}
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            className="h-11 px-4 bg-white/5 border-border/50 font-mono text-[10px] uppercase tracking-widest"
-          >
-            <RefreshCw className={cn("h-3.5 w-3.5 mr-2", isLoading ? "animate-spin" : "")} />
-            {t('common.refresh')}
-          </Button>
-          <Button
-            onClick={openCreate}
-            className="bg-primary text-primary-foreground rim-light h-11 px-6 font-bold uppercase tracking-widest text-xs"
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            {t('images.register')}
-          </Button>
-        </div>
-      </div>
-
-      <div className="bg-card/40 backdrop-blur-xl border border-border rounded-xl overflow-hidden">
+    <PageShell className="overflow-y-auto">
+    <PageContainer>
+      <PageHeader
+        title={t('images.title')}
+        action={
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => refetch()}>
+              <RefreshCw className={cn("h-3.5 w-3.5", isLoading ? "animate-spin" : "")} />
+              {t('common.refresh')}
+            </Button>
+            <Button onClick={openCreate}>
+              <Plus className="h-4 w-4" />
+              {t('images.register')}
+            </Button>
+          </div>
+        }
+      />
+      <Card className="gap-0 overflow-hidden py-0">
         <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between bg-white/5">
           <div className="flex items-center gap-2">
             <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground">
@@ -300,10 +292,10 @@ export function ImagesView() {
             )}
           </TableBody>
         </Table>
-      </div>
+      </Card>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="sm:max-w-[500px] bg-card/95 backdrop-blur-2xl border-border rim-light">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-[500px]">
           <DialogHeader>
             <DialogTitle className="font-mono uppercase tracking-tight text-2xl">
                {editingId ? t('images.updateTitle') : t('images.registerTitle')}
@@ -421,6 +413,7 @@ export function ImagesView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </PageContainer>
+    </PageShell>
   )
 }

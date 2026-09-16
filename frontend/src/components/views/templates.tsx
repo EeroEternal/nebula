@@ -1,5 +1,5 @@
 import { useState } from "react"
-import { Layers, Rocket, RefreshCw, Cpu, Layout, Info, Search, Loader2 } from "lucide-react"
+import { Layers, Rocket, RefreshCw, Cpu, Layout, Info, Loader2 } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -13,6 +13,10 @@ import { useTemplates } from "@/hooks/useTemplates"
 import { useAuthStore } from "@/store/useAuthStore"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
+import { Card } from "@/components/ui/card"
 import type { SVGProps } from "react"
 
 const EMPTY_DEPLOY_FORM = {
@@ -69,39 +73,25 @@ export function TemplatesView() {
   )
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
-        <div>
-          <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('templates.title')}</h2>
-          <p className="text-muted-foreground mt-2 flex items-center gap-2">
-            <Layers className="h-4 w-4 text-primary" />
-            {t('templates.subtitle')}
-          </p>
-        </div>
-        <div className="flex gap-3">
-          <div className="relative w-64 group">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground group-focus-within:text-primary transition-colors" />
-            <input
-              type="text"
-               placeholder={t('templates.filterPlaceholder')}
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-black/20 border border-border/50 rounded-lg pl-10 pr-4 py-2 text-xs font-mono focus:outline-none focus:border-primary/50 transition-all"
-            />
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => refetch()}
-            className="h-10 px-4 bg-white/5 border-border/50 font-mono text-[10px] uppercase tracking-widest"
-          >
-            <RefreshCw className={cn("h-3.5 w-3.5 mr-2", isLoading ? "animate-spin" : "")} />
+    <PageShell className="overflow-y-auto">
+    <PageContainer>
+      <PageHeader
+        title={t('templates.title')}
+        action={
+          <Button variant="outline" size="sm" onClick={() => refetch()}>
+            <RefreshCw className={cn("h-3.5 w-3.5", isLoading ? "animate-spin" : "")} />
             {t('common.refresh')}
           </Button>
-        </div>
-      </div>
-
-      <div className="bg-card/40 backdrop-blur-xl border border-border rounded-xl overflow-hidden">
+        }
+      />
+      <Card className="gap-0 overflow-hidden p-4 sm:p-6">
+          <div className="mb-4">
+            <Input
+              placeholder={t('templates.filterPlaceholder')}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
         <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between bg-white/5">
           <h3 className="text-xs font-bold font-mono uppercase tracking-widest text-muted-foreground">
             {t('templates.available')}
@@ -207,10 +197,10 @@ export function TemplatesView() {
             )}
           </TableBody>
         </Table>
-      </div>
+      </Card>
 
       <Dialog open={deployDialogOpen} onOpenChange={setDeployDialogOpen}>
-        <DialogContent className="sm:max-w-[500px] bg-card/95 backdrop-blur-2xl border-border rim-light">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-[500px]">
           <DialogHeader>
             <DialogTitle className="font-mono uppercase tracking-tight text-2xl flex items-center gap-3">
               <Rocket className="h-6 w-6 text-primary animate-signal" />
@@ -307,7 +297,8 @@ export function TemplatesView() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </PageContainer>
+    </PageShell>
   )
 }
 

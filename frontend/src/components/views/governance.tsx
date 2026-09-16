@@ -26,6 +26,9 @@ import { useAuthStore } from "@/store/useAuthStore"
 import { useI18n } from "@/lib/useI18n"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
 
 export function GovernanceView() {
     const { t } = useI18n()
@@ -259,18 +262,17 @@ export function GovernanceView() {
     }
 
     return (
-        <div className="space-y-8 animate-in fade-in duration-500">
-            <div className="flex justify-between items-end gap-4">
-                <div>
-                    <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">
-                        {t("governance.title")}
-                    </h2>
-                    <p className="text-muted-foreground mt-2">{t("governance.subtitle")}</p>
-                </div>
-                <Button variant="outline" size="sm" onClick={() => void refresh()}>
-                    {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                </Button>
-            </div>
+        <PageShell className="overflow-y-auto">
+        <PageContainer>
+            <PageHeader
+                title={t("governance.title")}
+                action={
+                    <Button variant="outline" size="sm" onClick={() => void refresh()}>
+                        {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                    </Button>
+                }
+            />
+            <div className="space-y-6 pb-6">
 
             <section className="bg-card/40 border border-border rounded-xl overflow-hidden">
                 <div className="px-6 py-4 border-b border-border/50 flex items-center justify-between bg-white/5">
@@ -826,6 +828,8 @@ export function GovernanceView() {
                     </TableBody>
                 </Table>
             </section>
-        </div>
+            </div>
+        </PageContainer>
+        </PageShell>
     )
 }

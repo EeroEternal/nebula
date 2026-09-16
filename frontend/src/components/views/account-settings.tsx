@@ -109,13 +109,8 @@ export function AccountSettingsView({ token, user, onOpenSecuritySettings }: Acc
   }
 
   return (
-    <div className="max-w-2xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
-      <div>
-        <h2 className="text-2xl font-bold text-foreground">{t('account.title')}</h2>
-        <p className="text-sm text-muted-foreground mt-1">{t('account.subtitle')}</p>
-      </div>
-
-      <div className="bg-card border border-border rounded-2xl p-6 space-y-5">
+    <div className="space-y-6">
+      <div className="space-y-5 rounded-lg border border-border bg-card p-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="h-9 w-9 rounded-xl bg-primary/10 text-primary flex items-center justify-center">

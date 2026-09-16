@@ -6,6 +6,11 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+### Changed
+- **Local CI:** `./scripts/ci.sh` replaces GitHub Actions (workspace tests + OpenAPI contract; `RUN_SMOKE=1` for mock-engine smoke).
+- **Agent kit:** Adopted console-kit standing rules (`AGENTS.md` ≤80 lines), `.agents/skills/`, `docs/design.md`, and local UI gates (`scripts/check_ui_stack.sh`, `scripts/check_admin_nav.sh`). Product UI remains `frontend/`; GitHub Actions are still forbidden.
+- **Admin UI kit:** Product pages use console-kit page types (`PageShell` / `PageHeader` / `StatCard` / entity lists). Settings is sectioned (session / profile / account / locale). Login remains Auth split.
+
 ## [1.8.0] - 2026-08-29
 
 ### Added

@@ -35,7 +35,7 @@ git clone --depth 1 https://github.com/EeroEternal/nebula.git
 
 声明式副本生命周期与路由；引擎能力与兼容矩阵；Model SLO / 诊断；Benchmark 推荐与 Canary；可选多租户配额与成本归因。Serving Cell（CellIngress）已下线。真机 GPU e2e 与多租户压测暂缓，见 [roadmap.md](docs/arch/roadmap.md)。
 
-全量单测：`cargo test --workspace`。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)。
+本地 CI：`./scripts/ci.sh`（`cargo test --workspace` + OpenAPI 契约；`RUN_SMOKE=1` 额外跑 mock 引擎冒烟）。架构见 [docs/arch/architecture.md](docs/arch/architecture.md)。
 
 ## Replit 开发工作流
 

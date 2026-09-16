@@ -15,6 +15,9 @@ import { EngineAlertsBanner } from "@/components/engine-alerts-banner"
 import { v2 } from "@/lib/api"
 import type { ModelDetailView, AggregatedModelState } from "@/lib/types"
 import { useI18n } from "@/lib/useI18n"
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
 
 const STATE_BADGE: Record<AggregatedModelState, { key: string; cls: string }> = {
     running: { key: "state.running", cls: "bg-success/10 text-success border-success/20" },
@@ -86,20 +89,16 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
     }
 
     return (
-        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700">
-            {/* Header */}
-            <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                    <Button variant="ghost" size="sm" onClick={onBack} className="rounded-xl">
-                        <ArrowLeft className="h-4 w-4 mr-1" /> {t('common.back')}
-                    </Button>
-                    <div>
-                        <h2 className="text-2xl font-bold text-foreground">{detail.model_uid}</h2>
-                        <p className="text-sm text-muted-foreground font-mono">{detail.model_name}</p>
-                    </div>
-                    <Badge className={cn("ml-2", st.cls)}>{t(st.key)}</Badge>
-                </div>
+        <PageShell className="overflow-y-auto">
+        <PageContainer>
+            <PageHeader
+                title={detail.model_uid}
+                action={
                 <div className="flex items-center gap-2">
+                    <Button variant="outline" size="sm" onClick={onBack}>
+                        <ArrowLeft className="h-4 w-4" /> {t('common.back')}
+                    </Button>
+                    <Badge variant={detail.state === 'running' ? 'success' : detail.state === 'failed' ? 'destructive' : 'secondary'}>{t(st.key)}</Badge>
                     <Button variant="outline" size="sm" className="rounded-xl" onClick={refresh} disabled={acting}>
                         <RefreshCw className="h-4 w-4" />
                     </Button>
@@ -124,9 +123,10 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                         </Button>
                     )}
                 </div>
-            </div>
+                }
+            />
 
-            {error && <p className="text-destructive text-sm bg-destructive/5 rounded-xl px-4 py-2">{error}</p>}
+            {error && <p className="text-sm text-destructive">{error}</p>}
 
             <EngineAlertsBanner token={token} modelUid={modelUid} />
 
@@ -275,7 +275,8 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                     </div>
                 </Section>
             )}
-        </div>
+        </PageContainer>
+        </PageShell>
     )
 }
 

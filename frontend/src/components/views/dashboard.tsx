@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
-import { Cpu, Activity, ArrowUpRight } from "lucide-react"
+import { Cpu, Activity, ArrowUpRight, Server, Globe } from "lucide-react"
 import { Link } from "react-router-dom"
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
@@ -17,9 +17,20 @@ import { useI18n } from "@/lib/useI18n"
 import { useClusterOverview } from "@/hooks/useClusterOverview"
 import { useEngineStats } from "@/hooks/useEngineStats"
 import { useAuthStore } from "@/store/useAuthStore"
-import { cn } from "@/lib/utils"
-
 import { Skeleton } from "@/components/ui/skeleton"
+import { PageShell } from "@/components/layout/page-shell"
+import { PageContainer } from "@/components/layout/page-container"
+import { PageHeader } from "@/components/layout/page-header"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { StatCard } from "@/components/ui/stat-card"
+import {
+    chartGridStroke,
+    chartTick,
+    chartTooltipStyle,
+    chartPrimary,
+    chartDestructive,
+    chartMuted,
+} from "@/lib/chart-theme"
 
 interface MetricPoint {
     timestamp: string
@@ -208,232 +219,155 @@ export function DashboardView() {
 
     if (overviewLoading && !overview) {
         return (
-            <div className="space-y-8">
-                <div className="flex justify-between items-end">
-                    <div className="space-y-2">
-                        <Skeleton className="h-8 w-64" />
-                        <Skeleton className="h-4 w-48" />
+            <PageShell className="overflow-y-auto">
+                <PageContainer>
+                    <PageHeader title={t('dashboard.title')} />
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        <Skeleton className="h-32 w-full rounded-lg" />
+                        <Skeleton className="h-32 w-full rounded-lg" />
+                        <Skeleton className="h-32 w-full rounded-lg" />
+                        <Skeleton className="h-32 w-full rounded-lg" />
                     </div>
-                    <div className="flex gap-8">
-                        <Skeleton className="h-10 w-16" />
-                        <Skeleton className="h-10 w-16" />
-                    </div>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                    <Skeleton className="h-32 w-full rounded-xl" />
-                    <Skeleton className="h-32 w-full rounded-xl" />
-                    <Skeleton className="h-32 w-full rounded-xl" />
-                    <Skeleton className="h-32 w-full rounded-xl" />
-                </div>
-                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    <Skeleton className="lg:col-span-2 h-80 w-full rounded-xl" />
-                    <Skeleton className="h-80 w-full rounded-xl" />
-                </div>
-            </div>
+                </PageContainer>
+            </PageShell>
         )
     }
 
     return (
-        <div className="space-y-8 animate-in fade-in duration-500">
-            {/* Header */}
-            <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
-                <div>
-                    <h2 className="text-3xl font-bold tracking-tight font-mono uppercase text-foreground">{t('dashboard.title')}</h2>
-                    <p className="text-muted-foreground mt-2 flex items-center gap-2">
-                        <Activity className="h-4 w-4 text-primary animate-signal" />
-                        {t('dashboard.subtitle')}
-                    </p>
-                </div>
-                <div className="flex gap-8">
-                    <div className="text-right">
-                        <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('nav.nodes')}</p>
-                        <p className="text-2xl font-mono font-bold text-foreground">{overview?.nodes.length || 0}</p>
-                    </div>
-                    <div className="text-right">
-                        <p className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('nav.endpoints')}</p>
-                        <p className="text-2xl font-mono font-bold text-primary">{overview?.endpoints.length || 0}</p>
-                    </div>
-                </div>
-            </div>
+        <PageShell className="overflow-y-auto">
+            <PageContainer>
+                <PageHeader title={t('dashboard.title')} />
+                <div className="space-y-6 pb-6">
+                    <EngineAlertsBanner token={token ?? undefined} />
 
-            {/* Probe / disk alert banners */}
-            <EngineAlertsBanner token={token ?? undefined} />
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                        <StatCard
+                            title={t('dashboard.gpuMemory')}
+                            value={`${Math.round(gpuStats.used / 1024)} GB`}
+                            subtitle={`/ ${Math.round(gpuStats.total / 1024)} GB · ${gpuUsagePct}%`}
+                            icon={Cpu}
+                        />
+                        <StatCard
+                            title={t('dashboard.avgUtilization')}
+                            value={hasGpuData ? `${gpuSummary.avgUtil}%` : "—"}
+                            subtitle={hasGpuData ? t('dashboard.gpusAcrossNodes', { gpus: gpuStats.count, nodes: overview?.nodes.length || 0 }) : t('dashboard.noGpuData')}
+                            icon={Activity}
+                        />
+                        <StatCard
+                            title={t('dashboard.activeEndpoints')}
+                            value={overview?.endpoints.length || 0}
+                            subtitle={overview?.endpoints.length ? t('dashboard.activeEndpointsCount', { count: overview.endpoints.length }) : t('dashboard.noEndpointsOnline')}
+                            icon={Globe}
+                        />
+                        <StatCard
+                            title={t('nav.nodes')}
+                            value={overview?.nodes.length || 0}
+                            subtitle={overview?.nodes.length ? t('dashboard.allNodesResponding') : t('dashboard.waitingForNodes')}
+                            icon={Server}
+                        />
+                    </div>
 
-            {/* Quick Stats Grid */}
-            <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-                <div className="relative overflow-hidden rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light group sm:p-6">
-                    <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
-                        <Cpu className="h-12 w-12" />
+                    <div className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-3">
+                        <Card className="min-w-0 gap-0 border-border py-0 shadow-sm lg:col-span-2">
+                            <CardHeader className="flex flex-row items-center justify-between px-5 pb-3 pt-5">
+                                <CardTitle>{t('dashboard.gpuTrend')}</CardTitle>
+                                <Badge variant="outline">{t('dashboard.live')}</Badge>
+                            </CardHeader>
+                            <CardContent className="h-[280px] px-5 pb-5">
+                                {gpuTrend.length === 0 ? (
+                                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t('dashboard.noTrendData')}</div>
+                                ) : (
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart data={gpuTrend}>
+                                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={chartGridStroke} />
+                                            <XAxis dataKey="time" axisLine={false} tickLine={false} tick={chartTick} />
+                                            <YAxis axisLine={false} tickLine={false} tick={chartTick} />
+                                            <Tooltip contentStyle={chartTooltipStyle} />
+                                            <Line type="monotone" dataKey="utilization" stroke={chartPrimary} strokeWidth={2} dot={false} name={t('dashboard.utilizationPct')} />
+                                            <Line type="monotone" dataKey="temperature" stroke={chartDestructive} strokeWidth={2} dot={false} name={t('dashboard.tempC')} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                )}
+                            </CardContent>
+                        </Card>
+                        <Card className="min-w-0 gap-0 border-border py-0 shadow-sm">
+                            <CardHeader className="px-5 pb-3 pt-5">
+                                <CardTitle>{t('dashboard.gpuMemoryUsage')}</CardTitle>
+                            </CardHeader>
+                            <CardContent className="h-[280px] px-5 pb-5">
+                                {gpuBarData.length === 0 ? (
+                                    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">{t('dashboard.noGpuData')}</div>
+                                ) : (
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <BarChart data={gpuBarData} layout="vertical">
+                                            <XAxis type="number" hide />
+                                            <YAxis dataKey="name" type="category" width={80} tick={chartTick} axisLine={false} tickLine={false} />
+                                            <Tooltip cursor={{ fill: "transparent" }} contentStyle={chartTooltipStyle} />
+                                            <Bar dataKey="memUsed" stackId="a" fill={chartPrimary} name={t('dashboard.used')} />
+                                            <Bar dataKey="memFree" stackId="a" fill={chartMuted} name={t('dashboard.free')} />
+                                        </BarChart>
+                                    </ResponsiveContainer>
+                                )}
+                            </CardContent>
+                        </Card>
                     </div>
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('dashboard.gpuMemory')}</p>
-                    <div className="flex items-baseline gap-2">
-                        <h3 className="text-2xl font-mono font-bold text-foreground">{Math.round(gpuStats.used / 1024)}GB</h3>
-                        <p className="text-xs text-muted-foreground font-mono">/ {Math.round(gpuStats.total / 1024)}GB</p>
-                    </div>
-                    <Progress value={gpuUsagePct} className="mt-4 h-1.5 bg-white/5" />
-                </div>
 
-                <div className="rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light sm:p-6">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('dashboard.avgUtilization')}</p>
-                    <h3 className="text-2xl font-mono font-bold text-foreground">{hasGpuData ? `${gpuSummary.avgUtil}%` : "—"}</h3>
-                    <div className="flex items-center gap-1.5 mt-4">
-                        <div className={cn("h-1.5 w-1.5 shrink-0 rounded-full", hasGpuData ? "bg-primary" : "bg-muted-foreground/50")} />
-                        <p className="line-clamp-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                            {hasGpuData ? t('dashboard.gpusAcrossNodes', { gpus: gpuStats.count, nodes: overview?.nodes.length || 0 }) : t('dashboard.noGpuData')}
-                        </p>
-                    </div>
+                    <Card className="gap-0 overflow-hidden border-border py-0 shadow-sm">
+                        <CardHeader className="flex flex-row items-center justify-between px-5 py-4">
+                            <CardTitle>{t('dashboard.activeEndpoints')}</CardTitle>
+                            <Link to="/endpoints" className="inline-flex items-center gap-1 text-sm text-primary hover:underline">
+                                {t('dashboard.viewAll')} <ArrowUpRight className="h-3.5 w-3.5" />
+                            </Link>
+                        </CardHeader>
+                        <CardContent className="px-0 pb-0">
+                            <Table>
+                                <TableHeader>
+                                    <TableRow>
+                                        <TableHead className="pl-5">{t('models.model')}</TableHead>
+                                        <TableHead>{t('endpoints.nodeGpu')}</TableHead>
+                                        <TableHead>{t('dashboard.resource')}</TableHead>
+                                        <TableHead>{t('endpoints.vram')}</TableHead>
+                                        <TableHead>{t('endpoints.kvCache')}</TableHead>
+                                        <TableHead>{t('common.status')}</TableHead>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {endpointRows.length === 0 ? (
+                                        <TableRow>
+                                            <TableCell colSpan={6} className="py-12 text-center text-sm text-muted-foreground">
+                                                {t('dashboard.noEndpointsOnline')}
+                                            </TableCell>
+                                        </TableRow>
+                                    ) : (
+                                        endpointRows.map((row) => (
+                                            <TableRow key={row.key} className="hover:bg-muted/50">
+                                                <TableCell className="pl-5 font-medium">{row.model}</TableCell>
+                                                <TableCell className="text-muted-foreground">{row.node}</TableCell>
+                                                <TableCell><Badge variant="outline">{row.gpu}</Badge></TableCell>
+                                                <TableCell className="tabular-nums text-muted-foreground">{row.memUsed}</TableCell>
+                                                <TableCell>
+                                                    <div className="flex items-center gap-3">
+                                                        <Progress value={row.kvPct > 0 ? row.kvPct : 0} className="h-1.5 w-20" />
+                                                        <span className="text-meta-sm tabular-nums text-muted-foreground">{row.kvPct >= 0 ? `${row.kvPct}%` : "—"}</span>
+                                                    </div>
+                                                </TableCell>
+                                                <TableCell>
+                                                    <Badge variant={row.statusTone === "success" ? "success" : row.statusTone === "destructive" ? "destructive" : "warning"}>
+                                                        {row.status || "unknown"}
+                                                    </Badge>
+                                                    {row.statusDetail ? (
+                                                        <p className="mt-1 max-w-[200px] truncate text-meta-sm text-muted-foreground" title={row.statusDetail}>{row.statusDetail}</p>
+                                                    ) : null}
+                                                </TableCell>
+                                            </TableRow>
+                                        ))
+                                    )}
+                                </TableBody>
+                            </Table>
+                        </CardContent>
+                    </Card>
                 </div>
-
-                <div className="rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light sm:p-6">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('dashboard.activeEndpoints')}</p>
-                    <h3 className="text-2xl font-mono font-bold text-foreground">{overview?.endpoints.length || 0}</h3>
-                    <div className="flex items-center gap-1.5 mt-4">
-                        <div className={cn("h-1.5 w-1.5 shrink-0 rounded-full", overview?.endpoints.length ? "bg-success" : "bg-muted-foreground/50")} />
-                        <p className="line-clamp-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                            {overview?.endpoints.length ? t('dashboard.activeEndpointsCount', { count: overview.endpoints.length }) : t('dashboard.noEndpointsOnline')}
-                        </p>
-                    </div>
-                </div>
-
-                <div className="rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl rim-light sm:p-6">
-                    <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-widest mb-1">{t('endpoints.meshHealth')}</p>
-                    <h3 className={cn("text-2xl font-mono font-bold", overview?.nodes.length ? "text-success" : "text-muted-foreground")}>{overview?.nodes.length ? "99.9%" : "—"}</h3>
-                    <div className="flex items-center gap-1.5 mt-4">
-                        <div className={cn("h-1.5 w-1.5 shrink-0 rounded-full", overview?.nodes.length ? "bg-success" : "bg-muted-foreground/50")} />
-                        <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                            {overview?.nodes.length ? t('dashboard.allNodesResponding') : t('dashboard.waitingForNodes')}
-                        </p>
-                    </div>
-                </div>
-            </div>
-
-            <div className="grid min-w-0 grid-cols-1 gap-4 lg:grid-cols-3">
-                {/* Trend Chart */}
-                <div className="min-w-0 rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl sm:p-6 lg:col-span-2">
-                    <div className="flex items-center justify-between mb-6">
-                        <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t('dashboard.gpuTrend')}</h4>
-                        <Badge variant="outline" className="font-mono text-[10px] border-primary/20 text-primary">{t('dashboard.live')}</Badge>
-                    </div>
-                    <div className="flex h-[280px] min-w-0 items-center justify-center">
-                        {gpuTrend.length === 0 ? (
-                            <p className="max-w-xs text-center text-xs leading-relaxed text-muted-foreground">{t('dashboard.noTrendData')}</p>
-                        ) : (
-                            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                                <LineChart data={gpuTrend}>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="oklch(30% 0.05 260 / 0.2)" />
-                                    <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "oklch(75% 0.02 260)" }} />
-                                    <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: "oklch(75% 0.02 260)" }} />
-                                    <Tooltip
-                                        contentStyle={{ backgroundColor: "oklch(22% 0.03 260)", border: "1px solid oklch(30% 0.05 260 / 0.5)", borderRadius: "8px", fontSize: "12px" }}
-                                        itemStyle={{ color: "oklch(98% 0.01 260)" }}
-                                    />
-                                    <Line type="monotone" dataKey="utilization" stroke="oklch(70% 0.18 190)" strokeWidth={2} dot={false} name={t('dashboard.utilizationPct')} />
-                                    <Line type="monotone" dataKey="temperature" stroke="oklch(60% 0.2 25)" strokeWidth={2} dot={false} name={t('dashboard.tempC')} />
-                                </LineChart>
-                            </ResponsiveContainer>
-                        )}
-                    </div>
-                </div>
-
-                {/* GPU Distribution Bar Chart */}
-                <div className="min-w-0 rounded-xl border border-border bg-card/40 p-5 backdrop-blur-xl sm:p-6">
-                    <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground mb-6">{t('dashboard.gpuMemoryUsage')}</h4>
-                    <div className="flex h-[280px] min-w-0 items-center justify-center">
-                        {gpuBarData.length === 0 ? (
-                            <p className="max-w-xs text-center text-xs leading-relaxed text-muted-foreground">{t('dashboard.noGpuData')}</p>
-                        ) : (
-                            <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0}>
-                                <BarChart data={gpuBarData} layout="vertical">
-                                    <XAxis type="number" hide />
-                                    <YAxis dataKey="name" type="category" width={80} tick={{ fontSize: 9, fill: "oklch(75% 0.02 260)" }} axisLine={false} tickLine={false} />
-                                    <Tooltip
-                                        cursor={{ fill: "transparent" }}
-                                        contentStyle={{ backgroundColor: "oklch(22% 0.03 260)", border: "1px solid oklch(30% 0.05 260 / 0.5)", borderRadius: "8px", fontSize: "12px" }}
-                                    />
-                                    <Bar dataKey="memUsed" stackId="a" fill="oklch(70% 0.18 190)" radius={[0, 0, 0, 0]} name={t('dashboard.used')} />
-                                    <Bar dataKey="memFree" stackId="a" fill="oklch(30% 0.03 260)" radius={[0, 4, 4, 0]} name={t('dashboard.free')} />
-                                </BarChart>
-                            </ResponsiveContainer>
-                        )}
-                    </div>
-                </div>
-            </div>
-
-            {/* Active Endpoints Table */}
-            <div className="bg-card/40 backdrop-blur-xl border border-border rounded-xl overflow-hidden">
-                <div className="flex items-center justify-between border-b border-border/50 bg-white/5 px-5 py-4 sm:px-6">
-                    <h4 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">{t('dashboard.activeEndpoints')}</h4>
-                    <Link to="/endpoints" className="flex items-center gap-1 text-[10px] font-bold uppercase text-primary hover:underline">
-                        {t('dashboard.viewAll')} <ArrowUpRight className="h-3 w-3" />
-                    </Link>
-                </div>
-                <div className="overflow-x-auto">
-                <Table>
-                    <TableHeader className="bg-black/20">
-                        <TableRow className="border-border/50 hover:bg-transparent">
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground px-6">{t('models.model')}</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.nodeGpu')}</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('dashboard.resource')}</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.vram')}</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('endpoints.kvCache')}</TableHead>
-                            <TableHead className="text-[10px] uppercase font-bold text-muted-foreground">{t('common.status')}</TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        {endpointRows.length === 0 ? (
-                            <TableRow>
-                                <TableCell colSpan={6} className="text-center py-12 text-muted-foreground font-mono text-xs uppercase tracking-widest">
-                                    {t('dashboard.noEndpointsOnline')}
-                                </TableCell>
-                            </TableRow>
-                        ) : (
-                            endpointRows.map((row) => (
-                                <TableRow key={row.key} className="border-border/40 hover:bg-white/5 transition-colors group">
-                                    <TableCell className="font-mono text-sm font-bold px-6 group-hover:text-primary transition-colors">{row.model}</TableCell>
-                                    <TableCell className="font-mono text-xs text-muted-foreground">{row.node}</TableCell>
-                                    <TableCell>
-                                        <Badge variant="outline" className="font-mono text-[10px] border-primary/20 text-primary uppercase">{row.gpu}</Badge>
-                                    </TableCell>
-                                    <TableCell className="font-mono text-xs text-muted-foreground">{row.memUsed}</TableCell>
-                                    <TableCell>
-                                        <div className="flex items-center gap-3">
-                                            <div className="flex-1 w-20 bg-white/5 h-1.5 rounded-full overflow-hidden">
-                                                <div
-                                                    className="bg-primary h-full transition-all"
-                                                    style={{ width: `${row.kvPct > 0 ? row.kvPct : 0}%` }}
-                                                />
-                                            </div>
-                                            <span className="text-[10px] font-mono text-muted-foreground">{row.kvPct >= 0 ? `${row.kvPct}%` : "—"}</span>
-                                        </div>
-                                    </TableCell>
-                                    <TableCell>
-                                        <div className="flex flex-col gap-1">
-                                            <div className="flex items-center gap-2">
-                                                <div className={cn(
-                                                    "w-1.5 h-1.5 rounded-full",
-                                                    row.statusTone === "success" ? "bg-success" : row.statusTone === "destructive" ? "bg-destructive animate-pulse" : "bg-warning animate-pulse"
-                                                )} />
-                                                <span className={cn(
-                                                    "text-[10px] uppercase font-bold tracking-wider",
-                                                    row.statusTone === "success" ? "text-success" : row.statusTone === "destructive" ? "text-destructive" : "text-warning"
-                                                )}>
-                                                    {row.status || "unknown"}
-                                                </span>
-                                            </div>
-                                            {row.statusDetail && (
-                                                <span className="text-[10px] text-muted-foreground truncate max-w-[200px]" title={row.statusDetail}>
-                                                    {row.statusDetail}
-                                                </span>
-                                            )}
-                                        </div>
-                                    </TableCell>
-                                </TableRow>
-                            ))
-                        )}
-                    </TableBody>
-                </Table>
-                </div>
-            </div>
-        </div>
+            </PageContainer>
+        </PageShell>
     )
 }

@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { I18nContext, type I18nContextValue, type Locale } from './i18n-context'
 
 export type { Locale } from './i18n-context'
+export type Language = Locale
 
 const STORAGE_KEY = 'nebula_locale'
 
@@ -23,6 +24,46 @@ const messages: Record<Locale, Record<string, string>> = {
     'common.all': '全部',
     'common.back': '返回',
     'common.n_a': '无',
+    'common.error': '出现错误',
+    'common.language': '语言',
+    'common.chinese': '中文',
+    'common.english': 'English',
+    'common.account': '账号',
+    'common.settings': '设置',
+    'common.logout': '退出登录',
+    'common.userMenu': '账号菜单',
+    'common.close': '关闭',
+    'common.empty': '暂无数据',
+    'common.selectPlaceholder': '请选择',
+    'common.scrollableHint': '可滚动',
+    'common.paginationSummary': '{start}–{end} / {total}',
+    'common.perPage': '每页',
+    'common.firstPage': '首页',
+    'common.previousPage': '上一页',
+    'common.morePages': '更多页',
+    'common.nextPage': '下一页',
+    'common.lastPage': '末页',
+    'common.jumpPlaceholder': '页码',
+    'common.jumpToPage': '跳转',
+    'datePicker.selectRange': '选择日期范围',
+    'datePicker.selectStart': '选择开始日期',
+    'datePicker.singleDayOrPickEnd': '已选当天，可再点结束日期',
+    'datePicker.clear': '清除日期',
+    'auth.productName': 'Nebula',
+    'auth.brandingTitle': '把控制台做对',
+    'auth.brandingSubtitle': '不要另起一套 UI',
+    'auth.brandingDescription': 'Nebula 运营控制台：模型、节点、网关与治理。',
+    'auth.statRules': '控制面',
+    'auth.statSkills': '数据面',
+    'auth.statScaffold': '高可用',
+    'auth.showPassword': '显示密码',
+    'auth.hidePassword': '隐藏密码',
+    'nav.showMore': '显示更多',
+    'nav.showLess': '收起',
+    'auth.noAccount': '还没有账号？',
+    'auth.hasAccount': '已有账号？',
+    'auth.registerNow': '去注册',
+    'auth.loginNow': '去登录',
 
     'lang.zh': '中文',
     'lang.en': 'English',
@@ -774,6 +815,46 @@ const messages: Record<Locale, Record<string, string>> = {
     'common.all': 'All',
     'common.back': 'Back',
     'common.n_a': 'n/a',
+    'common.error': 'Something went wrong',
+    'common.language': 'Language',
+    'common.chinese': '中文',
+    'common.english': 'English',
+    'common.account': 'Account',
+    'common.settings': 'Settings',
+    'common.logout': 'Log out',
+    'common.userMenu': 'Account menu',
+    'common.close': 'Close',
+    'common.empty': 'No data',
+    'common.selectPlaceholder': 'Select',
+    'common.scrollableHint': 'Scrollable',
+    'common.paginationSummary': '{start}–{end} of {total}',
+    'common.perPage': 'Per page',
+    'common.firstPage': 'First page',
+    'common.previousPage': 'Previous page',
+    'common.morePages': 'More pages',
+    'common.nextPage': 'Next page',
+    'common.lastPage': 'Last page',
+    'common.jumpPlaceholder': 'Page',
+    'common.jumpToPage': 'Go',
+    'datePicker.selectRange': 'Select date range',
+    'datePicker.selectStart': 'Select start date',
+    'datePicker.singleDayOrPickEnd': 'Day selected. Click another day to set the end.',
+    'datePicker.clear': 'Clear dates',
+    'auth.productName': 'Nebula',
+    'auth.brandingTitle': 'Ship the console',
+    'auth.brandingSubtitle': "don't invent a second UI",
+    'auth.brandingDescription': 'Nebula operator console for models, nodes, gateway, and governance.',
+    'auth.statRules': 'Control plane',
+    'auth.statSkills': 'Data plane',
+    'auth.statScaffold': 'High availability',
+    'auth.showPassword': 'Show password',
+    'auth.hidePassword': 'Hide password',
+    'nav.showMore': 'Show more',
+    'nav.showLess': 'Show less',
+    'auth.noAccount': "Don't have an account?",
+    'auth.hasAccount': 'Already have an account?',
+    'auth.registerNow': 'Create one',
+    'auth.loginNow': 'Sign in',
 
     'app.loadingSession': 'Loading session...',
     'app.searchPlaceholder': 'Search models, nodes...',
@@ -1523,13 +1604,37 @@ const interpolate = (template: string, vars?: Record<string, string | number>) =
   return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => String(vars[key] ?? ''))
 }
 
+let currentLocale: Locale = 'zh'
+
+/** Kit-compatible lookup: `zh`/`en` table, then visible fallback, then the key. */
+export function t(key: string, fallback?: string): string {
+  const value = messages[currentLocale]?.[key] ?? messages.zh[key] ?? messages.en[key]
+  if (value) return value
+  if (fallback && fallback !== 'zh' && fallback !== 'en') return fallback
+  return key
+}
+
+export function useI18n() {
+  const ctx = useContext(I18nContext)
+  if (!ctx) {
+    throw new Error('useI18n must be used within I18nProvider')
+  }
+  return {
+    ...ctx,
+    language: ctx.locale,
+    setLanguage: ctx.setLocale,
+  }
+}
+
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => {
     const saved = localStorage.getItem(STORAGE_KEY)
     return saved === 'en' || saved === 'zh' ? saved : 'zh'
   })
+  currentLocale = locale
 
   const setLocale = (next: Locale) => {
+    currentLocale = next
     setLocaleState(next)
     localStorage.setItem(STORAGE_KEY, next)
     document.documentElement.lang = next === 'zh' ? 'zh-CN' : 'en'
