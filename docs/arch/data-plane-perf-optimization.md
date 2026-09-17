@@ -18,7 +18,7 @@ Nebula 采用 Rust + etcd 构建，架构上天然实现了「控制面与数据
 ## 2. 核心性能瓶颈剖析
 
 ### 2.1 瓶颈 1：Gateway → Router 的内部双跳 HTTP 转发
-- **现状**：
+- **现状（Phase 1 前）**：
   在 `crates/nebula-gateway/src/handlers.rs` 中，外部请求先进入 Gateway（8081），校验通过后由 `st.http.post(&url).send()` 转发至 `nebula-router`（18081），Router 选路后再发送给后端 vLLM 容器。
 - **代价**：
   - 数据链路多了一次本地 TCP / Loopback 网络栈流转；
@@ -93,11 +93,20 @@ Client ------> [ Gateway (内嵌 In-Process Router) ] (HTTP) --------> [ vLLM En
 
 ## 4. 实施规划（Roadmap）
 
-| 阶段 | 目标 | 涉及模块 | 预期成果 |
-| :--- | :--- | :--- | :--- |
-| **Phase 1** | **嵌入式 Router 合并（单跳直通）** | `nebula-gateway`<br>`nebula-router` | 消除网关与路由间的内部 HTTP，单请求基础延迟降低 2~5ms |
-| **Phase 2** | **零拷贝流式 Body 转发** | `nebula-gateway/src/handlers.rs` | 200K 超长输入内存峰值降低 90%，消除大包排队等待 |
-| **Phase 3** | **KV 亲和与加权分流增强** | `nebula-router/src/strategy/` | 多副本混合高并发场景下 P99 尾延迟降低 30% |
+| 阶段 | 目标 | 涉及模块 | 预期成果 | 状态 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Phase 1** | **嵌入式 Router 合并（单跳直通）** | `nebula-gateway`<br>`nebula-router` | 消除网关与路由间的内部 HTTP，单请求基础延迟降低 2~5ms | ✅ 已实现（unreleased） |
+| **Phase 2** | **零拷贝流式 Body 转发** | `nebula-gateway/src/handlers.rs` | 200K 超长输入内存峰值降低 90%，消除大包排队等待 | ⏳ 待排期 |
+| **Phase 3** | **KV 亲和与加权分流增强** | `nebula-router/src/strategy/` | 多副本混合高并发场景下 P99 尾延迟降低 30% | ⏳ 待排期 |
+
+### Phase 1 实现说明
+
+- **共享数据面核心**：选路 + 重试 + 熔断 + 上游转发逻辑提取为 `nebula_router::proxy::route_and_send`，SSE/非 SSE 响应包装与可观测统一由 `nebula_router::proxy::forward_routed` 承担，避免双实现。
+- **进程内同步**：`nebula-router` 的 `sync` 模块（`/endpoints/`、`/stats/`、`/placements/`、`/models/` 四个 watch loop）已提升为库能力（`nebula_router::sync`），Gateway 在进程内启动同一组 loop，权威状态仍来自 etcd，不引入第二权威。
+- **开关与回退**：默认 `NEBULA_EMBEDDED_ROUTER=true`（单跳）；置 `false` 时 Gateway 仍按 `--router-url` 走外部 Router（保留既有部署形态）。`NEBULA_ROUTING_STRATEGY` 控制进程内选路策略。
+- **可观测**：进程内 Router 复用 Gateway 的 `DualWriteEmitter`（metric prefix `nebula_router`），Gateway `/metrics` 合并输出 `nebula_gateway_*` 与 `nebula_router_*` / `nebula_route_*`。
+  - `/v1/responses`、`/v1/messages` 经协议适配后自行消费上游 body，其 per-model 延迟经由 `ResponseObserver` 记录；per-model 请求计数以 Gateway 聚合指标为准。
+- **边界**：仍为「Gateway = 协议/鉴权/审计/租户准入；Router = 选路 + 代理」的职责划分，折叠的是进程边界而非职责边界；外部 Router 仍可独立部署。
 
 ---
 

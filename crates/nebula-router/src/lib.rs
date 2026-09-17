@@ -7,7 +7,10 @@ use nebula_common::{
     EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext, InferenceHint, ModelSpec,
 };
 
+pub mod metrics;
+pub mod proxy;
 pub mod strategy;
+pub mod sync;
 
 use strategy::{Candidate, LeastPending, RoutingStrategy};
 

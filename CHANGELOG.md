@@ -6,6 +6,9 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- **Embedded Router (data-plane Phase 1):** `nebula-gateway` runs the router in-process, collapsing the inference hot path to a single hop `Gateway → Engine` (no internal `Gateway → Router` HTTP). Enabled by default; set `NEBULA_EMBEDDED_ROUTER=false` to fall back to `--router-url`. The gateway now watches `/endpoints/`, `/stats/`, `/placements/`, and `/models/` and exposes the embedded router's `nebula_router_*` / `nebula_route_*` metrics on its own `/metrics`. The shared routing/forwarding core lives in `nebula_router::proxy`.
+
 ### Changed
 - **Local CI:** `./scripts/ci.sh` replaces GitHub Actions (workspace tests + OpenAPI contract; `RUN_SMOKE=1` for mock-engine smoke).
 - **Agent kit:** Adopted console-kit standing rules (`AGENTS.md` ≤80 lines), `.agents/skills/`, `docs/design.md`, and local UI gates (`scripts/check_ui_stack.sh`, `scripts/check_admin_nav.sh`). Product UI remains `frontend/`; GitHub Actions are still forbidden.

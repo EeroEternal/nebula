@@ -1,8 +1,6 @@
 mod args;
 mod handlers;
-mod metrics;
 mod state;
-mod sync;
 
 use std::sync::Arc;
 
@@ -15,10 +13,11 @@ use clap::Parser;
 use nebula_common::proxy_http_client;
 
 use crate::args::Args;
-use crate::handlers::{healthz, proxy_chat_completions};
-use crate::metrics::{metrics_handler, track_requests};
+use crate::handlers::{healthz, metrics_handler, proxy_chat_completions, track_requests};
 use crate::state::AppState;
-use crate::sync::{endpoints_sync_loop, models_sync_loop, placement_sync_loop, stats_sync_loop};
+use nebula_router::sync::{
+    endpoints_sync_loop, models_sync_loop, placement_sync_loop, stats_sync_loop,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -78,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     });
 
-    let metrics = Arc::new(metrics::Metrics::default());
+    let metrics = Arc::new(nebula_router::metrics::Metrics::default());
     let dual_write = nebula_common::DualWriteEmitter::from_env(
         "nebula-router",
         args.common.xtrace_url.as_deref(),

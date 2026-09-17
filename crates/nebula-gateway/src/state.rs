@@ -3,6 +3,7 @@ use std::sync::Arc;
 use nebula_common::admission::TenantAdmission;
 use nebula_common::DualWriteEmitter;
 use nebula_meta::EtcdMetaStore;
+use nebula_router::proxy::ProxyConfig;
 
 use crate::audit::AuditWriter;
 use crate::engine::EngineClient;
@@ -26,6 +27,11 @@ pub struct AppState {
     pub xtrace_token: Option<String>,
     pub bff_url: String,
     pub tenant_admission: TenantAdmission,
+    /// In-process router (Phase 1 embedded router: single-hop Gateway → Engine).
+    pub router: Arc<nebula_router::Router>,
+    pub router_metrics: Arc<nebula_router::metrics::Metrics>,
+    pub proxy_cfg: ProxyConfig,
+    pub embed_router: bool,
 }
 
 impl AsRef<nebula_common::auth::AuthConfig> for AppState {

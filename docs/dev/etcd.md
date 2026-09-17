@@ -27,6 +27,8 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 | `/idempotency/` | Gateway | Gateway | **短 TTL**（~24h）；Control POST 幂等键 |
 | `/nebula/election/…` | Scheduler | Scheduler | lease + CAS fencing |
 
+> 默认 `NEBULA_EMBEDDED_ROUTER=true` 时，Gateway 进程内启动 Router 的 watch loop；表中「Router」消费者即 Gateway 自身，权威状态与外部 Router 模式完全一致（仍为单写者 + 内存缓存）。
+
 `/stats/` 只含实时控制字段，历史观测不进 etcd（见 [`stats.md`](./stats.md)）。
 
 ## B. 节点运维附属（应进，非热路径）

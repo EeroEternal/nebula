@@ -1,16 +1,12 @@
+//! Router observability primitives shared by the standalone `nebula-router` binary and the
+//! embedded in-process router inside `nebula-gateway`.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use axum::{
-    body::Body,
-    extract::State,
-    http::Request,
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
 use dashmap::DashMap;
 
-use crate::state::AppState;
+use crate::Router;
 
 /// Fixed histogram buckets (seconds), Prometheus standard for latency.
 const HISTOGRAM_BUCKETS: &[f64] = &[
@@ -155,92 +151,89 @@ impl Metrics {
     }
 }
 
-pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
+/// Render the full Prometheus text body for router-level metrics.
+///
+/// Shared by the standalone router `/metrics` endpoint and the embedded-router path inside the
+/// gateway (which also exposes its own `nebula_gateway_*` surface).
+pub fn render(metrics: &Metrics, router: &Router) -> String {
     let mut body = String::new();
 
-    // Global counters
     body.push_str(&format!(
         "# HELP nebula_router_requests_total Total requests handled by router.\n\
          # TYPE nebula_router_requests_total counter\n\
          nebula_router_requests_total {}\n",
-        st.metrics.requests_total.load(Ordering::Relaxed),
+        metrics.requests_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_requests_inflight Currently in-flight requests.\n\
          # TYPE nebula_router_requests_inflight gauge\n\
          nebula_router_requests_inflight {}\n",
-        st.metrics.requests_inflight.load(Ordering::Relaxed),
+        metrics.requests_inflight.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "nebula_router_responses_2xx {}\nnebula_router_responses_4xx {}\nnebula_router_responses_5xx {}\n",
-        st.metrics.status_2xx.load(Ordering::Relaxed),
-        st.metrics.status_4xx.load(Ordering::Relaxed),
-        st.metrics.status_5xx.load(Ordering::Relaxed),
+        metrics.status_2xx.load(Ordering::Relaxed),
+        metrics.status_4xx.load(Ordering::Relaxed),
+        metrics.status_5xx.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_retry_total Total retry attempts to upstream.\n\
          # TYPE nebula_router_retry_total counter\n\
          nebula_router_retry_total {}\n",
-        st.metrics.retry_total.load(Ordering::Relaxed),
+        metrics.retry_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_retry_success_total Retry attempts that succeeded.\n\
          # TYPE nebula_router_retry_success_total counter\n\
          nebula_router_retry_success_total {}\n",
-        st.metrics.retry_success_total.load(Ordering::Relaxed),
+        metrics.retry_success_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_request_too_large_total Rejected requests due to max body size.\n\
          # TYPE nebula_router_request_too_large_total counter\n\
          nebula_router_request_too_large_total {}\n",
-        st.metrics.request_too_large_total.load(Ordering::Relaxed),
+        metrics.request_too_large_total.load(Ordering::Relaxed),
     ));
     body.push_str("# HELP nebula_router_upstream_error_total Upstream errors by kind.\n# TYPE nebula_router_upstream_error_total counter\n");
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"connect\"}} {}\n",
-        st.metrics
-            .upstream_error_connect_total
-            .load(Ordering::Relaxed),
+        metrics.upstream_error_connect_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"timeout\"}} {}\n",
-        st.metrics
-            .upstream_error_timeout_total
-            .load(Ordering::Relaxed),
+        metrics.upstream_error_timeout_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"upstream_5xx\"}} {}\n",
-        st.metrics.upstream_error_5xx_total.load(Ordering::Relaxed),
+        metrics.upstream_error_5xx_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "nebula_router_upstream_error_total{{kind=\"other\"}} {}\n",
-        st.metrics
-            .upstream_error_other_total
-            .load(Ordering::Relaxed),
+        metrics.upstream_error_other_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_requests_aborted_total Client disconnect/abort while proxying (excluded from 5xx).\n\
          # TYPE nebula_router_requests_aborted_total counter\n\
          nebula_router_requests_aborted_total {}\n",
-        st.metrics.requests_aborted_total.load(Ordering::Relaxed),
+        metrics.requests_aborted_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_route_stale_stats_dropped_total stale routing stats dropped at route-time freshness gate.\n\
          # TYPE nebula_router_route_stale_stats_dropped_total counter\n\
          nebula_router_route_stale_stats_dropped_total {}\n",
-        st.router.route_stale_stats_dropped_total(),
+        router.route_stale_stats_dropped_total(),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_route_circuit_skipped_total candidates skipped due to open endpoint circuit breaker.\n\
          # TYPE nebula_router_route_circuit_skipped_total counter\n\
          nebula_router_route_circuit_skipped_total {}\n",
-        st.router.route_circuit_skipped_total(),
+        router.route_circuit_skipped_total(),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_circuit_open_total endpoint circuit breaker openings.\n\
          # TYPE nebula_router_circuit_open_total counter\n\
          nebula_router_circuit_open_total {}\n",
-        st.router.circuit_open_total(),
+        router.circuit_open_total(),
     ));
     body.push_str(
         "# HELP nebula_router_hint_total Hint lifecycle counters by stage.\n\
@@ -248,23 +241,23 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     );
     body.push_str(&format!(
         "nebula_router_hint_total{{stage=\"received\"}} {}\n",
-        st.router.hint_received_total(),
+        router.hint_received_total(),
     ));
     body.push_str(&format!(
         "nebula_router_hint_total{{stage=\"adopted\"}} {}\n",
-        st.router.hint_adopted_total(),
+        router.hint_adopted_total(),
     ));
     body.push_str(&format!(
         "nebula_router_hint_total{{stage=\"conflict_rejected\"}} {}\n",
-        st.router.hint_conflict_rejected_total(),
+        router.hint_conflict_rejected_total(),
     ));
     body.push_str(&format!(
         "nebula_router_hint_total{{stage=\"expired\"}} {}\n",
-        st.router.hint_expired_total(),
+        router.hint_expired_total(),
     ));
     body.push_str(&format!(
         "nebula_router_hint_total{{stage=\"stale_degraded\"}} {}\n",
-        st.router.hint_stale_degraded_total(),
+        router.hint_stale_degraded_total(),
     ));
     body.push_str(
         "# HELP nebula_router_affinity_hit_total Affinity/hint hits by kind.\n\
@@ -272,18 +265,17 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     );
     body.push_str(&format!(
         "nebula_router_affinity_hit_total{{kind=\"session\"}} {}\n",
-        st.router.session_affinity_hit_total(),
+        router.session_affinity_hit_total(),
     ));
     body.push_str(&format!(
         "nebula_router_affinity_hit_total{{kind=\"prefix_hint\"}} {}\n",
-        st.router.prefix_hint_hit_total(),
+        router.prefix_hint_hit_total(),
     ));
 
-    // Per-model counters
     body.push_str(
         "# HELP nebula_route_total Per-model request count.\n# TYPE nebula_route_total counter\n",
     );
-    for entry in st.metrics.model_counters.iter() {
+    for entry in metrics.model_counters.iter() {
         let model = entry.key();
         let c = entry.value();
         body.push_str(&format!(
@@ -300,9 +292,8 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         ));
     }
 
-    // E2E latency histograms
     body.push_str("# HELP nebula_route_latency_seconds E2E request latency.\n# TYPE nebula_route_latency_seconds histogram\n");
-    for entry in st.metrics.e2e_latency.iter() {
+    for entry in metrics.e2e_latency.iter() {
         body.push_str(
             &entry
                 .value()
@@ -310,9 +301,8 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         );
     }
 
-    // TTFT histograms
     body.push_str("# HELP nebula_route_ttft_seconds Time to first token (streaming only).\n# TYPE nebula_route_ttft_seconds histogram\n");
-    for entry in st.metrics.ttft.iter() {
+    for entry in metrics.ttft.iter() {
         body.push_str(
             &entry
                 .value()
@@ -320,34 +310,5 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         );
     }
 
-    (
-        axum::http::StatusCode::OK,
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; version=0.0.4; charset=utf-8",
-        )],
-        body,
-    )
-}
-
-pub async fn track_requests(
-    State(st): State<AppState>,
-    req: Request<Body>,
-    next: Next,
-) -> Result<Response, std::convert::Infallible> {
-    st.metrics.requests_inflight.fetch_add(1, Ordering::Relaxed);
-    let resp = next.run(req).await;
-    st.metrics.requests_inflight.fetch_sub(1, Ordering::Relaxed);
-    st.metrics.requests_total.fetch_add(1, Ordering::Relaxed);
-
-    let status = resp.status().as_u16();
-    if status >= 500 {
-        st.metrics.status_5xx.fetch_add(1, Ordering::Relaxed);
-    } else if status >= 400 {
-        st.metrics.status_4xx.fetch_add(1, Ordering::Relaxed);
-    } else if status >= 200 {
-        st.metrics.status_2xx.fetch_add(1, Ordering::Relaxed);
-    }
-
-    Ok(resp)
+    body
 }
