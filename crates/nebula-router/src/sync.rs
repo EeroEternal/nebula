@@ -8,7 +8,7 @@ use nebula_meta::{EtcdMetaStore, MetaStore};
 
 pub async fn endpoints_sync_loop(
     store: EtcdMetaStore,
-    router: Arc<nebula_router::Router>,
+    router: Arc<crate::Router>,
 ) -> anyhow::Result<()> {
     loop {
         let (items, snap_rev) = match store.list_prefix_snapshot("/endpoints/").await {
@@ -59,7 +59,7 @@ pub async fn endpoints_sync_loop(
 
 pub async fn placement_sync_loop(
     store: EtcdMetaStore,
-    router: Arc<nebula_router::Router>,
+    router: Arc<crate::Router>,
 ) -> anyhow::Result<()> {
     loop {
         let (items, snap_rev) = match store.list_prefix_snapshot("/placements/").await {
@@ -120,7 +120,7 @@ pub async fn placement_sync_loop(
 /// P0-2: control-plane hot path — watch etcd `/stats/` (not xtrace).
 pub async fn stats_sync_loop(
     store: EtcdMetaStore,
-    router: Arc<nebula_router::Router>,
+    router: Arc<crate::Router>,
 ) -> anyhow::Result<()> {
     loop {
         let (items, snap_rev) = match store.list_prefix_snapshot("/stats/").await {
@@ -172,7 +172,7 @@ pub async fn stats_sync_loop(
 
 pub async fn models_sync_loop(
     store: EtcdMetaStore,
-    router: Arc<nebula_router::Router>,
+    router: Arc<crate::Router>,
 ) -> anyhow::Result<()> {
     use nebula_common::ModelSpec;
 

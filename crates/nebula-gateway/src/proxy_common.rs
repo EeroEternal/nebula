@@ -3,14 +3,16 @@
 use axum::{
     body::Body,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use nebula_common::{
     build_execution_context, inject_execution_context, parse_and_sanitize_inference_hint,
-    peek_json_model_field, Tenant, TenantDenyCode, HEADER_HINT_TRUSTED, HEADER_INFERENCE_HINT,
+    peek_json_model_field, ExecutionContext, Tenant, TenantDenyCode, HEADER_HINT_TRUSTED,
+    HEADER_INFERENCE_HINT,
 };
 use nebula_meta::MetaStore;
+use nebula_router::proxy::{route_and_send, ProxyError};
 use serde_json::Value;
 
 use crate::auth::AuthContext;
@@ -20,6 +22,8 @@ use crate::state::AppState;
 pub struct PreparedUpstream {
     pub model: Option<String>,
     pub request_id: String,
+    /// Full request context (tenant, session, priority, hint) resolved during admission.
+    pub ctx: ExecutionContext,
     pub headers: reqwest::header::HeaderMap,
     /// Held for the request lifetime when multi-tenant admission is active.
     pub _conc_guard: Option<nebula_common::admission::ConcurrencyGuard>,
@@ -126,7 +130,8 @@ pub async fn prepare_upstream(
 
     Ok(PreparedUpstream {
         model,
-        request_id: ctx.request_id,
+        request_id: ctx.request_id.clone(),
+        ctx,
         headers: req_headers,
         _conc_guard,
     })
@@ -162,22 +167,119 @@ pub async fn post_router_path(
     }
 }
 
+/// Send an OpenAI chat request to the (possibly embedded) router and return the raw upstream
+/// response so protocol adapters can transform it.
 pub async fn post_router_chat(
     st: &AppState,
-    headers: reqwest::header::HeaderMap,
+    prepared: &PreparedUpstream,
     chat_body: &Value,
 ) -> Result<reqwest::Response, Response> {
-    let url = format!(
-        "{}/v1/chat/completions",
-        st.router_base_url.trim_end_matches('/')
-    );
-    let mut req_headers = headers;
+    let body = Bytes::from(serde_json::to_vec(chat_body).unwrap_or_default());
+    let mut req_headers = prepared.headers.clone();
     req_headers.insert(
         reqwest::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    let body = Bytes::from(serde_json::to_vec(chat_body).unwrap_or_default());
+
+    if st.embed_router {
+        return match route_and_send(
+            &st.router,
+            &st.http,
+            &st.proxy_cfg,
+            &st.router_metrics,
+            &st.dual_write,
+            &prepared.ctx,
+            req_headers,
+            reqwest::Method::POST,
+            "/v1/chat/completions",
+            "",
+            Some(body),
+        )
+        .await
+        {
+            Ok(r) => Ok(r.response),
+            Err(e) => Err(proxy_error_response(e)),
+        };
+    }
+
+    let url = format!(
+        "{}/v1/chat/completions",
+        st.router_base_url.trim_end_matches('/')
+    );
     post_router_path(st, &url, req_headers, body).await
+}
+
+/// Resolve the model_uid the (embedded) router would select, for metric labels on paths whose
+/// response body is transformed by a protocol adapter rather than streamed by `forward_routed`.
+pub fn resolve_route_model_uid(st: &AppState, prepared: &PreparedUpstream) -> String {
+    let raw = prepared
+        .model
+        .clone()
+        .unwrap_or_else(|| st.proxy_cfg.fallback_model_uid.clone());
+    st.router.resolve_model(&raw)
+}
+
+/// Map an in-process routing error to its HTTP response (shared by passthrough + adapters).
+pub fn proxy_error_response(err: ProxyError) -> Response {
+    match err {
+        ProxyError::Overloaded { model_uid } => Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .header("Retry-After", "5")
+            .body(Body::from(format!(
+                "all endpoints overloaded for model '{}'",
+                model_uid
+            )))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+        ProxyError::NoEndpoint { model_uid } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("no ready endpoint for model '{}'", model_uid),
+        )
+            .into_response(),
+        ProxyError::UpstreamFailed { .. } => {
+            (StatusCode::BAD_GATEWAY, "upstream request failed").into_response()
+        }
+    }
+}
+
+/// Route + forward a buffered POST request entirely in-process (Phase 1 embedded router).
+pub async fn route_and_forward_post(
+    st: &AppState,
+    prepared: &PreparedUpstream,
+    uri_path: &str,
+    uri_query: &str,
+    body: Bytes,
+) -> Response {
+    let request_start = std::time::Instant::now();
+    match route_and_send(
+        &st.router,
+        &st.http,
+        &st.proxy_cfg,
+        &st.router_metrics,
+        &st.dual_write,
+        &prepared.ctx,
+        prepared.headers.clone(),
+        reqwest::Method::POST,
+        uri_path,
+        uri_query,
+        Some(body),
+    )
+    .await
+    {
+        Ok(r) => {
+            nebula_router::proxy::forward_routed(
+                &st.router_metrics,
+                &st.dual_write,
+                &st.proxy_cfg,
+                &prepared.request_id,
+                request_start,
+                r.model_uid,
+                r.endpoint.replica_id,
+                r.response,
+            )
+            .await
+        }
+        Err(e) => proxy_error_response(e),
+    }
 }
 
 pub async fn load_tenant(store: &dyn MetaStore, tenant_id: &str) -> anyhow::Result<Option<Tenant>> {

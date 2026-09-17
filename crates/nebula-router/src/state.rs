@@ -3,7 +3,7 @@ use std::sync::Arc;
 use nebula_common::auth::AuthConfig;
 use nebula_common::DualWriteEmitter;
 
-use crate::metrics::Metrics;
+use nebula_router::metrics::Metrics;
 
 #[derive(Clone)]
 pub struct AppState {

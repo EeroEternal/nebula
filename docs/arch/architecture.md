@@ -31,15 +31,15 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 
 | 组件 | 职责 |
 |------|------|
-| **Gateway** | OpenAI 兼容 HTTP/SSE；鉴权、租户准入、规范化、错误映射；abort；注入 `x-nebula-model` / ExecutionContext |
-| **Router** | endpoint 选择 + 代理；plan_version / stats / 熔断过载 / 重试 |
+| **Gateway** | OpenAI 兼容 HTTP/SSE；鉴权、租户准入、规范化、错误映射；abort；注入 `x-nebula-model` / ExecutionContext；可选内嵌 Router（单跳直通，默认开启） |
+| **Router** | endpoint 选择 + 代理；plan_version / stats / 熔断过载 / 重试；可作为库内嵌 Gateway，也可独立部署 |
 | **Scheduler** | PlacementPlan CAS；只认 `/deployments/`；兼容/平台过滤；leader election + fencing |
 | **MetaStore (etcd)** | 权威元数据（watch / lease / CAS） |
 | **Node** | watch placement → 启停引擎 → 注册 endpoint/stats/capabilities；心跳与自愈 |
 | **Engine** | vLLM / SGLang 等原生 HTTP 推理进程 |
 | **BFF** | 控制台 API：模型、治理、Benchmark、租户/成本 |
 
-默认路径：**Engine-Passthrough**（Gateway → Router → 引擎原生 HTTP）。EngineShim gRPC 为可选增强。
+默认路径：**Engine-Passthrough**。自数据面 Phase 1（unreleased）起，Gateway **默认内嵌 Router**（同一 `nebula_router::Router` 库 + 进程内 sync loop），热路径为单跳 **Gateway → 引擎原生 HTTP**；置 `NEBULA_EMBEDDED_ROUTER=false` 时回退为两段式 **Gateway → Router → 引擎**（外部 Router 仍可独立部署）。EngineShim gRPC 为可选增强。
 
 ```mermaid
 graph TB
@@ -66,6 +66,8 @@ graph TB
     Node -.->|"watch"| ETCD
     Node -->|"manage"| Engine
 ```
+
+> 内嵌模式（默认）下 Gateway 进程内直接持有 Router，上图中 `GW -->|proxy| Router` 一跳在进程内完成（无内部 HTTP）；外部 Router 服务仅在 `NEBULA_EMBEDDED_ROUTER=false` 时位于数据链路。
 
 ```mermaid
 graph BT

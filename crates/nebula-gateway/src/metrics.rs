@@ -221,7 +221,14 @@ pub fn render_metrics(metrics: &Metrics) -> String {
 }
 
 pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
-    let body = render_metrics(&st.metrics);
+    let mut body = render_metrics(&st.metrics);
+    // Phase 1: expose the embedded in-process router's Prometheus surface alongside Gateway's.
+    if st.embed_router {
+        body.push_str(&nebula_router::metrics::render(
+            &st.router_metrics,
+            &st.router,
+        ));
+    }
     (
         axum::http::StatusCode::OK,
         [(

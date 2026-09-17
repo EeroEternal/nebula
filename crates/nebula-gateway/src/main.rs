@@ -49,6 +49,10 @@ use crate::platform_webhooks::{
 };
 use crate::state::AppState;
 use crate::util::read_engine_env_file;
+use nebula_router::proxy::ProxyConfig;
+use nebula_router::sync::{
+    endpoints_sync_loop, models_sync_loop, placement_sync_loop, stats_sync_loop,
+};
 
 #[tokio::main]
 async fn main() {
@@ -92,6 +96,78 @@ async fn main() {
 
     let auth = build_gateway_auth().await;
 
+    // Phase 1 data-plane optimization: embed the router in-process so the hot path is a single
+    // hop (Gateway → Engine) instead of Gateway → Router → Engine. Disable with
+    // `NEBULA_EMBEDDED_ROUTER=false` to fall back to the external `router_url`.
+    let embed_router = std::env::var("NEBULA_EMBEDDED_ROUTER")
+        .map(|v| {
+            !matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+        .unwrap_or(true);
+    let strategy_name =
+        std::env::var("NEBULA_ROUTING_STRATEGY").unwrap_or_else(|_| "least_pending".to_string());
+    let routing_strategy = nebula_router::strategy::parse_strategy(&strategy_name)
+        .unwrap_or_else(|e| {
+            tracing::error!(error=%e, strategy=%strategy_name, "invalid routing strategy; falling back to least_pending");
+            Box::new(nebula_router::strategy::LeastPending)
+        });
+    let router = nebula_router::Router::with_strategy(routing_strategy);
+    let router_metrics = Arc::new(nebula_router::metrics::Metrics::default());
+
+    if embed_router {
+        tracing::info!(strategy=%strategy_name, "embedded in-process router enabled (single-hop Gateway -> Engine)");
+        let router_for_endpoints = router.clone();
+        let store_for_endpoints = store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = endpoints_sync_loop(store_for_endpoints, router_for_endpoints).await {
+                tracing::error!(error=%e, "embedded endpoints sync loop exited");
+            }
+        });
+        let router_for_placement = router.clone();
+        let store_for_placement = store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = placement_sync_loop(store_for_placement, router_for_placement).await {
+                tracing::error!(error=%e, "embedded placement sync loop exited");
+            }
+        });
+        let router_for_models = router.clone();
+        let store_for_models = store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = models_sync_loop(store_for_models, router_for_models).await {
+                tracing::error!(error=%e, "embedded model specs sync loop exited");
+            }
+        });
+        let router_for_stats = router.clone();
+        let store_for_stats = store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = stats_sync_loop(store_for_stats, router_for_stats).await {
+                tracing::error!(error=%e, "embedded stats sync loop exited");
+            }
+        });
+    } else {
+        tracing::info!(router_base_url=%router_base_url, "embedded router disabled; proxying to external router");
+    }
+
+    let retry_max = std::env::var("NEBULA_ROUTER_RETRY_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1);
+    let retry_backoff_ms = std::env::var("NEBULA_ROUTER_RETRY_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(75);
+    let fallback_model_uid =
+        std::env::var("NEBULA_ROUTER_MODEL_UID").unwrap_or_else(|_| "qwen2_5_0_5b".to_string());
+    let proxy_cfg = ProxyConfig {
+        retry_max,
+        retry_backoff_ms,
+        fallback_model_uid,
+        metric_prefix: "nebula_router",
+    };
+
     let metrics = Arc::new(metrics::Metrics::default());
     let dual_write = nebula_common::DualWriteEmitter::from_env(
         "nebula-gateway",
@@ -124,6 +200,10 @@ async fn main() {
         xtrace_token: args.common.xtrace_token.clone(),
         bff_url: args.bff_url,
         tenant_admission: nebula_common::TenantAdmission::new(),
+        router,
+        router_metrics,
+        proxy_cfg,
+        embed_router,
     };
 
     let platform_routes = Router::new()

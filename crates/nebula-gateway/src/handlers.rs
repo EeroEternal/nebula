@@ -25,10 +25,11 @@ use crate::interface::{
 };
 use crate::proxy_common::{
     append_headers, classify_reqwest_error, forward_upstream_response, post_router_chat,
-    prepare_upstream, prepare_upstream_from_json,
+    prepare_upstream, prepare_upstream_from_json, resolve_route_model_uid, route_and_forward_post,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
+use nebula_router::proxy::ResponseObserver;
 
 pub async fn create_responses(
     State(st): State<AppState>,
@@ -142,10 +143,12 @@ async fn proxy_chat_as_responses(
     builder_seed: crate::responses::CreateResponseRequest,
     stream: bool,
 ) -> Response {
-    let resp = match post_router_chat(&st, prepared.headers.clone(), &chat_body).await {
+    let started = std::time::Instant::now();
+    let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
+    let route_model_uid = resolve_route_model_uid(&st, &prepared);
     // Keep admission guard alive until response finishes.
     let _guard = prepared._conc_guard;
 
@@ -163,6 +166,17 @@ async fn proxy_chat_as_responses(
             .unwrap_or_else(|_| Response::new(Body::empty()));
     }
 
+    let observer = st.embed_router.then(|| {
+        ResponseObserver::new(
+            st.router_metrics.clone(),
+            st.dual_write.clone(),
+            st.proxy_cfg.metric_prefix,
+            route_model_uid,
+            resp.status().as_u16(),
+            started,
+        )
+    });
+
     if stream {
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
@@ -170,6 +184,7 @@ async fn proxy_chat_as_responses(
         let mut builder = ResponseStreamBuilder::new(&builder_seed);
 
         tokio::spawn(async move {
+            let mut first_chunk = true;
             if tx
                 .send(Ok(
                     Event::default().data(builder.created_event().to_string())
@@ -197,6 +212,12 @@ async fn proxy_chat_as_responses(
                     item = upstream.next() => {
                         match item {
                             Some(Ok(chunk)) => {
+                                if first_chunk {
+                                    first_chunk = false;
+                                    if let Some(o) = observer.as_ref() {
+                                        o.record_ttft(started.elapsed().as_secs_f64());
+                                    }
+                                }
                                 buf.push_str(&String::from_utf8_lossy(&chunk));
                                 while let Some(pos) = buf.find('\n') {
                                     let mut line = buf[..pos].to_string();
@@ -311,10 +332,12 @@ async fn proxy_chat_as_anthropic(
     requested_model: String,
     stream: bool,
 ) -> Response {
-    let resp = match post_router_chat(&st, prepared.headers.clone(), &chat_body).await {
+    let started = std::time::Instant::now();
+    let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
+    let route_model_uid = resolve_route_model_uid(&st, &prepared);
     let _guard = prepared._conc_guard;
 
     if !resp.status().is_success() {
@@ -331,6 +354,17 @@ async fn proxy_chat_as_anthropic(
             .unwrap_or_else(|_| Response::new(Body::empty()));
     }
 
+    let observer = st.embed_router.then(|| {
+        ResponseObserver::new(
+            st.router_metrics.clone(),
+            st.dual_write.clone(),
+            st.proxy_cfg.metric_prefix,
+            route_model_uid,
+            resp.status().as_u16(),
+            started,
+        )
+    });
+
     if stream {
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
@@ -338,6 +372,7 @@ async fn proxy_chat_as_anthropic(
         let model = requested_model.clone();
 
         tokio::spawn(async move {
+            let mut first_chunk = true;
             let msg_id = format!("msg_{}", Uuid::new_v4());
             let start = json!({
                 "type": "message_start",
@@ -394,6 +429,12 @@ async fn proxy_chat_as_anthropic(
                     item = upstream.next() => {
                         match item {
                             Some(Ok(chunk)) => {
+                                if first_chunk {
+                                    first_chunk = false;
+                                    if let Some(o) = observer.as_ref() {
+                                        o.record_ttft(started.elapsed().as_secs_f64());
+                                    }
+                                }
                                 buf.push_str(&String::from_utf8_lossy(&chunk));
                                 while let Some(pos) = buf.find('\n') {
                                     let mut line = buf[..pos].to_string();
@@ -516,6 +557,11 @@ pub async fn proxy_post(
         Ok(p) => p,
         Err(r) => return r,
     };
+
+    // Phase 1 embedded router: single-hop Gateway → Engine, no internal HTTP hop.
+    if st.embed_router {
+        return route_and_forward_post(&st, &prepared, &uri_path, &uri_query, body_bytes).await;
+    }
 
     let resp = match st
         .http
