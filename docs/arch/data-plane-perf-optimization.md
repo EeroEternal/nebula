@@ -1,7 +1,8 @@
 # Nebula 极速数据面优化方案：嵌入式路由、零拷贝流式代理与引擎感知分流
 
 > 归属：`docs/arch/` · 阶段：数据面性能强化 · 对照基准：vLLM 直连吞吐与延迟  
-> 适用组件：`crates/nebula-gateway` · `crates/nebula-router`
+> 适用组件：`crates/nebula-gateway` · `crates/nebula-router`  
+> 相邻：选路只读规范化 Endpoint / 可选 Signals，禁止把 Dynamo·llm-d·PowerLLM 类型打进热路径——见 [`control-plane-adapters.md`](./control-plane-adapters.md)
 
 ---
 
@@ -88,6 +89,7 @@ Client ------> [ Gateway (内嵌 In-Process Router) ] (HTTP) --------> [ vLLM En
    $$Score = \alpha \cdot \text{ActiveRequests} + \beta \cdot \text{KVCacheUsage} + \gamma \cdot \text{WaitingReqs}$$
 2. **结合 Prefix Cache 亲和性**：
    - 当请求包含较长相同 System Prompt 时，通过哈希指纹（Prompt Hash Affinity）优先将请求调度至已有对应 KV Cache 的副本，大幅降低 Prefill 计算量。
+   - 加权输入为规范化 `EndpointSignals`（none 模式即今日 etcd `/stats/`），不在代理循环里解析外部控制面的 KV 事件总线或 EPP 分数。见 [`control-plane-adapters.md`](./control-plane-adapters.md) §11。
 
 ---
 

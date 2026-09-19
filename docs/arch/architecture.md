@@ -1,6 +1,6 @@
 # Nebula 架构
 
-> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。产品定位与能力分层总纲见 [`vision.md`](./vision.md)；排期与勾选见 [`roadmap.md`](./roadmap.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；HA 见 [`../manual/module.md`](../manual/module.md)、[`report.md`](../dev/ha/report.md)；边界见 [`../dev/ownership.md`](../dev/ownership.md)。
+> 权威架构说明（2026-07-13，对齐 **v1.3.0**）。产品定位与能力分层总纲见 [`vision.md`](./vision.md)；排期与勾选见 [`roadmap.md`](./roadmap.md)；产品阶段见 [`../dev/plan.md`](../dev/plan.md)；HA 见 [`../manual/module.md`](../manual/module.md)、[`report.md`](../dev/ha/report.md)；边界见 [`../dev/ownership.md`](../dev/ownership.md)；可选外部控制面不得进入热路径见 [`control-plane-adapters.md`](./control-plane-adapters.md)。
 
 **结论：** 方向不变——etcd 声明式状态、Rust 控制面、外部引擎进程、HTTP Passthrough。M1 / N1 HA 主体 / N2 / 可观测 O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 v1.3.0 落地。真机 Gateway e2e、多引擎 benchmark、多租户压测与生产 etcd 三节点暂缓。剩余按需项（N3/N4/P7）以 [`roadmap.md`](./roadmap.md) 为准。
 
@@ -19,6 +19,7 @@ Xinference / powerllm 可复用资产在模型与协议侧，负债在控制面�
 - 可观测优先：abort/drain 有独立 metrics，不计 5xx 成功率分母；低流量 SLO 不假绿。
 - etcd 是唯一权威；本地缓存可丢可重建；对账是「etcd vs runtime」清孤儿，不是双权威同步。
 - Gateway = 协议/鉴权/审计/租户准入；Router = 选路+代理；BFF = 控制台；Scheduler 只写期望、不碰 Postgres。
+- 热路径只消费规范化 Endpoint / 鉴权判定 / 可选准入；PowerLLM、Dynamo、llm-d 等停在可选适配器之后（草案 [`control-plane-adapters.md`](./control-plane-adapters.md)）。默认不接外部控制面。
 
 ### 相对 PowerLLM：学什么 / 不学什么
 

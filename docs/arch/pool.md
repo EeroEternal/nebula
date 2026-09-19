@@ -88,6 +88,7 @@ Router 只读 endpoints；不知「池」也可选路
 | L3 | Selection 候选可带建议 `pool_id`/拓扑；仍半自动写 Deployment |
 | L4 | 成本/容量按池归因（Phase 3）；本阶段只留 `pool_id` 挂钩 |
 | K8s/HAMi | 执行面正交：`k8s` runtime 由控制器写 `/endpoints/`；池约束仍经 Deployment→期望，不双写 |
+| 外部控制面 | 发现/鉴权适配器不得把 Dynamo·llm-d 类型带进热路径；见 [`control-plane-adapters.md`](./control-plane-adapters.md) |
 
 ## 分阶段落地（有需求再开）
 
