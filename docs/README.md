@@ -47,6 +47,7 @@
 | [`arch/pool.md`](arch/pool.md) | L2 资源池：HardwarePool、池约束、拓扑与故障隔离（设计） |
 | [`arch/roadmap.md`](arch/roadmap.md) | 排期（与 vision Phase 0–3 对齐） |
 | [`arch/data-plane-perf-optimization.md`](arch/data-plane-perf-optimization.md) | 极速数据面优化：嵌入式路由、零拷贝流式代理与引擎感知分流 |
+| [`arch/control-plane-adapters.md`](arch/control-plane-adapters.md) | 控制面无关适配器契约（拟议）：Auth / Directory / Policy，可选对接 PowerLLM、Dynamo、llm-d |
 | [`dev/plan.md`](dev/plan.md) | 开发计划 |
 | [`dev/setup.md`](dev/setup.md) | 开发环境 |
 | [`dev/ownership.md`](dev/ownership.md) | 接口归属 |
