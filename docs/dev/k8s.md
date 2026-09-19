@@ -6,7 +6,7 @@
 
 - **etcd**：Nebula 声明与协调权威（Deployment / Placement 期望、`/endpoints/` 等）。不换成 kube-apiserver 当元数据主存。
 - **K8s / HAMi**：仅 **k8s** 部署形态下的引擎**执行面**（用 Pod 拿虚拟 GPU、起停引擎）。
-- **Gateway / Router**：继续认 etcd `/endpoints/`，不改为依赖 K8s Service 发现做选路。
+- **Gateway / Router**：继续认 etcd `/endpoints/`，不改为依赖 K8s Service 发现做选路。拟议的外部控制面适配器（llm-d / Dynamo EndpointSlices 等）只允许在可选适配层投影为同一 Endpoint 形状，禁止核心热路径直读 kube 对象（草案 [`../arch/control-plane-adapters.md`](../arch/control-plane-adapters.md)）。
 - **一种形态一个 owner**：`process`/`docker` 仍由 Node；`k8s` 由集群内 **K8s controller/Operator** 独占，禁止 Node 与 Operator 对同一副本双重 reconcile。
 - **GPU**：`k8s` 形态不写 `gpu_indices` / `CUDA_VISIBLE_DEVICES`；由 Pod resource request（及 HAMi annotation）交给 kube-scheduler + HAMi。
 

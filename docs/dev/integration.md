@@ -2,7 +2,7 @@
 
 > **读者：** 要把 Nebula 当作「推理控制面」嵌入自有平台（算电、ISV、业务中台等）的集成工程师。  
 > **基线：** Nebula v1.6.0 · Gateway 默认 `:8081`  
-> **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，不提供兼容层。  
+> **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，核心不提供兼容层。PowerLLM 与 Nebula **双边可选**（各自默认不依赖对方）；若要将外部控制面的发现/鉴权投影进数据面，见草案 [`../arch/control-plane-adapters.md`](../arch/control-plane-adapters.md)。  
 > **相关：** 安装见 [`../manual/deployment.md`](../manual/deployment.md)；错误码见 [`contracts.md`](./contracts.md)；架构见 [`../arch/architecture.md`](../arch/architecture.md)。  
 > **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0–I6 ✅**）。  
 > **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（仅 `/platform/v1`）。

@@ -1,6 +1,7 @@
 # L1 一致性契约套件（Phase 1）
 
-> 目标：客户写一次代码可换已支持引擎。边界在 Gateway + Adapter；Router 不做协议翻译。总纲见 [`../arch/vision.md`](../arch/vision.md)。协议/方言见 [`unigateway.md`](./unigateway.md)。
+> 目标：客户写一次代码可换已支持引擎。边界在 Gateway + **引擎** Adapter；Router 不做协议翻译。总纲见 [`../arch/vision.md`](../arch/vision.md)。协议/方言见 [`unigateway.md`](./unigateway.md)。  
+> **易混：** 本文 Adapter = Capability / scrape / UniGateway（vLLM·SGLang）。发现、鉴权、配额来自外部控制面时走另一套可选契约，见 [`../arch/control-plane-adapters.md`](../arch/control-plane-adapters.md)；两者都不得把平台名写进 Router 热路径。
 
 ## 强制条目（验收）
 

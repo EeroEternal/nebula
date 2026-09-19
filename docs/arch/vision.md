@@ -3,7 +3,7 @@
 > **文档性质**：产品定位 + 目标架构 + 能力分层 + 演进原则（总纲）  
 > **基线**：Nebula v1.4.0 控制面  
 > **范围**：统一平台目标、四大核心能力、智能选择层、异构调度、一致性抽象、运维闭环及下一步优化方向  
-> **关系**：本文是后续分册（选择层、异构调度、一致性契约等）的总纲，不替代 [`architecture.md`](./architecture.md) 中的组件级实现说明。
+> **关系**：本文是后续分册（选择层、异构调度、一致性契约等）的总纲，不替代 [`architecture.md`](./architecture.md) 中的组件级实现说明。外部控制面可选接入见 [`control-plane-adapters.md`](./control-plane-adapters.md)。
 
 ---
 
@@ -273,7 +273,7 @@
 4. **智能与重治理永不进入推理热路径**。
 5. **无证据不自动选型**；数据不足显式返回。
 6. **切换必声明式、可 Canary、可回滚**；禁止静默换引擎。
-7. **异构只做放置与健康**，不接管引擎内部 PD/worker。
+7. **异构只做放置与健康**，不接管引擎内部 PD/worker。外部控制面（PowerLLM / Dynamo / llm-d）不得叉进 Gateway/Router 热路径，见 [`control-plane-adapters.md`](./control-plane-adapters.md)。
 8. **观测失败不影响 token 流**；高基数信息不进 Prometheus label。
 9. **不训练、不聚合公有云 API、不 Actor 回潮**。
 
