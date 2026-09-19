@@ -1,7 +1,8 @@
 # Nebula 极速数据面优化方案：嵌入式路由、零拷贝流式代理与引擎感知分流
 
 > 归属：`docs/arch/` · 阶段：数据面性能强化 · 对照基准：vLLM 直连吞吐与延迟  
-> 适用组件：`crates/nebula-gateway` · `crates/nebula-router`
+> 适用组件：`crates/nebula-gateway` · `crates/nebula-router`  
+> **正交文档：** 控制面可插拔（发现 / 鉴权 / 粗策略）见 [`control-plane-adapters.md`](./control-plane-adapters.md)。本文管热路径怎么快；那篇管控制面从哪来。不要把 KV 打分或平台 `if` 写进 Gateway 热路径。
 
 ---
 
