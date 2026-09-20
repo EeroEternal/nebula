@@ -67,3 +67,4 @@
 | [`dev/hw/phase0-pro6000.md`](dev/hw/phase0-pro6000.md) | Phase 0 真机（pro6000 / RTX PRO 6000）验证摘要 |
 | [`dev/hw/vllm-serving-perf.md`](dev/hw/vllm-serving-perf.md) | vLLM 服务层（Rust 前端 vs Python）与 Nebula 数据面性能实验（RTX 5090） |
 | [`dev/landscape.md`](dev/landscape.md) | 推理编排框架对照（Dynamo / llm-d）与 Nebula 的能力缺口 |
+| [`dev/direction.md`](dev/direction.md) | **发展方向备忘**：定位、三条主线、优先级与明确不做 |
