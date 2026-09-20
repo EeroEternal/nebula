@@ -8,6 +8,7 @@ use nebula_common::{
 };
 
 pub mod strategy;
+pub mod sync;
 
 use strategy::{Candidate, LeastPending, RoutingStrategy};
 

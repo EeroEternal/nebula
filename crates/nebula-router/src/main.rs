@@ -2,7 +2,6 @@ mod args;
 mod handlers;
 mod metrics;
 mod state;
-mod sync;
 
 use std::sync::Arc;
 
@@ -18,7 +17,9 @@ use crate::args::Args;
 use crate::handlers::{healthz, proxy_chat_completions};
 use crate::metrics::{metrics_handler, track_requests};
 use crate::state::AppState;
-use crate::sync::{endpoints_sync_loop, models_sync_loop, placement_sync_loop, stats_sync_loop};
+use nebula_router::sync::{
+    endpoints_sync_loop, models_sync_loop, placement_sync_loop, stats_sync_loop,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
