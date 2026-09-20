@@ -15,6 +15,9 @@ pub struct AppState {
     /// Present when `NEBULA_ROUTER_MODE=embedded`: route in-process instead of
     /// forwarding to a standalone `nebula-router` over HTTP (saves one hop).
     pub router: Option<Arc<nebula_router::Router>>,
+    /// Embedded-mode upstream retry policy (parity with `nebula-router`).
+    pub retry_max: u32,
+    pub retry_backoff_ms: u64,
     pub http: reqwest::Client,
     pub store: Arc<EtcdMetaStore>,
     pub auth: GatewayAuth,

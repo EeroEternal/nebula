@@ -24,7 +24,7 @@ use crate::interface::{
     responses_json_to_openai_chat, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
-    classify_reqwest_error, embedded_target, forward_upstream_response, post_router_chat,
+    classify_reqwest_error, forward_embedded, forward_upstream_response, post_router_chat,
     prepare_upstream, prepare_upstream_from_json,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
@@ -501,27 +501,37 @@ pub async fn proxy_post(
     };
 
     // Embedded router: route in-process and hit the engine directly (no router hop).
-    let (url, body_bytes) =
-        match embedded_target(&st, &prepared, &body_bytes, &uri_path, &uri_query).await {
-            Ok(Some(v)) => v,
-            Ok(None) => (format!("{base}{uri_path}{uri_query}"), body_bytes),
-            Err(r) => return r,
-        };
-
-    let resp = match st
-        .http
-        .post(&url)
-        .headers(prepared.headers)
-        .body(body_bytes)
-        .send()
+    let resp = if st.router.is_some() {
+        match forward_embedded(
+            &st,
+            &prepared,
+            reqwest::Method::POST,
+            &uri_path,
+            &uri_query,
+            &body_bytes,
+        )
         .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            let kind = classify_reqwest_error(&e);
-            st.metrics.record_upstream_error(kind);
-            tracing::error!(error=%e, "upstream request failed");
-            return upstream_transport_error(kind, format!("upstream request failed: {kind}"));
+        {
+            Ok(r) => r,
+            Err(r) => return r,
+        }
+    } else {
+        let url = format!("{base}{uri_path}{uri_query}");
+        match st
+            .http
+            .post(&url)
+            .headers(prepared.headers.clone())
+            .body(body_bytes)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let kind = classify_reqwest_error(&e);
+                st.metrics.record_upstream_error(kind);
+                tracing::error!(error=%e, "upstream request failed");
+                return upstream_transport_error(kind, format!("upstream request failed: {kind}"));
+            }
         }
     };
     let _guard = prepared._conc_guard;

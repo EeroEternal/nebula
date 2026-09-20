@@ -172,17 +172,21 @@ pub async fn post_router_chat(
     chat_body: &Value,
 ) -> Result<reqwest::Response, Response> {
     let body = Bytes::from(serde_json::to_vec(chat_body).unwrap_or_default());
-    let (url, body) = match embedded_target(st, prepared, &body, "/v1/chat/completions", "").await {
-        Ok(Some(v)) => v,
-        Ok(None) => (
-            format!(
-                "{}/v1/chat/completions",
-                st.router_base_url.trim_end_matches('/')
-            ),
-            body,
-        ),
-        Err(r) => return Err(r),
-    };
+    if st.router.is_some() {
+        return forward_embedded(
+            st,
+            prepared,
+            reqwest::Method::POST,
+            "/v1/chat/completions",
+            "",
+            &body,
+        )
+        .await;
+    }
+    let url = format!(
+        "{}/v1/chat/completions",
+        st.router_base_url.trim_end_matches('/')
+    );
     let mut req_headers = prepared.headers.clone();
     req_headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -341,15 +345,26 @@ fn inject_nebula_echo_headers(out: &mut Response, request_id: Option<&str>) {
 /// model, select a ready endpoint in-process, and return the engine URL plus a
 /// body whose `model` field is rewritten to the engine's served name. Returns
 /// `Ok(None)` in remote mode (caller forwards to a standalone router).
-pub async fn embedded_target(
+/// Embedded-router forwarding.
+///
+/// Selects an engine in-process and sends the request straight to it, retrying
+/// on 5xx / transport error by excluding the failed endpoint — parity with the
+/// standalone `nebula-router` proxy loop. Only called when `AppState.router` is
+/// set (`NEBULA_ROUTER_MODE=embedded`).
+pub async fn forward_embedded(
     st: &AppState,
     prepared: &PreparedUpstream,
-    body_bytes: &[u8],
+    method: reqwest::Method,
     uri_path: &str,
     uri_query: &str,
-) -> Result<Option<(String, Bytes)>, Response> {
+    body_bytes: &[u8],
+) -> Result<reqwest::Response, Response> {
     let Some(router) = st.router.as_ref() else {
-        return Ok(None);
+        return Err((
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "embedded router not configured",
+        )
+            .into_response());
     };
 
     let raw_model = prepared.model.clone().unwrap_or_default();
@@ -360,39 +375,113 @@ pub async fn embedded_target(
     let body = nebula_common::rewrite_json_model_field(body_bytes, &engine_model)
         .map(Bytes::from)
         .unwrap_or_else(|| Bytes::copy_from_slice(body_bytes));
-
     let plan_version = router.plan_version_for(&model_uid).filter(|&v| v > 0);
-    let routed = match plan_version {
-        Some(pv) => router.route_with_plan_version(&prepared.ctx, &model_uid, pv),
-        None => router.route(&prepared.ctx, &model_uid),
-    };
-    let ep = match routed {
-        Ok(ep) => ep,
-        Err(nebula_router::RouteError::Overloaded) => {
-            return Err((
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                format!("all endpoints overloaded for model '{model_uid}'"),
-            )
-                .into_response());
-        }
-        Err(_) => {
-            return Err((
-                axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                format!("no ready endpoint for model '{model_uid}'"),
-            )
-                .into_response());
-        }
-    };
-    let base = match ep.base_url.as_deref() {
-        Some(b) => b.trim_end_matches('/'),
-        None => {
+
+    let max_attempts = st.retry_max.saturating_add(1).max(1);
+    let mut attempt: u32 = 0;
+    let mut excluded: Option<(String, u32)> = None;
+
+    loop {
+        let routed = match (plan_version, excluded.as_ref()) {
+            (Some(pv), Some((m, r))) => router.route_with_plan_version_excluding(
+                &prepared.ctx,
+                &model_uid,
+                pv,
+                (m.as_str(), *r),
+            ),
+            (Some(pv), None) => router.route_with_plan_version(&prepared.ctx, &model_uid, pv),
+            (None, Some((m, r))) => {
+                router.route_excluding(&prepared.ctx, &model_uid, (m.as_str(), *r))
+            }
+            (None, None) => router.route(&prepared.ctx, &model_uid),
+        };
+        let ep = match routed {
+            Ok(ep) => ep,
+            Err(nebula_router::RouteError::Overloaded) => {
+                return Err((
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    format!("all endpoints overloaded for model '{model_uid}'"),
+                )
+                    .into_response());
+            }
+            Err(_) => {
+                return Err((
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    format!("no ready endpoint for model '{model_uid}'"),
+                )
+                    .into_response());
+            }
+        };
+        let Some(base) = ep.base_url.as_deref().map(|b| b.trim_end_matches('/')) else {
             return Err((
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
                 "endpoint missing base_url",
             )
                 .into_response());
-        }
-    };
+        };
 
-    Ok(Some((format!("{base}{uri_path}{uri_query}"), body)))
+        let url = format!("{base}{uri_path}{uri_query}");
+        let mut req_headers = prepared.headers.clone();
+        req_headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        req_headers.insert(
+            nebula_common::HEADER_INTERNAL_AUTH,
+            HeaderValue::from_static("1"),
+        );
+        nebula_common::telemetry::inject_trace_context(&mut req_headers);
+
+        match st
+            .http
+            .request(method.clone(), url)
+            .headers(req_headers)
+            .body(body.clone())
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status().is_server_error() {
+                    router.record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                    st.metrics.record_upstream_error("upstream_5xx");
+                    if attempt + 1 < max_attempts {
+                        attempt += 1;
+                        excluded = Some((ep.model_uid.clone(), ep.replica_id));
+                        st.metrics
+                            .retry_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tokio::time::sleep(std::time::Duration::from_millis(st.retry_backoff_ms))
+                            .await;
+                        continue;
+                    }
+                } else {
+                    router.record_endpoint_success(&ep.model_uid, ep.replica_id);
+                    if attempt > 0 {
+                        st.metrics
+                            .retry_success_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                return Ok(resp);
+            }
+            Err(e) => {
+                router.record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                let kind = classify_reqwest_error(&e);
+                st.metrics.record_upstream_error(kind);
+                if attempt + 1 < max_attempts {
+                    attempt += 1;
+                    excluded = Some((ep.model_uid.clone(), ep.replica_id));
+                    st.metrics
+                        .retry_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tokio::time::sleep(std::time::Duration::from_millis(st.retry_backoff_ms)).await;
+                    continue;
+                }
+                return Err(upstream_transport_error(
+                    kind,
+                    format!("upstream request failed: {kind}"),
+                ));
+            }
+        }
+    }
 }

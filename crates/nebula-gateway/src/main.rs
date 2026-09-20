@@ -139,6 +139,15 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(4 * 1024 * 1024);
+    // Embedded-mode retry policy; env names match nebula-router for parity.
+    let retry_max = std::env::var("NEBULA_ROUTER_RETRY_MAX")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1);
+    let retry_backoff_ms = std::env::var("NEBULA_ROUTER_RETRY_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(75);
 
     let audit = AuditWriter::spawn(
         args.common.xtrace_url.as_deref(),
@@ -149,6 +158,8 @@ async fn main() {
         _noop: Arc::new(()),
         router_base_url,
         router: embedded_router,
+        retry_max,
+        retry_backoff_ms,
         http,
         store: Arc::new(store),
         auth,

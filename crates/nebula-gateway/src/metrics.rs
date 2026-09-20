@@ -29,8 +29,12 @@ pub struct Metrics {
     pub tenant_denied_pin_admission: AtomicU64,
     pub request_too_large_total: AtomicU64,
     pub upstream_error_connect_total: AtomicU64,
+    pub upstream_error_5xx_total: AtomicU64,
     pub upstream_error_timeout_total: AtomicU64,
     pub upstream_error_other_total: AtomicU64,
+    /// Embedded-mode upstream retries (parity with nebula_router_retry_total).
+    pub retry_total: AtomicU64,
+    pub retry_success_total: AtomicU64,
     pub hint_received_total: AtomicU64,
     pub hint_forwarded_total: AtomicU64,
     pub hint_rejected_total: AtomicU64,
@@ -76,6 +80,10 @@ impl Metrics {
             }
             "timeout" => {
                 self.upstream_error_timeout_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "upstream_5xx" => {
+                self.upstream_error_5xx_total
                     .fetch_add(1, Ordering::Relaxed);
             }
             _ => {
@@ -187,8 +195,24 @@ pub fn render_metrics(metrics: &Metrics) -> String {
         metrics.upstream_error_timeout_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
+        "nebula_gateway_upstream_error_total{{kind=\"upstream_5xx\"}} {}\n",
+        metrics.upstream_error_5xx_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
         "nebula_gateway_upstream_error_total{{kind=\"other\"}} {}\n",
         metrics.upstream_error_other_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_gateway_retry_total Upstream retries after 5xx/transport error (embedded router).\n\
+         # TYPE nebula_gateway_retry_total counter\n\
+         nebula_gateway_retry_total {}\n",
+        metrics.retry_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_gateway_retry_success_total Retried requests that eventually succeeded.\n\
+         # TYPE nebula_gateway_retry_success_total counter\n\
+         nebula_gateway_retry_success_total {}\n",
+        metrics.retry_success_total.load(Ordering::Relaxed),
     ));
     body.push_str(
         "# HELP nebula_gateway_hint_total Hint processing counters by stage.\n\
@@ -220,8 +244,65 @@ pub fn render_metrics(metrics: &Metrics) -> String {
     body
 }
 
+/// Embedded mode: expose the in-process Router's counters using the same metric
+/// names as a standalone `nebula-router`, so existing dashboards keep working.
+/// Embedded mode: expose the in-process Router's counters using the same metric
+/// names as a standalone `nebula-router`, so existing dashboards keep working.
+pub fn render_router_metrics(router: &nebula_router::Router) -> String {
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_route_stale_stats_dropped_total stale routing stats dropped at route-time freshness gate.\n\
+         # TYPE nebula_router_route_stale_stats_dropped_total counter\n\
+         nebula_router_route_stale_stats_dropped_total {}",
+        router.route_stale_stats_dropped_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_route_circuit_skipped_total candidates skipped due to open endpoint circuit breaker.\n\
+         # TYPE nebula_router_route_circuit_skipped_total counter\n\
+         nebula_router_route_circuit_skipped_total {}",
+        router.route_circuit_skipped_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_circuit_open_total endpoint circuit breaker openings.\n\
+         # TYPE nebula_router_circuit_open_total counter\n\
+         nebula_router_circuit_open_total {}",
+        router.circuit_open_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_affinity_hit_total Affinity/hint hits by kind.\n\
+         # TYPE nebula_router_affinity_hit_total counter\n\
+         nebula_router_affinity_hit_total{{kind=\"session\"}} {}\n\
+         nebula_router_affinity_hit_total{{kind=\"prefix_hint\"}} {}",
+        router.session_affinity_hit_total(),
+        router.prefix_hint_hit_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_hint_total Hint lifecycle counters by stage.\n\
+         # TYPE nebula_router_hint_total counter\n\
+         nebula_router_hint_total{{stage=\"received\"}} {}\n\
+         nebula_router_hint_total{{stage=\"adopted\"}} {}\n\
+         nebula_router_hint_total{{stage=\"conflict_rejected\"}} {}\n\
+         nebula_router_hint_total{{stage=\"expired\"}} {}\n\
+         nebula_router_hint_total{{stage=\"stale_degraded\"}} {}",
+        router.hint_received_total(),
+        router.hint_adopted_total(),
+        router.hint_conflict_rejected_total(),
+        router.hint_expired_total(),
+        router.hint_stale_degraded_total()
+    );
+    body
+}
 pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
-    let body = render_metrics(&st.metrics);
+    let mut body = render_metrics(&st.metrics);
+    if let Some(router) = st.router.as_ref() {
+        body.push_str(&render_router_metrics(router));
+    }
     (
         axum::http::StatusCode::OK,
         [(
