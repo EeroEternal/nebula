@@ -15,7 +15,7 @@
     "check:locales": "node scripts/check-locales.mjs",
     "lint-staged": "lint-staged",
     "openapi": "max openapi",
-    "prepare": "husky install",
+    "prepare": "test -d ../.git && husky install || true",
     "prettier": "prettier -c --write \"**/**.{js,jsx,tsx,ts,less,md,json}\"",
     "preview": "npm run build && max preview --port 8000",
     "record": "cross-env NODE_ENV=development REACT_APP_ENV=test max record --scene=login",
