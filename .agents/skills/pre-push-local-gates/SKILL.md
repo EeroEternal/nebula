@@ -18,7 +18,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 bash scripts/check_ui_stack.sh
 bash scripts/check_admin_nav.sh
-(cd frontend && npx tsc -b --noEmit && npm run lint)
+(cd frontend && npx tsc -b --noEmit && npm run lint)   # 改了 frontend/package.json 先 npm install
 ```
 
 可选冒烟（需 docker/etcd + release 构建）：`RUN_SMOKE=1 ./scripts/ci.sh`。
@@ -26,6 +26,14 @@ bash scripts/check_admin_nav.sh
 UI 规范改动需确保符合 `docs/design.md`；发版与打 Tag 前，转入 skill
 [`release`](../release/SKILL.md) 执行完整发版流程（三查 + 人工批准硬停）。
 
+## 已知陷阱（v1.9.1 复盘）
+
+- **别只留到 push 才首次跑**：release / 大功能 commit 也要跑。v1.9.0 未跑，main 上遗留 57 条 clippy、8 条前端 ESLint、未对齐 fmt，只能靠下一个 patch 清债。
+- **前端依赖漂移**：改了 `frontend/package.json` 后先 `npm install`，否则 `node_modules` 陈旧、`tsc` 报 `Cannot find module 'react-day-picker' / 'cmdk' / '@radix-ui/*'`。
+- **`clippy -D warnings` 对 `#[cfg(test)]` 的 `dead_code` 误报**：只被 `mod tests`（经 `use super::*` glob）使用的函数会在非 test target 被报 dead。正解是加 `#[cfg(test)]` 或带原因的 `#[allow(dead_code)]`（见 [`engineering.md`](../../../docs/ai/agents/engineering.md) §一.3）；直接删会让 `cargo test` 编译失败。
+- **`cargo clippy --fix` 会误删测试专用导入**（如 `serde_json::json`）：把它移进 `mod tests`，不要恢复顶层导入；`--fix` 后必须重跑 `./scripts/ci.sh`。
+- **加 `#[allow]` 后重跑 `cargo fmt`**：`#[allow(...)] // 注释` 会被 rustfmt 折行，否则 `cargo fmt --check` 仍红。
+
 ## 适用范围与纪律 (Scope & Discipline)
-- 开发过程中的中间 commit 允许临时不跑全量，但 **push 前最后一次提交必须全绿**。
+- 开发过程中的中间 commit 允许临时不跑全量，但 **release / 大功能 commit 与 push 前最后一次提交必须全绿**；不要等到 push 才首次跑门禁。
 - CI 如果意外挂了：禁止盲猜盲改，必须在本地先复现该失败的等价命令，本地确认修复通过后再推送。
