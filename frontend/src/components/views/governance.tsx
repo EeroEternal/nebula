@@ -3,6 +3,7 @@ import { Shield, Activity, RefreshCw, Loader2, Database, Gauge, FlaskConical } f
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { Select } from "@/components/ui/select"
 import {
     Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
@@ -517,16 +518,17 @@ export function GovernanceView() {
                         value={recWorkload}
                         onChange={(e) => setRecWorkload(e.target.value)}
                     />
-                    <select
-                        className="h-10 rounded-md border border-input bg-background px-3 text-xs font-mono"
+                    <Select
+                        className="w-36"
+                        triggerClassName="h-10 rounded-md border-input bg-background px-3 text-xs font-mono"
                         value={recPreference}
-                        onChange={(e) => setRecPreference(e.target.value as "latency" | "throughput" | "cost")}
-                        aria-label={t("governance.selectionPreference")}
-                    >
-                        <option value="latency">{t("governance.latency")}</option>
-                        <option value="throughput">{t("governance.throughput")}</option>
-                        <option value="cost">{t("governance.cost")}</option>
-                    </select>
+                        onChange={(v) => setRecPreference(v as "latency" | "throughput" | "cost")}
+                        options={[
+                            { value: "latency", label: t("governance.latency") },
+                            { value: "throughput", label: t("governance.throughput") },
+                            { value: "cost", label: t("governance.cost") },
+                        ]}
+                    />
                     <Input
                         className="font-mono max-w-[140px]"
                         placeholder={t("governance.selectionPlatform")}

@@ -4,6 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { authApi } from '@/lib/api'
 import type { AuthUser, ManagedUser } from '@/lib/types'
 import { useI18n } from '@/lib/useI18n'
@@ -164,15 +165,17 @@ export function AccountSettingsView({ token, user, onOpenSecuritySettings }: Acc
           <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
             <Input placeholder={t('account.username')} value={newUsername} onChange={(e) => setNewUsername(e.target.value)} />
             <Input placeholder={t('account.password')} type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
-            <select
+            <Select
               value={newRole}
-              onChange={(e) => setNewRole(e.target.value as 'admin' | 'operator' | 'viewer')}
-              className="h-10 rounded-md border border-input bg-background px-3 text-sm"
-            >
-              <option value="viewer">{t('account.roleViewer')}</option>
-              <option value="operator">{t('account.roleOperator')}</option>
-              <option value="admin">{t('account.roleAdmin')}</option>
-            </select>
+              onChange={(v) => setNewRole(v as 'admin' | 'operator' | 'viewer')}
+              className="w-full"
+              triggerClassName="h-10 rounded-md border-input bg-background px-3 text-sm"
+              options={[
+                { value: 'viewer', label: t('account.roleViewer') },
+                { value: 'operator', label: t('account.roleOperator') },
+                { value: 'admin', label: t('account.roleAdmin') },
+              ]}
+            />
             <Button onClick={createUser} className="rounded-xl">{t('account.createUser')}</Button>
           </div>
 

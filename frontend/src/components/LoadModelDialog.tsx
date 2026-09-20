@@ -8,6 +8,7 @@ import {
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
+import { Select } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { v2 } from "@/lib/api"
 import { useLoadModelStore } from "@/store/useLoadModelStore"
@@ -331,16 +332,19 @@ function StepEngine({ form, updateForm, images }: StepEngineProps) {
 
                 <div className="space-y-2">
                      <Label className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('loadDialog.runtimeImage')}</Label>
-                    <select
-                        className="w-full h-11 bg-white/5 border border-border/50 rounded-xl px-4 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-primary/30"
-                        value={form.docker_image ?? ''}
-                        onChange={(e) => updateForm({ docker_image: e.target.value || undefined })}
-                    >
-                         <option value="">{t('loadDialog.systemDefault')}</option>
-                        {images.filter((img) => img.engine_type === form.engine_type).map((img) => (
-                            <option key={img.id} value={img.image}>{img.id} ({img.image})</option>
-                        ))}
-                    </select>
+                    <Select
+                        className="w-full"
+                        triggerClassName="h-11 bg-white/5 border-border/50 rounded-xl px-4 font-mono text-xs"
+                        value={form.docker_image || '__system_default__'}
+                        onChange={(value) => updateForm({ docker_image: value === '__system_default__' ? undefined : value })}
+                        options={[
+                            { value: '__system_default__', label: t('loadDialog.systemDefault') },
+                            ...images.filter((img) => img.engine_type === form.engine_type).map((img) => ({
+                                value: img.image,
+                                label: `${img.id} (${img.image})`,
+                            })),
+                        ]}
+                    />
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">

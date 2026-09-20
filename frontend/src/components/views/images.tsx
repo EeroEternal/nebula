@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Select } from "@/components/ui/select"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { apiPut, apiDelete } from "@/lib/api"
@@ -317,16 +318,18 @@ export function ImagesView() {
                 </div>
                 <div className="space-y-2">
                     <Label htmlFor="img-engine" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('images.engineType')}</Label>
-                    <select
+                    <Select
                         id="img-engine"
+                        className="w-full"
+                        triggerClassName="h-10 rounded-md border-border/50 bg-white/5 px-3 text-sm font-mono"
                         value={form.engine_type}
-                        onChange={(e) => setForm({ ...form, engine_type: e.target.value })}
-                        className="flex h-10 w-full rounded-md border border-border/50 bg-white/5 px-3 py-1 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary/30"
-                    >
-                        <option value="vllm">vLLM</option>
-                        <option value="sglang">SGLang</option>
-                        <option value="xllm">xLLM</option>
-                    </select>
+                        onChange={(v) => setForm({ ...form, engine_type: v })}
+                        options={[
+                            { value: "vllm", label: "vLLM" },
+                            { value: "sglang", label: "SGLang" },
+                            { value: "xllm", label: "xLLM" },
+                        ]}
+                    />
                 </div>
             </div>
 
@@ -347,15 +350,17 @@ export function ImagesView() {
             <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                     <Label htmlFor="img-policy" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('images.versionPolicy')}</Label>
-                    <select
+                    <Select
                         id="img-policy"
+                        className="w-full"
+                        triggerClassName="h-10 rounded-md border-border/50 bg-white/5 px-3 text-sm font-mono"
                         value={form.version_policy}
-                        onChange={(e) => setForm({ ...form, version_policy: e.target.value as "pin" | "rolling" })}
-                        className="flex h-10 w-full rounded-md border border-border/50 bg-white/5 px-3 py-1 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary/30"
-                    >
-                         <option value="pin">{t('images.pinStable')}</option>
-                         <option value="rolling">{t('images.rollingLatest')}</option>
-                    </select>
+                        onChange={(v) => setForm({ ...form, version_policy: v as "pin" | "rolling" })}
+                        options={[
+                            { value: "pin", label: t('images.pinStable') },
+                            { value: "rolling", label: t('images.rollingLatest') },
+                        ]}
+                    />
                 </div>
                 <div className="space-y-2">
                      <Label htmlFor="img-platforms" className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('images.platformsLabel')}</Label>

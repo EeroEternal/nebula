@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { apiGetWithParams, v2 } from '@/lib/api'
 import type { ModelView } from '@/lib/types'
@@ -173,16 +174,16 @@ export function ModelCatalogView() {
 
             <div className="flex items-center gap-2 bg-black/20 px-3 py-1.5 rounded-lg border border-border/50">
                 <Filter className="h-3.5 w-3.5 text-muted-foreground" />
-                <select
+                <Select
                     value={taskFilter}
-                    onChange={(e) => setTaskFilter(e.target.value)}
-                    className="bg-transparent border-none text-[10px] font-bold uppercase tracking-wider focus:outline-none cursor-pointer text-muted-foreground hover:text-foreground"
-                >
-                    <option value="all" className="bg-card text-foreground">{t('catalog.allTasks')}</option>
-                    {taskOptions.filter(o => o !== 'all').map(o => (
-                        <option key={o} value={o} className="bg-card text-foreground">{o}</option>
-                    ))}
-                </select>
+                    onChange={(v) => setTaskFilter(v)}
+                    className="w-40"
+                    triggerClassName="bg-transparent border-none text-[10px] font-bold uppercase tracking-wider cursor-pointer text-muted-foreground hover:text-foreground h-8"
+                    options={[
+                        { value: 'all', label: t('catalog.allTasks') },
+                        ...taskOptions.filter(o => o !== 'all').map(o => ({ value: o, label: o })),
+                    ]}
+                />
             </div>
         </div>
 
