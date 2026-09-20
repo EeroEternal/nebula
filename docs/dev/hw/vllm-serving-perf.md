@@ -96,3 +96,63 @@ vllm bench serve --backend openai-chat --base-url http://<engine>/v1 \
 ```
 
 对照实验注意：两个同镜像/同参数 Pod，仅差 `VLLM_USE_RUST_FRONTEND`；**交错**跑；`--num-warmups ≥ 4`，第一轮常有冷启动偏差，需剔除。
+
+## 9. 后续：零代码优化清单（分析）
+
+约束：只改**启动参数 / 环境变量 / 部署拓扑 / OS / k8s**，不改代码。
+已开着、不必再折腾：`prefix caching`、`chunked prefill`、CUDA graphs、FlashInfer、`gpu_memory_utilization=0.92`。
+
+状态：**A1 已实测**；其余为**分析预期，尚未验证**。
+
+### 9.1 vLLM 进程（参数 / env）
+
+| # | 手段 | 状态/预期 | 影响面 |
+|---|------|-----------|--------|
+| A1 | `VLLM_USE_RUST_FRONTEND=1` | **已实测**：TTFT −33~46%，吞吐 +8~20% | 延迟+吞吐 |
+| A2 | `--kv-cache-dtype fp8` | KV 249k→~500k tokens，长上下文并发 7.6→~15 | 长上下文并发 |
+| A3 | `--max-num-batched-tokens 16384`（0.26 默认 8192） | prefill 批更大 | 长 prompt |
+| A4 | `--async-scheduling` | 调度/执行重叠 | 吞吐/P99 |
+| A5 | `--speculative-config`（n-gram，无需 draft） | 重复性输出免费加速 | decode 吞吐 |
+| A6 | `--gpu-memory-utilization 0.95` | 更多 KV | 并发 |
+| A7 | 升级 vLLM 0.26 → 0.29 | MRV2 默认 + kernel 优化 + `max_num_batched_tokens` 默认 16384 | 全面（上游免费） |
+| A8 | `--max-num-queued-reqs/tokens`（0.29 新） | 引擎侧准入，防过订阅 | P99 |
+
+### 9.2 部署拓扑（改部署，零代码）
+
+| # | 手段 | 预期 | 影响面 |
+|---|------|------|--------|
+| B1 | Nebula gateway/router 与引擎同机（或每 GPU 机一个边缘网关） | 收回跨节点一跳（对应 §2 的 +19% TTFT P99） | 延迟 |
+| B2 | **多副本**（当前只用 1/8 张卡） | 吞吐**线性扩展**；也是 HA 前提 | 吞吐 |
+| B3 | k8s QoS：`BestEffort` → Burstable/Guaranteed | 主机压力下不被抢/被逐 | 尾延迟稳定 |
+| B4 | GPU ↔ NIC ↔ NUMA 对齐 | 小 | 延迟 |
+
+### 9.3 Nebula 控制面（env / etcd）
+
+| # | 手段 | 预期 | 影响面 |
+|---|------|------|--------|
+| C1 | 多副本后 `--routing-strategy prefix_cache_aware` | 前缀命中率↑ → 聚合 TTFT↓ | 延迟+吞吐 |
+| C2 | 并发上限设在甜点区 **C≈8–16** | 阻止“吞吐换 2.5s 尾巴”（§1 实测） | P99 |
+| C3 | 热路径关掉非必要观测（OBSERVE/审计/高基数 metrics） | 省 CPU | P99 |
+| C4 | gateway/router upstream keep-alive 调优 | 小 | 延迟 |
+
+### 9.4 模型 / 工作负载
+
+| # | 手段 | 预期 | 影响面 |
+|---|------|------|--------|
+| D1 | 共享 system prompt（让 prefix cache 真命中） | 长 system prompt 可整段跳过 prefill | TTFT |
+| D2 | FP8/INT4 权重量化（5090 支持 FP8） | decode 显存流量减半 → 接近 2× decode | decode 吞吐 |
+| D3 | 客户端连接复用 / HTTP2 / 批量化 | 中小 | 吞吐 |
+
+### 9.5 优先级（ROI）
+
+| 优先 | 手段 | 类型 | 量级 |
+|------|------|------|------|
+| 高 | **A1** `VLLM_USE_RUST_FRONTEND=1` | 零代码 | TTFT 砍 1/3~1/2（已实测） |
+| 高 | **B2** 多副本（用上空闲卡） | 改部署 | 吞吐线性 ×N |
+| 中 | **C2** 并发准入钳在 C≈8–16 | etcd/env | P99 从秒级回落 |
+| 中 | **B1** 网关与引擎同机 | 改部署 | 收回部分 +19% TTFT P99 |
+| 中 | **D2** FP8 权重 | 换模型 | decode ~2× |
+| 低 | A2/A3/A4 | 改参数 | 个位数~几十% |
+| 低 | A7 升 0.29 | 升版本 | 上游白送 |
+
+**判断**：降延迟优先 A1 → B1 → C2 → D1；提吞吐优先 B2 → D2 → A5。最被低估的是 **B2**（单副本只用 1/8 卡）与 **C2**（别过载比调快更值）。已排除：CPU 绑核（§3）、单机 PD（§6）、ZMQ 调参（§6）。
