@@ -298,10 +298,7 @@ async fn main() -> anyhow::Result<()> {
             "/v1/models/:model_uid",
             delete(powerllm_compat::terminate_instance_compat),
         )
-        .route(
-            "/v1/device/info",
-            get(powerllm_compat::device_info_compat),
-        )
+        .route("/v1/device/info", get(powerllm_compat::device_info_compat))
         .with_state(st.clone());
 
     let app = Router::new()

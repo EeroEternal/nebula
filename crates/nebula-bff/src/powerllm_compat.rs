@@ -157,18 +157,20 @@ pub async fn list_instances_compat(
     Query(_q): Query<InstanceListQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     // 1. List deployments from etcd
-    let dep_keys = st
-        .store
-        .list_prefix("/deployments/")
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))))?;
+    let dep_keys = st.store.list_prefix("/deployments/").await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
+    })?;
 
     // 2. List endpoints from etcd
-    let ep_keys = st
-        .store
-        .list_prefix("/endpoints/")
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()}))))?;
+    let ep_keys = st.store.list_prefix("/endpoints/").await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
+    })?;
 
     let mut endpoints_by_model: HashMap<String, Vec<EndpointInfo>> = HashMap::new();
     for (_k, v, _rev) in ep_keys {
@@ -198,7 +200,10 @@ pub async fn list_instances_compat(
                 .map(|s| s.model_name.clone())
                 .unwrap_or_else(|| model_uid.clone());
 
-            let eps = endpoints_by_model.get(&model_uid).cloned().unwrap_or_default();
+            let eps = endpoints_by_model
+                .get(&model_uid)
+                .cloned()
+                .unwrap_or_default();
             let is_ready = !eps.is_empty() && eps.iter().any(|e| e.status == EndpointStatus::Ready);
 
             let status_str = match dep.desired_state {
@@ -283,7 +288,10 @@ pub async fn get_instance_detail_compat(
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let dep_key = format!("/deployments/{model_uid}");
     let raw_dep = st.store.get(&dep_key).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
     })?;
 
     let Some((raw_dep, _rev)) = raw_dep else {
@@ -294,7 +302,10 @@ pub async fn get_instance_detail_compat(
     };
 
     let dep: ModelDeployment = serde_json::from_slice(&raw_dep).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
     })?;
 
     let spec_key = format!("/models/{model_uid}/spec");
@@ -384,10 +395,16 @@ pub async fn launch_instance_compat(
 
     let spec_key = format!("/models/{model_uid}/spec");
     let spec_val = serde_json::to_vec(&spec).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
     })?;
     st.store.put(&spec_key, spec_val, None).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
     })?;
 
     // 2. Create ModelDeployment declarative expectation
@@ -411,10 +428,16 @@ pub async fn launch_instance_compat(
 
     let dep_key = format!("/deployments/{model_uid}");
     let dep_val = serde_json::to_vec(&dep).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
     })?;
     st.store.put(&dep_key, dep_val, None).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
     })?;
 
     Ok((
@@ -431,7 +454,10 @@ pub async fn terminate_instance_compat(
 ) -> Result<impl IntoResponse, (StatusCode, Json<Value>)> {
     let dep_key = format!("/deployments/{model_uid}");
     let raw = st.store.get(&dep_key).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"detail": e.to_string()})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"detail": e.to_string()})),
+        )
     })?;
 
     if let Some((raw, _rev)) = raw {

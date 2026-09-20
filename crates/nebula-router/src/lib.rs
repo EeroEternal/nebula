@@ -883,7 +883,10 @@ mod model_alias_tests {
         let selected = router.route(&ctx, "qwen2.5-7b").unwrap();
         assert_eq!(selected.model_uid, "qwen2.5-7b");
         assert_eq!(selected.replica_id, 0);
-        assert_eq!(selected.base_url.as_deref(), Some("http://10.99.255.102:9997"));
+        assert_eq!(
+            selected.base_url.as_deref(),
+            Some("http://10.99.255.102:9997")
+        );
         assert_eq!(selected.engine_type.as_deref(), Some("powerllm"));
     }
 }
