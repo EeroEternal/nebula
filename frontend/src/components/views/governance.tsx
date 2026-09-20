@@ -98,7 +98,7 @@ export function GovernanceView() {
         } finally {
             setLoading(false)
         }
-    }, [token])
+    }, [token, t])
 
     useEffect(() => { void refresh() }, [refresh])
 

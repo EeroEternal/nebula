@@ -45,6 +45,7 @@ export function GatewayView() {
       s4xx: latestValue(traffic.series.responses_4xx),
       s5xx: latestValue(traffic.series.responses_5xx),
     }
+    // eslint-disable-next-line react-hooks/preserve-manual-memoization -- React Compiler is not enabled in this build
   }, [traffic])
 
   const reliabilitySummary = useMemo(() => {
@@ -57,6 +58,7 @@ export function GatewayView() {
       up5xx: latestValue(reliability.series.upstream_error_5xx),
       other: latestValue(reliability.series.upstream_error_other),
     }
+    // eslint-disable-next-line react-hooks/preserve-manual-memoization -- React Compiler is not enabled in this build
   }, [reliability])
 
   const latencySummary = useMemo(() => {
@@ -68,6 +70,7 @@ export function GatewayView() {
       ttft50: latestValue(latency.series.ttft_p50_ms),
       ttft95: latestValue(latency.series.ttft_p95_ms),
     }
+    // eslint-disable-next-line react-hooks/preserve-manual-memoization -- React Compiler is not enabled in this build
   }, [latency])
 
   const chartData = useMemo(() => {
@@ -99,6 +102,7 @@ export function GatewayView() {
         { name: 'Open', value: protection.circuit_open_count },
       ]
     }
+    // eslint-disable-next-line react-hooks/preserve-manual-memoization -- React Compiler is not enabled in this build
   }, [trafficSummary, reliabilitySummary, latencySummary, protection])
 
   return (

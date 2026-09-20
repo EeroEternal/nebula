@@ -1,4 +1,5 @@
-import { useContext, useMemo, useState } from 'react'
+/* eslint-disable react-refresh/only-export-components -- module also exports t()/useI18n() by design */
+import { useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { I18nContext, type I18nContextValue, type Locale } from './i18n-context'
 
@@ -1631,7 +1632,9 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     const saved = localStorage.getItem(STORAGE_KEY)
     return saved === 'en' || saved === 'zh' ? saved : 'zh'
   })
-  currentLocale = locale
+  useEffect(() => {
+    currentLocale = locale
+  }, [locale])
 
   const setLocale = (next: Locale) => {
     currentLocale = next
