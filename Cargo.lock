@@ -1485,6 +1485,7 @@ dependencies = [
  "nebula-common",
  "nebula-control",
  "nebula-meta",
+ "nebula-router",
  "reqwest",
  "serde",
  "serde_json",

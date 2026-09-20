@@ -24,8 +24,8 @@ use crate::interface::{
     responses_json_to_openai_chat, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
-    classify_reqwest_error, forward_upstream_response, post_router_chat, prepare_upstream,
-    prepare_upstream_from_json,
+    classify_reqwest_error, embedded_target, forward_upstream_response, post_router_chat,
+    prepare_upstream, prepare_upstream_from_json,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
@@ -471,7 +471,6 @@ pub async fn proxy_post(
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let url = format!("{base}{uri_path}{uri_query}");
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), st.max_request_body_bytes).await {
         Ok(b) => b,
@@ -500,6 +499,14 @@ pub async fn proxy_post(
         Ok(p) => p,
         Err(r) => return r,
     };
+
+    // Embedded router: route in-process and hit the engine directly (no router hop).
+    let (url, body_bytes) =
+        match embedded_target(&st, &prepared, &body_bytes, &uri_path, &uri_query).await {
+            Ok(Some(v)) => v,
+            Ok(None) => (format!("{base}{uri_path}{uri_query}"), body_bytes),
+            Err(r) => return r,
+        };
 
     let resp = match st
         .http

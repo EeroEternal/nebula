@@ -83,6 +83,50 @@ async fn main() {
         }
     };
 
+    // `NEBULA_ROUTER_MODE=embedded` runs routing in-process (no gateway→router
+    // HTTP hop). Default `remote` keeps forwarding to a standalone router.
+    let embedded_router = if std::env::var("NEBULA_ROUTER_MODE")
+        .map(|v| v.eq_ignore_ascii_case("embedded"))
+        .unwrap_or(false)
+    {
+        let strategy_name =
+            std::env::var("NEBULA_ROUTER_STRATEGY").unwrap_or_else(|_| "least_pending".to_string());
+        let strategy =
+            nebula_router::strategy::parse_strategy(&strategy_name).unwrap_or_else(|e| {
+                tracing::error!(error=%e, "invalid routing strategy");
+                std::process::exit(1);
+            });
+        let router = nebula_router::Router::with_strategy(strategy);
+        let (r1, s1) = (router.clone(), store.clone());
+        tokio::spawn(async move {
+            if let Err(e) = nebula_router::sync::endpoints_sync_loop(s1, r1).await {
+                tracing::error!(error=%e, "endpoints sync loop exited");
+            }
+        });
+        let (r2, s2) = (router.clone(), store.clone());
+        tokio::spawn(async move {
+            if let Err(e) = nebula_router::sync::placement_sync_loop(s2, r2).await {
+                tracing::error!(error=%e, "placement sync loop exited");
+            }
+        });
+        let (r3, s3) = (router.clone(), store.clone());
+        tokio::spawn(async move {
+            if let Err(e) = nebula_router::sync::models_sync_loop(s3, r3).await {
+                tracing::error!(error=%e, "model specs sync loop exited");
+            }
+        });
+        let (r4, s4) = (router.clone(), store.clone());
+        tokio::spawn(async move {
+            if let Err(e) = nebula_router::sync::stats_sync_loop(s4, r4).await {
+                tracing::error!(error=%e, "stats sync loop exited");
+            }
+        });
+        tracing::info!(strategy = %strategy_name, "gateway running with embedded router (no router hop)");
+        Some(router)
+    } else {
+        None
+    };
+
     let auth = build_gateway_auth().await;
 
     let metrics = Arc::new(metrics::Metrics::default());
@@ -104,6 +148,7 @@ async fn main() {
     let st = AppState {
         _noop: Arc::new(()),
         router_base_url,
+        router: embedded_router,
         http,
         store: Arc::new(store),
         auth,

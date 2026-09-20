@@ -3,7 +3,7 @@
 use axum::{
     body::Body,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use bytes::Bytes;
 use nebula_common::{
@@ -22,6 +22,8 @@ pub struct PreparedUpstream {
     pub model: Option<String>,
     pub request_id: String,
     pub headers: reqwest::header::HeaderMap,
+    /// Execution context built from auth + headers; used by embedded routing.
+    pub ctx: nebula_common::ExecutionContext,
     /// Held for the request lifetime when multi-tenant admission is active.
     pub _conc_guard: Option<nebula_common::admission::ConcurrencyGuard>,
 }
@@ -127,8 +129,9 @@ pub async fn prepare_upstream(
 
     Ok(PreparedUpstream {
         model,
-        request_id: ctx.request_id,
+        request_id: ctx.request_id.clone(),
         headers: req_headers,
+        ctx,
         _conc_guard,
     })
 }
@@ -323,4 +326,66 @@ fn inject_nebula_echo_headers(out: &mut Response, request_id: Option<&str>) {
                 .insert(HeaderName::from_static(HEADER_REQUEST_ID), v);
         }
     }
+}
+
+/// Embedded-router resolution.
+///
+/// When `AppState.router` is set (`NEBULA_ROUTER_MODE=embedded`), resolve the
+/// model, select a ready endpoint in-process, and return the engine URL plus a
+/// body whose `model` field is rewritten to the engine's served name. Returns
+/// `Ok(None)` in remote mode (caller forwards to a standalone router).
+pub async fn embedded_target(
+    st: &AppState,
+    prepared: &PreparedUpstream,
+    body_bytes: &[u8],
+    uri_path: &str,
+    uri_query: &str,
+) -> Result<Option<(String, Bytes)>, Response> {
+    let Some(router) = st.router.as_ref() else {
+        return Ok(None);
+    };
+
+    let raw_model = prepared.model.clone().unwrap_or_default();
+    let model_uid = router.resolve_model(&raw_model);
+    let engine_model = router
+        .get_engine_model_name(&model_uid)
+        .unwrap_or_else(|| raw_model.clone());
+    let body = nebula_common::rewrite_json_model_field(body_bytes, &engine_model)
+        .map(Bytes::from)
+        .unwrap_or_else(|| Bytes::copy_from_slice(body_bytes));
+
+    let plan_version = router.plan_version_for(&model_uid).filter(|&v| v > 0);
+    let routed = match plan_version {
+        Some(pv) => router.route_with_plan_version(&prepared.ctx, &model_uid, pv),
+        None => router.route(&prepared.ctx, &model_uid),
+    };
+    let ep = match routed {
+        Ok(ep) => ep,
+        Err(nebula_router::RouteError::Overloaded) => {
+            return Err((
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                format!("all endpoints overloaded for model '{model_uid}'"),
+            )
+                .into_response());
+        }
+        Err(_) => {
+            return Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                format!("no ready endpoint for model '{model_uid}'"),
+            )
+                .into_response());
+        }
+    };
+    let base = match ep.base_url.as_deref() {
+        Some(b) => b.trim_end_matches('/'),
+        None => {
+            return Err((
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "endpoint missing base_url",
+            )
+                .into_response());
+        }
+    };
+
+    Ok(Some((format!("{base}{uri_path}{uri_query}"), body)))
 }

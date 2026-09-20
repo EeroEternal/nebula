@@ -12,6 +12,9 @@ use crate::platform_auth::GatewayAuth;
 pub struct AppState {
     pub _noop: Arc<()>,
     pub router_base_url: String,
+    /// Present when `NEBULA_ROUTER_MODE=embedded`: route in-process instead of
+    /// forwarding to a standalone `nebula-router` over HTTP (saves one hop).
+    pub router: Option<Arc<nebula_router::Router>>,
     pub http: reqwest::Client,
     pub store: Arc<EtcdMetaStore>,
     pub auth: GatewayAuth,
