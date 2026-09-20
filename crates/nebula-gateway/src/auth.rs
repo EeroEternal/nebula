@@ -1,5 +1,5 @@
 // Re-export shared auth types from nebula-common.
-pub use nebula_common::auth::{AuthConfig, AuthContext, Role};
+pub use nebula_common::auth::{AuthContext, Role};
 
 use axum::response::Response;
 

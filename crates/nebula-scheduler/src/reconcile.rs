@@ -53,10 +53,6 @@ pub(crate) fn assignment_disposition(
 /// Reconcile interval.
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Startup grace period for assignments with no endpoint yet.
-/// Large-model cold starts (download + compile + graph capture) can exceed minutes.
-const STARTUP_GRACE_MS: u64 = 900_000;
-
 /// KV cache usage fraction above which we consider scaling up.
 const SCALE_UP_KV_THRESHOLD: f64 = 0.80;
 

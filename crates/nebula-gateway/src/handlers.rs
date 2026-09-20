@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use uuid::Uuid;
 
-use nebula_common::{build_execution_context, PlacementPlan};
+use nebula_common::PlacementPlan;
 use nebula_meta::MetaStore;
 
 use crate::auth::AuthContext;
@@ -24,8 +24,8 @@ use crate::interface::{
     responses_json_to_openai_chat, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
-    append_headers, classify_reqwest_error, forward_upstream_response, post_router_chat,
-    prepare_upstream, prepare_upstream_from_json,
+    classify_reqwest_error, forward_upstream_response, post_router_chat, prepare_upstream,
+    prepare_upstream_from_json,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
@@ -456,22 +456,6 @@ async fn proxy_chat_as_anthropic(
 
 pub async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
-}
-
-pub async fn not_implemented(
-    State(_st): State<AppState>,
-    Extension(auth): Extension<AuthContext>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    let ctx = build_execution_context(&headers, auth.tenant_id.as_deref(), None);
-    let body = json!({
-        "error": {
-            "message": "not implemented",
-            "type": "nebula_gateway_not_implemented",
-            "request_id": ctx.request_id
-        }
-    });
-    (StatusCode::NOT_IMPLEMENTED, Json(body))
 }
 
 pub async fn proxy_post(

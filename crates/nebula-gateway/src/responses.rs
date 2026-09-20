@@ -11,6 +11,8 @@ pub struct CreateResponseRequest {
     pub input: Option<Value>,
     #[allow(dead_code)]
     pub instructions: Option<Value>,
+    #[allow(dead_code)]
+    // accepted for OpenAI Responses compatibility; streaming is handled upstream
     pub stream: Option<bool>,
 }
 

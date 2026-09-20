@@ -18,6 +18,7 @@ use crate::interface::{maybe_normalize_router_error, upstream_transport_error};
 use crate::state::AppState;
 
 pub struct PreparedUpstream {
+    #[allow(dead_code)] // retained for downstream adapters that inspect the upstream model
     pub model: Option<String>,
     pub request_id: String,
     pub headers: reqwest::header::HeaderMap,

@@ -4,9 +4,7 @@
 //! and registers Ready endpoints to `/endpoints/{model_uid}/{replica_id}`.
 
 use clap::Parser;
-use futures_util::StreamExt;
 use serde_json::json;
-use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
         "nebula-k8s-controller starting"
     );
 
-    let store = Arc::new(EtcdMetaStore::connect(&[args.etcd_endpoint.clone()]).await?);
+    let store = Arc::new(EtcdMetaStore::connect(std::slice::from_ref(&args.etcd_endpoint)).await?);
     let namespace = args.namespace.clone();
     let gpu_node = args.gpu_node.clone();
 

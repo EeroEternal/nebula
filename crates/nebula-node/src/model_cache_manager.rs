@@ -318,6 +318,7 @@ async fn purge_model_cache_files(
 // ---------------------------------------------------------------------------
 
 /// Scan HuggingFace Hub cache: {model_dir}/.cache/huggingface/hub/models--{org}--{name}/
+#[allow(clippy::too_many_arguments)]
 async fn scan_hf_cache(
     store: &EtcdMetaStore,
     node_id: &str,
@@ -372,6 +373,7 @@ async fn scan_hf_cache(
 }
 
 /// Scan ModelScope cache: {model_dir}/.cache/modelscope/hub/{org}/{name}/
+#[allow(clippy::too_many_arguments)]
 async fn scan_modelscope_cache(
     store: &EtcdMetaStore,
     node_id: &str,
@@ -432,6 +434,7 @@ async fn scan_modelscope_cache(
 }
 
 /// Scan direct paths: {model_dir}/{name}/ (top-level directories that look like models)
+#[allow(clippy::too_many_arguments)]
 async fn scan_direct_paths(
     store: &EtcdMetaStore,
     node_id: &str,
@@ -499,6 +502,7 @@ fn cache_etcd_key(node_id: &str, model_name: &str) -> String {
 }
 
 /// Write a ModelCacheEntry to etcd (node-ephemeral lease).
+#[allow(clippy::too_many_arguments)]
 async fn write_cache_entry(
     store: &EtcdMetaStore,
     key: &str,
@@ -622,6 +626,7 @@ fn has_safetensors(path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Report disk status to etcd and emit alerts if thresholds are exceeded.
+#[allow(clippy::too_many_arguments)]
 async fn report_disk_status(
     store: &EtcdMetaStore,
     node_id: &str,
@@ -699,6 +704,7 @@ async fn report_disk_status(
 }
 
 /// Emit a disk alert to etcd (node-ephemeral lease).
+#[allow(clippy::too_many_arguments)]
 async fn emit_disk_alert(
     store: &EtcdMetaStore,
     node_id: &str,
@@ -958,7 +964,7 @@ fn find_hf_cached_model(model_name: &str, model_dir: &str) -> Option<String> {
         }
     }
     // Check direct path: {model_dir}/{model_name_last_part}/
-    if let Some(short_name) = model_name.split('/').last() {
+    if let Some(short_name) = model_name.split('/').next_back() {
         let direct = base.join(short_name);
         if direct.is_dir() && has_config_json_recursive(&direct) {
             return Some(direct.to_string_lossy().to_string());
@@ -983,7 +989,7 @@ fn find_modelscope_cached_model(model_name: &str, model_dir: &str) -> Option<Str
         }
     }
     // Check direct path
-    if let Some(short_name) = model_name.split('/').last() {
+    if let Some(short_name) = model_name.split('/').next_back() {
         let direct = base.join(short_name);
         if direct.is_dir() && has_config_json_recursive(&direct) {
             return Some(direct.to_string_lossy().to_string());

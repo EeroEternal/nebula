@@ -6,7 +6,6 @@ mod output;
 
 use anyhow::Result;
 use clap::Parser;
-use futures_util::StreamExt;
 use reqwest::Client;
 
 use nebula_common::{ClusterStatus, ModelLoadRequest};

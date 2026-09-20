@@ -7,9 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nebula_common::{
-    static_capability, validate_engine_type, EndpointStats, EngineCapability, ModelConfig,
-};
+use nebula_common::{static_capability, validate_engine_type, EndpointStats, EngineCapability};
 use tokio::fs;
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
@@ -92,11 +90,6 @@ pub trait Engine: Send + Sync {
             observability: Default::default(),
             notes: Some("unknown engine capability profile".into()),
         })
-    }
-
-    /// Validate deployment config before start. Returns actionable error text.
-    fn validate_config(&self, config: &ModelConfig) -> Result<(), String> {
-        nebula_common::validate_model_config(self.engine_type(), config)
     }
 
     /// Start a new engine instance.

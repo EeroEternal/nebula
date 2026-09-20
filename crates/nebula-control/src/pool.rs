@@ -1,6 +1,6 @@
 use nebula_common::pool::{HardwarePool, PoolRole};
 use nebula_meta::MetaStore;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 
 use crate::error::ServiceError;

@@ -67,10 +67,7 @@ fn should_reject_stale_epoch(plan: &PlacementPlan, last_epochs: &HashMap<String,
     if plan.leader_epoch == 0 {
         return false;
     }
-    match last_epochs.get(&plan.model_uid) {
-        Some(&last) if plan.leader_epoch < last => true,
-        _ => false,
-    }
+    matches!(last_epochs.get(&plan.model_uid), Some(&last) if plan.leader_epoch < last)
 }
 
 /// Assignments on this node from a placement plan.
@@ -555,6 +552,7 @@ async fn start_replica(
 ///
 /// C2: holds `running` only for snapshot / commit; download / start / stop / etcd
 /// side-effects run outside the lock.
+#[allow(clippy::too_many_arguments)] // reconcile entrypoint wired from node runtime
 pub async fn reconcile_model(
     store: &EtcdMetaStore,
     args: &Args,

@@ -3,7 +3,7 @@
 use axum::{http::StatusCode, response::Response};
 use nebula_common::{tool_calling_for_engine, ModelSpec, SupportLevel};
 use nebula_meta::MetaStore;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::interface::errors::openai_error_response;
 
@@ -109,6 +109,7 @@ pub async fn check_tooling_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn detects_tools_array_and_tool_choice() {

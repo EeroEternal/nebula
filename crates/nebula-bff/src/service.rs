@@ -1227,11 +1227,6 @@ pub async fn list_alerts(store: &dyn MetaStore) -> Result<AlertsSummary, Service
     Ok(AlertsSummary { disk, engine })
 }
 
-/// Backward-compatible alias; prefer [`list_alerts`].
-pub async fn list_disk_alerts(store: &dyn MetaStore) -> Result<Vec<DiskAlert>, ServiceError> {
-    Ok(list_alerts(store).await?.disk)
-}
-
 // ---------------------------------------------------------------------------
 // v1 → v2 migration
 // ---------------------------------------------------------------------------

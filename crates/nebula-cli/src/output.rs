@@ -182,7 +182,7 @@ pub fn print_cache_summary(data: &Value) {
                         let name = m["model_name"].as_str().unwrap_or("");
                         let size = m["size_bytes"]
                             .as_u64()
-                            .map(|b| format_bytes(b))
+                            .map(format_bytes)
                             .unwrap_or_else(|| "N/A".to_string());
                         println!("    {:<35} {:<15}", name, size);
                     }
@@ -207,7 +207,7 @@ pub fn print_node_cache(data: &Value) {
                 let name = m["model_name"].as_str().unwrap_or("");
                 let size = m["size_bytes"]
                     .as_u64()
-                    .map(|b| format_bytes(b))
+                    .map(format_bytes)
                     .unwrap_or_else(|| "N/A".to_string());
                 println!("  {:<35} {:<15}", name, size);
             }

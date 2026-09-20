@@ -99,34 +99,6 @@ impl RestartBudget {
     }
 }
 
-#[cfg(test)]
-mod budget_tests {
-    use super::*;
-
-    #[test]
-    fn budget_exhausts_after_n() {
-        let mut b = RestartBudget::default();
-        let mut now = 1_000u64;
-        for i in 0..RESTART_BUDGET_N {
-            assert!(b.try_consume(now).is_ok(), "attempt {i}");
-            now = b.next_allowed_ms;
-        }
-        assert_eq!(b.try_consume(now), Err("budget_exhausted"));
-    }
-
-    #[test]
-    fn budget_resets_after_window() {
-        let mut b = RestartBudget::default();
-        let mut now = 1_000u64;
-        for _ in 0..RESTART_BUDGET_N {
-            let _ = b.try_consume(now);
-            now = b.next_allowed_ms;
-        }
-        now = b.window_start_ms + RESTART_BUDGET_WINDOW_MS + 1;
-        assert!(b.try_consume(now).is_ok());
-    }
-}
-
 fn engine_probe_alert_key(node_id: &str, model_uid: &str, replica_id: u32) -> String {
     format!("/alerts/{}/engine_{}_{}", node_id, model_uid, replica_id)
 }
@@ -275,6 +247,7 @@ pub async fn delete_capability(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // node runtime wiring; a params struct would only relocate the noise
 pub async fn heartbeat_loop(
     store: EtcdMetaStore,
     node_id: String,
@@ -810,5 +783,33 @@ pub async fn heartbeat_loop(
         }
 
         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn budget_exhausts_after_n() {
+        let mut b = RestartBudget::default();
+        let mut now = 1_000u64;
+        for i in 0..RESTART_BUDGET_N {
+            assert!(b.try_consume(now).is_ok(), "attempt {i}");
+            now = b.next_allowed_ms;
+        }
+        assert_eq!(b.try_consume(now), Err("budget_exhausted"));
+    }
+
+    #[test]
+    fn budget_resets_after_window() {
+        let mut b = RestartBudget::default();
+        let mut now = 1_000u64;
+        for _ in 0..RESTART_BUDGET_N {
+            let _ = b.try_consume(now);
+            now = b.next_allowed_ms;
+        }
+        now = b.window_start_ms + RESTART_BUDGET_WINDOW_MS + 1;
+        assert!(b.try_consume(now).is_ok());
     }
 }

@@ -15,9 +15,11 @@ use crate::model_request::ModelConfig;
 /// Coarse model architecture for filtering / explanations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ModelArchitecture {
     Dense,
     MoE,
+    #[default]
     Unknown,
 }
 
@@ -43,15 +45,11 @@ pub struct ModelProfile {
     pub updated_at_ms: u64,
 }
 
-impl Default for ModelArchitecture {
-    fn default() -> Self {
-        Self::Unknown
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SelectionPreference {
+    #[default]
     Latency,
     Throughput,
     Cost,
@@ -83,12 +81,6 @@ pub struct SelectionConstraints {
     pub preference: SelectionPreference,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_candidates: Option<u32>,
-}
-
-impl Default for SelectionPreference {
-    fn default() -> Self {
-        Self::Latency
-    }
 }
 
 impl Default for SelectionConstraints {

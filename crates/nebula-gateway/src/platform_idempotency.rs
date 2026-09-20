@@ -75,8 +75,3 @@ fn idempotent_accepted(record: &IdempotencyRecord) -> Response {
     )
         .into_response()
 }
-
-pub fn idempotency_conflict(err: ServiceError) -> Response {
-    use crate::control::control_error;
-    control_error(err)
-}

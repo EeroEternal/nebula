@@ -79,10 +79,7 @@ pub fn static_version_support(engine_type: &str) -> Vec<EngineVersionSupport> {
 
 /// Parse a dotted numeric version prefix (`"0.8.3+cu124"` → `[0,8,3]`).
 pub fn parse_version_tuple(version: &str) -> Option<Vec<u64>> {
-    let core = version
-        .split(|c: char| c == '+' || c == '-' || c == '_')
-        .next()
-        .unwrap_or(version);
+    let core = version.split(['+', '-', '_']).next().unwrap_or(version);
     let parts: Vec<u64> = core
         .split('.')
         .take(4)

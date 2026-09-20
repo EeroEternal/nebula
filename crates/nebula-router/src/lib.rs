@@ -226,10 +226,7 @@ impl Router {
     pub fn record_endpoint_failure(&self, model_uid: &str, replica_id: u32) {
         let key = (model_uid.to_string(), replica_id);
         let now = now_ms();
-        let mut entry = self
-            .endpoint_circuit
-            .entry(key)
-            .or_insert_with(EndpointCircuitState::default);
+        let mut entry = self.endpoint_circuit.entry(key).or_default();
 
         if entry.open_until_ms > now {
             return;
@@ -435,14 +432,12 @@ impl Router {
             if h.expires_at_ms.map(|ts| ts <= now).unwrap_or(false) {
                 self.hint_expired_total.fetch_add(1, Ordering::Relaxed);
                 None
+            } else if h.prefer_session_affinity == Some(true) && ctx.session_id.is_none() {
+                self.hint_conflict_rejected_total
+                    .fetch_add(1, Ordering::Relaxed);
+                None
             } else {
-                if h.prefer_session_affinity == Some(true) && ctx.session_id.is_none() {
-                    self.hint_conflict_rejected_total
-                        .fetch_add(1, Ordering::Relaxed);
-                    None
-                } else {
-                    Some(h)
-                }
+                Some(h)
             }
         } else {
             None

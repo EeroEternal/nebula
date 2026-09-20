@@ -241,6 +241,7 @@ pub fn allocate_port(start: u16, used: &HashSet<u16>) -> u16 {
     port
 }
 
+#[allow(clippy::too_many_arguments)] // placement assignment wiring; a struct would not aid readability here
 fn make_assignment(
     replica_id: u32,
     model_uid: &str,

@@ -2,7 +2,6 @@ mod args;
 mod audit;
 mod auth;
 mod control;
-mod engine;
 mod handlers;
 mod interface;
 mod metrics;
@@ -28,7 +27,6 @@ use nebula_common::proxy_http_client;
 
 use crate::args::Args;
 use crate::audit::AuditWriter;
-use crate::engine::{EngineClient, OpenAIEngineClient};
 use crate::handlers::{
     create_anthropic_messages, create_responses, healthz, list_models, proxy_post,
 };
@@ -72,11 +70,6 @@ async fn main() {
 
     tracing::info!(router_base_url=%router_base_url, engine_model=%engine_model, "gateway starting");
 
-    let engine: Arc<dyn EngineClient> = Arc::new(OpenAIEngineClient::new(
-        router_base_url.clone(),
-        engine_model,
-    ));
-
     let http = proxy_http_client().unwrap_or_else(|e| {
         tracing::error!(error=%e, "failed to build reqwest client");
         std::process::exit(1);
@@ -110,7 +103,6 @@ async fn main() {
 
     let st = AppState {
         _noop: Arc::new(()),
-        engine,
         router_base_url,
         http,
         store: Arc::new(store),

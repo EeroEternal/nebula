@@ -441,8 +441,8 @@ pub fn parse_openai_sse_chunk(data: &str) -> Vec<OpenAiStreamChunk> {
     out
 }
 
-/// Extract text delta from an OpenAI chat SSE `data:` JSON payload.
-pub fn openai_sse_content_delta(data: &str) -> Option<String> {
+#[cfg(test)]
+fn openai_sse_content_delta(data: &str) -> Option<String> {
     parse_openai_sse_chunk(data)
         .into_iter()
         .find_map(|c| match c {
@@ -573,7 +573,7 @@ impl AnthropicSseMapper {
             ));
             self.text_open = false;
         }
-        for (_, (anth_index, started, _, _)) in &self.tools {
+        for (anth_index, started, _, _) in self.tools.values() {
             if *started {
                 evs.push((
                     "content_block_stop".into(),

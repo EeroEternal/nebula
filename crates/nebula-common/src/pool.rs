@@ -5,17 +5,13 @@ use serde::{Deserialize, Serialize};
 /// Role/purpose of a hardware pool.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PoolRole {
+    #[default]
     General,
     Prefill,
     Decode,
     Edge,
-}
-
-impl Default for PoolRole {
-    fn default() -> Self {
-        Self::General
-    }
 }
 
 /// A logical resource pool grouping physical nodes.

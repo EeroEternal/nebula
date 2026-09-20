@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use nebula_common::{
     default_compatibility_rules, CapacitySnapshot, CompatibilityRule, DesiredState,
-    DiagnosticEvent, ModelSlo, NodeStatus, PlacementPlan, PlacementRejectReason, SloEvaluation,
+    DiagnosticEvent, ModelSlo, NodeStatus, PlacementPlan, SloEvaluation,
 };
 use nebula_control::{now_ms, ServiceError};
 use nebula_meta::MetaStore;
@@ -408,9 +408,6 @@ pub async fn list_diagnostic_events(
     events.truncate(200);
     Ok(events)
 }
-
-/// Re-export for callers that need the reject type.
-pub type DeployReject = PlacementRejectReason;
 
 #[cfg(test)]
 mod slo_eval_tests {

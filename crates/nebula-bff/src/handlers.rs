@@ -230,37 +230,34 @@ pub async fn engine_stats(
             ..Default::default()
         };
 
-        match client.query_metrics(&q).await {
-            Ok(resp) => {
-                for series in &resp.data {
-                    let model_uid = series
-                        .labels
-                        .get("model_uid")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    let replica_id: u32 = series
-                        .labels
-                        .get("replica_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
+        if let Ok(resp) = client.query_metrics(&q).await {
+            for series in &resp.data {
+                let model_uid = series
+                    .labels
+                    .get("model_uid")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let replica_id: u32 = series
+                    .labels
+                    .get("replica_id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
 
-                    if model_uid.is_empty() {
-                        continue;
-                    }
+                if model_uid.is_empty() {
+                    continue;
+                }
 
-                    if let Some(last) = series.values.last() {
-                        let key = (model_uid, replica_id);
-                        if is_pending {
-                            pending_map.insert(key, last.value as u64);
-                        } else {
-                            kv_usage_map.insert(key, last.value);
-                        }
+                if let Some(last) = series.values.last() {
+                    let key = (model_uid, replica_id);
+                    if is_pending {
+                        pending_map.insert(key, last.value as u64);
+                    } else {
+                        kv_usage_map.insert(key, last.value);
                     }
                 }
             }
-            Err(_) => {}
         }
     }
 
@@ -480,7 +477,7 @@ async fn xtrace_proxy_get(
 ) -> Response {
     let base = st.xtrace_url.trim_end_matches('/');
     let url = match raw_query {
-        Some(q) if !q.is_empty() => format!("{path}?{q}", path = format!("{base}{path}"), q = q),
+        Some(q) if !q.is_empty() => format!("{base}{path}?{q}"),
         _ => format!("{base}{path}"),
     };
 

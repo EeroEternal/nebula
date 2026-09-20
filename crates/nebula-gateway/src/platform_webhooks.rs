@@ -275,19 +275,6 @@ pub fn spawn_operation_webhooks(
     });
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sign_payload_is_deterministic() {
-        let a = sign_payload("secret-key-12345678", r#"{"operation_id":"op_1"}"#);
-        let b = sign_payload("secret-key-12345678", r#"{"operation_id":"op_1"}"#);
-        assert_eq!(a, b);
-        assert!(!a.is_empty());
-    }
-}
-
 use crate::auth::{require_role, AuthContext, Role};
 use crate::control::control_error;
 use crate::state::AppState;
@@ -382,4 +369,17 @@ fn service_unavailable() -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_payload_is_deterministic() {
+        let a = sign_payload("secret-key-12345678", r#"{"operation_id":"op_1"}"#);
+        let b = sign_payload("secret-key-12345678", r#"{"operation_id":"op_1"}"#);
+        assert_eq!(a, b);
+        assert!(!a.is_empty());
+    }
 }

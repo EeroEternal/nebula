@@ -539,7 +539,7 @@ pub async fn update_user(
         .is_active
         .unwrap_or_else(|| existing.get::<bool, _>("is_active"));
 
-    if let Err(_) = sqlx::query(
+    if sqlx::query(
         "UPDATE bff_users SET role = $1, display_name = $2, email = $3, is_active = $4, updated_at = NOW() WHERE id = $5",
     )
     .bind(role)
@@ -549,6 +549,7 @@ pub async fn update_user(
     .bind(user_uuid)
     .execute(&st.db)
     .await
+    .is_err()
     {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }
@@ -608,10 +609,11 @@ pub async fn delete_user(
         return err(StatusCode::BAD_REQUEST, "default admin cannot be deleted").into_response();
     }
 
-    if let Err(_) = sqlx::query("DELETE FROM bff_users WHERE id = $1")
+    if sqlx::query("DELETE FROM bff_users WHERE id = $1")
         .bind(user_uuid)
         .execute(&st.db)
         .await
+        .is_err()
     {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "database error").into_response();
     }

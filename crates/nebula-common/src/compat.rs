@@ -208,6 +208,7 @@ fn cuda_too_old(node: &NodeStatus, min_cuda: &str) -> bool {
 }
 
 /// Evaluate rules against a deploy intent. Deny rules that match win.
+#[allow(clippy::result_large_err)] // PlacementRejectReason is the public error contract; boxing it would churn every caller
 pub fn evaluate_compatibility(
     rules: &[CompatibilityRule],
     input: &CompatCheckInput<'_>,

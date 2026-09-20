@@ -97,6 +97,8 @@ pub struct VllmConfig {
     pub use_modelscope: bool,
     pub hf_endpoint: Option<String>,
     pub gpu_memory_utilization: Option<f32>,
+    #[allow(dead_code)]
+    // deserialized from deployment kwargs; not yet forwarded on every engine path
     pub max_model_len: Option<u32>,
     pub swap_space: Option<u32>,
     pub max_num_batched_tokens: Option<u32>,

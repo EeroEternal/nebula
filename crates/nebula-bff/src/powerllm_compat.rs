@@ -123,7 +123,7 @@ pub async fn token_compat(
         Json(PowerLLMTokenResp {
             access_token: token,
             token_type: "bearer".to_string(),
-            expire_in_minutes: (st.session_ttl_hours as i64) * 60,
+            expire_in_minutes: st.session_ttl_hours * 60,
         }),
     ))
 }
@@ -145,6 +145,7 @@ pub async fn user_info_compat() -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // query params accepted for PowerLLM client compatibility; not all are filtered on yet
 pub struct InstanceListQuery {
     pub model_name: Option<String>,
     pub model_uid: Option<String>,
@@ -346,6 +347,7 @@ pub async fn get_instance_detail_compat(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // accepted for PowerLLM client compatibility; unused fields are ignored
 pub struct LaunchInstanceCompatReq {
     pub model_uid: String,
     pub model_name: Option<String>,

@@ -39,7 +39,7 @@ impl TenantDenyCode {
 }
 
 /// Per-tenant quota policy. `None` fields mean "unlimited / inherit global".
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct TenantQuota {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rps_per_minute: Option<u64>,
@@ -52,18 +52,6 @@ pub struct TenantQuota {
     /// When set, only listed model names / uids are allowed. Empty vec denies all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_models: Option<Vec<String>>,
-}
-
-impl Default for TenantQuota {
-    fn default() -> Self {
-        Self {
-            rps_per_minute: None,
-            max_concurrency: None,
-            max_tokens_per_minute: None,
-            max_pin_requests_per_minute: None,
-            allowed_models: None,
-        }
-    }
 }
 
 /// Tenant entity. etcd: `/tenants/{tenant_id}`

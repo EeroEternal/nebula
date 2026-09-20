@@ -3,17 +3,13 @@ use serde::{Deserialize, Serialize};
 /// Version pinning strategy for engine images.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum VersionPolicy {
     /// Pin to a specific tag — never auto-update.
+    #[default]
     Pin,
     /// Rolling — periodically re-pull to track latest digest for the tag.
     Rolling,
-}
-
-impl Default for VersionPolicy {
-    fn default() -> Self {
-        Self::Pin
-    }
 }
 
 /// A registered engine image in the cluster image registry.
