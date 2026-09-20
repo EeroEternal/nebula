@@ -205,3 +205,40 @@ vllm bench serve --backend openai-chat --base-url http://<engine>/v1 \
 vLLM 不做（无状态推理引擎）；对高重复率 workload 收益是**数量级**的，比任何前端调优都大。难点在流式 SSE 回放与 key 的精确性边界，但全在 C 区。
 
 **排序**：响应缓存 / 去重 > 跨副本前缀亲和 > 集群准入 > PD 编排。
+
+## 11. 插件系统：能否用它提速（分析）
+
+vLLM 有正式插件系统（Python `entry_points`，**不改源码**即可扩展）。插件组：
+
+| 组名 | 加载位置 | 用途 |
+|------|----------|------|
+| `vllm.general_plugins` | **所有进程**（worker / engine core / model registry） | 注册模型架构、引擎侧行为 |
+| `vllm.endpoint_plugins` | 仅 API server 前端 | 加 HTTP 路由；**默认不加载**，需 `VLLM_PLUGINS` 显式 allowlist |
+| `vllm.platform_plugins` | 所有进程 | 新硬件 / platform |
+| `vllm.io_processor_plugins` | process0 | IO 处理 |
+| `vllm.stat_logger_plugins` | process0（async serve） | 自定义统计 |
+
+`general_plugins` 在**执行路径的进程里**都加载（`worker_base` / `engine/core` / `models/registry` / `arg_utils`），所以它能真正作用于跑模型的地方。
+
+### 11.1 性能相关入口
+
+| 入口 | 机制 | 能否覆盖 | 随模型升级变？ | 性能潜力 |
+|------|------|----------|---------------|----------|
+| **覆盖模型实现** | `general_plugins` → `ModelRegistry.register_model(arch, cls)` | **能**（源码原文 “will be overwritten”） | **是** | 高（换 attention/融合/MoE kernel） |
+| **覆盖量化** | `general_plugins` → `register_quantization_config(name)` | **能**（“will be overwritten”） | 半 | 高（自定义 FP8/INT4 路径） |
+| **换调度器** | `--scheduler-cls <module:Class>`（真 CLI 参数） | 能（配置，非 plugin） | **否** | 中（prefix-aware / 优先级） |
+| 换 KV 传输 | `general_plugins` → `KVConnectorFactory.register_connector` | 否（重复注册报错） | 否 | 中（PD / KV offload） |
+| KV 事件发布 | `EventPublisher.register_publisher` | — | 否 | 间接（喂缓存感知路由） |
+| 加 HTTP 路由 | `endpoint_plugins` | 可 shadow 核心路由 | 否 | **无（不加速核心）** |
+| attention backend | `VLLM_ATTENTION_BACKEND` 选 in-tree | **无 register 入口** | — | — |
+| KV cache manager / executor | **无 registry** | — | — | — |
+
+### 11.2 判断
+
+1. 插件确实开了「**不 fork 就能碰引擎核心**」的口子（以前只能 monkey-patch），这是实质进步。
+2. 但能提性能的入口几乎都落在 **Zone A/B**（模型耦合 / 引擎内部）——**与“模型升级不影响”直接冲突**；用的是 vLLM 内部 API，跨版本脆弱。
+3. `endpoint_plugins` **不是性能入口**，只加 HTTP 路由。
+4. 若非要用，选**不随模型变**的：**`--scheduler-cls`（调度策略）** 或 **KV connector（PD/offload）**。
+5. **与 `vllm-rs` 的互斥**：`endpoint_plugins` 挂在 Python FastAPI app 上；开 `VLLM_USE_RUST_FRONTEND=1` 后 API server 是 Rust 二进制、无 Python FastAPI，endpoint 插件不加载（`general_plugins` 引擎侧仍生效）。即「性能 vs endpoint 扩展」二选一。
+
+**结论**：插件解决的是「扩展」问题，不是「解耦后提速」问题；Nebula 不应靠它碰引擎核心，主战场仍是 Zone C。
