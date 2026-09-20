@@ -13,13 +13,10 @@ description: Push 前必须在本地跑满与 CI 等效的门禁(scripts/ci.sh +
 在执行 `git push` 或提 PR 之前，以下命令必须**全部在本地通过**：
 
 ```bash
-./scripts/ci.sh                          # cargo test --workspace + OpenAPI
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-bash scripts/check_ui_stack.sh
-bash scripts/check_admin_nav.sh
-(cd frontend && npx tsc -b --noEmit && npm run lint)   # 改了 frontend/package.json 先 npm install
+./scripts/ci.sh   # fmt + clippy + test + OpenAPI + UI/nav + frontend(tsc/lint/build)
 ```
+
+`./scripts/ci.sh` 已是全量门禁（等价于已删除的 GitHub Actions workflow）；改了 `frontend/package.json` 后先 `npm install`，否则 `node_modules` 陈旧、tsc 报 `Cannot find module`。
 
 可选冒烟（需 docker/etcd + release 构建）：`RUN_SMOKE=1 ./scripts/ci.sh`。
 
