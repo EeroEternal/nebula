@@ -125,20 +125,28 @@ pub async fn platform_health_summary(
         Err(e) => return control_error(e),
     };
 
-    let router_url = format!("{}/healthz", st.router_base_url.trim_end_matches('/'));
-    let router = match st.http.get(&router_url).send().await {
-        Ok(r) if r.status().is_success() => ComponentHealth {
+    let router = if st.router.is_some() {
+        // Embedded router: routing runs in this process, no separate component.
+        ComponentHealth {
             status: ComponentStatus::Ok,
-            message: None,
-        },
-        Ok(r) => ComponentHealth {
-            status: ComponentStatus::Degraded,
-            message: Some(format!("router returned {}", r.status())),
-        },
-        Err(e) => ComponentHealth {
-            status: ComponentStatus::Unavailable,
-            message: Some(format!("router unreachable: {e}")),
-        },
+            message: Some("embedded".to_string()),
+        }
+    } else {
+        let router_url = format!("{}/healthz", st.router_base_url.trim_end_matches('/'));
+        match st.http.get(&router_url).send().await {
+            Ok(r) if r.status().is_success() => ComponentHealth {
+                status: ComponentStatus::Ok,
+                message: None,
+            },
+            Ok(r) => ComponentHealth {
+                status: ComponentStatus::Degraded,
+                message: Some(format!("router returned {}", r.status())),
+            },
+            Err(e) => ComponentHealth {
+                status: ComponentStatus::Unavailable,
+                message: Some(format!("router unreachable: {e}")),
+            },
+        }
     };
 
     let summary = HealthSummary {
@@ -646,6 +654,10 @@ pub struct CanariesQuery {
 }
 
 async fn fetch_router_metrics(st: &AppState) -> String {
+    // Embedded mode has no router process; the gateway's own /metrics is the source.
+    if st.router.is_some() {
+        return String::new();
+    }
     let url = format!("{}/metrics", st.router_base_url.trim_end_matches('/'));
     match st.http.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => resp.text().await.unwrap_or_default(),
