@@ -1,6 +1,7 @@
 # 控制面无关的数据面适配契约
 
-> **文档性质**：设计草案（**文档先行，代码未实现**）。  
+> **文档性质**：设计草案（**`CONTROL_PLANE` 抽象与 adapter crate 均未实现**）。  
+> **已落地但不属本文范围**：BFF（`:18090`）自 v1.9.0 起常驻 PowerLLM 控制台协议兼容层（`crates/nebula-bff/src/powerllm_compat.rs`）——那是**控制台南向适配**，不是这里的 `CONTROL_PLANE` 适配器，也不在 Gateway/Router 热路径。  
 > **归属**：`docs/arch/` · 数据面接入边界，不改 L0 主轴。  
 > **对照**：[`architecture.md`](./architecture.md) · [`data-plane-perf-optimization.md`](./data-plane-perf-optimization.md) · [`../dev/integration.md`](../dev/integration.md) · [`../dev/contracts.md`](../dev/contracts.md) · [`../dev/etcd.md`](../dev/etcd.md) · [`../dev/k8s.md`](../dev/k8s.md)
 
@@ -217,7 +218,7 @@ CONTROL_PLANE=none|powerllm|dynamo|llm-d|custom
 | **PowerLLM** | 现有 Python 路径 | Nebula **可选**（适配器，不是替换内核） |
 | **Nebula** | **Standalone**（`CONTROL_PLANE=none`） | PowerLLM **可选**适配器 |
 
-互不硬依赖：PowerLLM 发行物不把 `nebula-*` 当必装；Nebula `Cargo.toml` 工作区不引入 PowerLLM 运行时。集成文档继续写「无兼容层」——指**不**在核心模仿 Xinference/PowerLLM API，可选适配器只做发现/鉴权投影。
+互不硬依赖：PowerLLM 发行物不把 `nebula-*` 当必装；Nebula `Cargo.toml` 工作区不引入 PowerLLM 运行时。「核心无兼容层」有严格范围：**Gateway / Router 热路径与 etcd 控制面不模仿 Xinference / PowerLLM API，也不含平台分支**。控制台边缘是另一个面——`nebula-bff` 自 v1.9.0 起为 PowerLLM 控制台（`admin/`）提供南向协议兼容层（[`../../crates/nebula-bff/src/powerllm_compat.rs`](../../crates/nebula-bff/src/powerllm_compat.rs)），只服务该控制台、鉴权走控制台 session；它既不是本文的 `CONTROL_PLANE` 适配器，也不改变 standalone 默认行为。
 
 ---
 
@@ -256,6 +257,7 @@ none: etcd MetaStore ────────┘      （热路径仍只读规�
 | `NEBULA_AUTH_TOKENS`、`platform_api_keys` | 内置 Auth（none） | 无外部 `AuthProvider` 也能跑 |
 | `TenantAdmission` + `/tenants/` | 内置 `PolicySource`（none） | RPS / 并发 / token 预算；**已是配额，不是 KV score** |
 | Gateway → Router → 引擎 `/v1/*` | UpstreamEngine | 不变；见 [`../dev/integration.md`](../dev/integration.md) §4 |
+| BFF PowerLLM 控制台兼容层（v1.9.0） | —（不在本文契约内） | 控制台边缘南向适配；热路径不感知，standalone 不依赖 |
 | OTLP `traceparent` → xtrace | 观测 | **不**在流式热路径挂 Langfuse |
 
 `EndpointInfo` 今日无 `role` / `bootstrap_port`：none 模式全部 `unified`、hints 为空，直到 Node 或外部适配器开始填写。
@@ -274,7 +276,7 @@ none: etcd MetaStore ────────┘      （热路径仍只读规�
 | 在 `PolicySource` 里做 KV / prefix **打分** | 与 llm-d「admission ≠ EPP」同构；打分属 Router 策略 + 可选 Signals |
 | 把 vLLM / SGLang 标成 `CONTROL_PLANE` | 它们是 UpstreamEngine，最多是 Directory 的数据来源 |
 | 用 kube API 替换 etcd 权威（none 模式） | [`../dev/k8s.md`](../dev/k8s.md)；K8s 只做执行面 |
-| 文档把本文写成已落地能力 | 无 `CONTROL_PLANE`、无 adapter crate；落地后删草案口吻并进 Changelog |
+| 文档把本文写成已落地能力 | 无 `CONTROL_PLANE`、无 adapter crate；落地后删草案口吻并进 Changelog（BFF 控制台兼容层是另一面，不改变本判定） |
 
 ---
 

@@ -2,7 +2,7 @@
 
 > **读者：** 要把 Nebula 当作「推理控制面」嵌入自有平台（算电、ISV、业务中台等）的集成工程师。  
 > **基线：** Nebula v1.6.0 · Gateway 默认 `:8081`  
-> **边界：** 本文只描述 **Nebula 原生契约**；Nebula 与 Xinference / PowerLLM 独立，核心不提供兼容层。PowerLLM 与 Nebula **双边可选**（各自默认不依赖对方）；若要将外部控制面的发现/鉴权投影进数据面，见草案 [`../arch/control-plane-adapters.md`](../arch/control-plane-adapters.md)。  
+> **边界：** 本文只描述 **Nebula 原生契约**。热路径（Gateway `:8081` / Router）与 etcd 控制面不引入任何平台专有兼容分支；PowerLLM 与 Nebula **双边可选**（各自默认不依赖对方）。唯一的例外在 BFF 边缘：`nebula-bff`（`:18090`）自 v1.9.0 起常驻挂载一层 **PowerLLM 控制台协议兼容层**（[`powerllm_compat.rs`](../../crates/nebula-bff/src/powerllm_compat.rs)），仅供 `admin/` 控制台接入，**不属于**本文件的机机契约、也不进入热路径（见 §8、§12）。若要将外部控制面的发现/鉴权投影进数据面，见草案 [`../arch/control-plane-adapters.md`](../arch/control-plane-adapters.md)。  
 > **相关：** 安装见 [`../manual/deployment.md`](../manual/deployment.md)；错误码见 [`contracts.md`](./contracts.md)；架构见 [`../arch/architecture.md`](../arch/architecture.md)。  
 > **演进计划：** [`integration-plan.md`](./integration-plan.md)（**I0–I6 ✅**）。  
 > **OpenAPI：** [`openapi-control.yaml`](./openapi-control.yaml)（仅 `/platform/v1`）。
@@ -304,6 +304,8 @@ curl -s http://127.0.0.1:8081/platform/v1/operations/op_… \
 
 控制台能力（Benchmark、SLO 写、模板、租户 CRUD、镜像注册表）走 BFF；机机集成用 `/platform/v1/*`。
 
+> **控制台兼容路由（`admin/` 专用）：** BFF `:18090` 顶层的 `/token`、`/v1/user/*`、`/v1/models/instances`、`/v1/device/info` 是 v1.9.0 为 PowerLLM 控制台提供的**南向协议适配**（挂载见 `crates/nebula-bff/src/main.rs`），鉴权沿用控制台 session，语义与 Gateway `:8081` 的 `/v1/*` 推理契约不同。机机集成**不要**调用它们。
+
 ---
 
 ## 9. 观测
@@ -406,5 +408,6 @@ curl -s http://127.0.0.1:8081/platform/v1/operations/op_… \
 | ExecutionContext | `crates/nebula-common/src/execution_context.rs` |
 | Trace | `crates/nebula-common/src/telemetry.rs` |
 | 部署 / 放置类型 | `crates/nebula-common/src/model_deployment.rs`、`placement.rs` |
+| PowerLLM 控制台兼容层（§8，边缘） | `crates/nebula-bff/src/powerllm_compat.rs`（挂载见 `crates/nebula-bff/src/main.rs`） |
 
 契约变更须同步更新本文与 [`contracts.md`](./contracts.md)。

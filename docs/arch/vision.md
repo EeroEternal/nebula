@@ -273,7 +273,7 @@
 4. **智能与重治理永不进入推理热路径**。
 5. **无证据不自动选型**；数据不足显式返回。
 6. **切换必声明式、可 Canary、可回滚**；禁止静默换引擎。
-7. **异构只做放置与健康**，不接管引擎内部 PD/worker。外部控制面（PowerLLM / Dynamo / llm-d）不得叉进 Gateway/Router 热路径，见 [`control-plane-adapters.md`](./control-plane-adapters.md)。
+7. **异构只做放置与健康**，不接管引擎内部 PD/worker。外部控制面（PowerLLM / Dynamo / llm-d）不得叉进 Gateway/Router 热路径，见 [`control-plane-adapters.md`](./control-plane-adapters.md)。控制台边缘（BFF）可为外部控制台提供协议兼容层（如 v1.9.0 的 PowerLLM 控制台兼容），那不属于热路径，也不得反向侵入 Gateway/Router。
 8. **观测失败不影响 token 流**；高基数信息不进 Prometheus label。
 9. **不训练、不聚合公有云 API、不 Actor 回潮**。
 
