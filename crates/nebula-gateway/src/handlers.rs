@@ -142,7 +142,7 @@ async fn proxy_chat_as_responses(
     builder_seed: crate::responses::CreateResponseRequest,
     stream: bool,
 ) -> Response {
-    let resp = match post_router_chat(&st, prepared.headers.clone(), &chat_body).await {
+    let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
@@ -311,7 +311,7 @@ async fn proxy_chat_as_anthropic(
     requested_model: String,
     stream: bool,
 ) -> Response {
-    let resp = match post_router_chat(&st, prepared.headers.clone(), &chat_body).await {
+    let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };

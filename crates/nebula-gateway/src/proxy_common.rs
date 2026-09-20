@@ -168,19 +168,26 @@ pub async fn post_router_path(
 
 pub async fn post_router_chat(
     st: &AppState,
-    headers: reqwest::header::HeaderMap,
+    prepared: &PreparedUpstream,
     chat_body: &Value,
 ) -> Result<reqwest::Response, Response> {
-    let url = format!(
-        "{}/v1/chat/completions",
-        st.router_base_url.trim_end_matches('/')
-    );
-    let mut req_headers = headers;
+    let body = Bytes::from(serde_json::to_vec(chat_body).unwrap_or_default());
+    let (url, body) = match embedded_target(st, prepared, &body, "/v1/chat/completions", "").await {
+        Ok(Some(v)) => v,
+        Ok(None) => (
+            format!(
+                "{}/v1/chat/completions",
+                st.router_base_url.trim_end_matches('/')
+            ),
+            body,
+        ),
+        Err(r) => return Err(r),
+    };
+    let mut req_headers = prepared.headers.clone();
     req_headers.insert(
         reqwest::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    let body = Bytes::from(serde_json::to_vec(chat_body).unwrap_or_default());
     post_router_path(st, &url, req_headers, body).await
 }
 
