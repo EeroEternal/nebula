@@ -1906,6 +1906,7 @@ nebula_router_upstream_error_total{kind="connect"} 1
             status_detail: None,
             grpc_target: None,
             base_url: Some("http://127.0.0.1:8000".into()),
+            engine_type: None,
         }
     }
 

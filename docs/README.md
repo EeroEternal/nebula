@@ -1,6 +1,6 @@
 # Nebula 文档索引
 
-当前发布：**[v1.8.0](versions/v1.8.0.md)**。
+当前发布：**[v1.9.0](versions/v1.9.0.md)**。
 
 ## 产品与运维（`manual/`）
 
@@ -17,6 +17,7 @@
 
 | 文档 | 说明 |
 |------|------|
+| [`versions/v1.9.0.md`](versions/v1.9.0.md) | v1.9.0 K8s 执行面控制器、PowerLLM 后端完全兼容与 Admin 控制台整合 |
 | [`versions/v1.8.0.md`](versions/v1.8.0.md) | v1.8.0 L2 算力池化（HardwarePool）与整机优雅排空（Node Drain） |
 | [`versions/v1.7.0.md`](versions/v1.7.0.md) | v1.7.0 架构升级：业务与资产全量迁入 PostgreSQL，下线单机 Lite |
 | [`versions/v1.6.0.md`](versions/v1.6.0.md) | v1.6.0 移除 legacy Admin |
@@ -53,6 +54,7 @@
 | [`dev/ownership.md`](dev/ownership.md) | 接口归属 |
 | [`dev/etcd.md`](dev/etcd.md) | etcd 放什么 / 不放什么 |
 | [`dev/contracts.md`](dev/contracts.md) | L1 一致性契约套件验收条目 |
+| [`dev/hotpath-takeover.md`](dev/hotpath-takeover.md) | **网关热路径接管与通用契约架构**：Nebula 与 PowerLLM 等推理系统协同、收益、双模兼容与改造细节 |
 | [`dev/integration.md`](dev/integration.md) | **上层平台集成**：Gateway 推理 / Admin 编排 / 鉴权 / trace / ID 对齐 |
 | [`dev/integration-plan.md`](dev/integration-plan.md) | Nebula 对外暴露与 Control API 优化计划（Tier A–D，I0–I3） |
 | [`dev/openapi-control.yaml`](dev/openapi-control.yaml) | Gateway Control API OpenAPI 现状（I0） |

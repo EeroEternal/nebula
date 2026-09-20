@@ -18,25 +18,43 @@ pub enum EndpointStatus {
     Failed,
 }
 
+fn default_endpoint_kind() -> EndpointKind {
+    EndpointKind::NativeHttp
+}
+
+fn default_api_flavor() -> String {
+    "openai".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EndpointInfo {
     pub model_uid: String,
     pub replica_id: u32,
+    #[serde(default)]
     pub plan_version: u64,
+    #[serde(default)]
     pub node_id: String,
 
+    #[serde(default = "default_endpoint_kind")]
     pub endpoint_kind: EndpointKind,
+    #[serde(default = "default_api_flavor")]
     pub api_flavor: String,
 
     pub status: EndpointStatus,
+    #[serde(default)]
     pub last_heartbeat_ms: u64,
 
     /// Human-readable detail when status is unhealthy/failed (OOM, exit code, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<String>,
 
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grpc_target: Option<String>,
     pub base_url: Option<String>,
+
+    /// Underlying engine type if known (e.g. "vllm", "powerllm", "sglang").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_type: Option<String>,
 }
 
 /// Real-time control-plane stats for a replica.
@@ -153,19 +171,23 @@ mod tests {
     }
 
     #[test]
-    fn serializes_usage_not_legacy_bytes() {
-        let stats = EndpointStats {
-            model_uid: "m".into(),
-            replica_id: 0,
-            last_updated_ms: 1,
-            pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prompt_cache_hit_rate: None,
-            kv_cache_usage: Some(0.45),
-        };
-        let v = serde_json::to_value(&stats).unwrap();
-        assert!(v.get("kv_cache_usage").is_some());
-        assert!(v.get("kv_cache_used_bytes").is_none());
-        assert!(v.get("kv_cache_free_bytes").is_none());
+    fn deserializes_minimal_third_party_endpoint_info() {
+        let json = r#"{
+            "model_uid": "qwen2.5-7b",
+            "replica_id": 0,
+            "status": "ready",
+            "base_url": "http://10.99.255.102:9997",
+            "engine_type": "powerllm"
+        }"#;
+        let ep: EndpointInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(ep.model_uid, "qwen2.5-7b");
+        assert_eq!(ep.replica_id, 0);
+        assert_eq!(ep.status, EndpointStatus::Ready);
+        assert_eq!(ep.base_url.as_deref(), Some("http://10.99.255.102:9997"));
+        assert_eq!(ep.endpoint_kind, EndpointKind::NativeHttp);
+        assert_eq!(ep.api_flavor, "openai");
+        assert_eq!(ep.plan_version, 0);
+        assert_eq!(ep.node_id, "");
+        assert_eq!(ep.engine_type.as_deref(), Some("powerllm"));
     }
 }

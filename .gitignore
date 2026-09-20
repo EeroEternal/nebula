@@ -211,3 +211,17 @@ application/node_modules
 
 # local deploy env
 deploy/nebula.env
+
+# Admin UI (PowerLLM console)
+admin/node_modules/
+admin/.umi/
+admin/.umi-production/
+admin/.umi-test/
+admin/dist/
+admin/build/
+admin/.temp/
+admin/coverage/
+admin/*.log
+admin/npm-debug.log*
+admin/yarn-error.log*
+admin/pnpm-debug.log*

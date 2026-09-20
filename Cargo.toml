@@ -11,10 +11,11 @@ members = [
   "crates/nebula-node",
   "crates/nebula-cli",
   "crates/nebula-observe",
+  "crates/nebula-k8s-controller",
 ]
 
 [workspace.package]
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 license = "Apache-2.0"
 

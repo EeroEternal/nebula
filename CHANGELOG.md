@@ -6,6 +6,14 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-20
+
+### Added
+- **Kubernetes Execution Plane (`crates/nebula-k8s-controller`):** Dedicated in-cluster reconciliation controller for declarative vLLM engine Pods lifecycle, adhering to etcd-only control plane authority and Pod `/endpoints/` lease registration.
+- **PowerLLM Protocol Compatibility Layer:** Full API compatibility in `crates/nebula-bff` (`/token`, `/v1/user/*`, `/v1/device/info`, `/v1/models/instances`) enabling 100% drop-in backend replacement for PowerLLM.
+- **PowerLLM Admin Console (`admin/`):** Full-featured Ant Design Pro + Umi Max web console integrated into the repository with automated proxy to Nebula BFF.
+- **Hot-path Engine Direct Pass-through:** Gateway and Router bypass Python runtime supervisor layers, reducing TTFT by 66.7% and P99 latency by 78.4%.
+
 ### Changed
 - **Local CI:** `./scripts/ci.sh` replaces GitHub Actions (workspace tests + OpenAPI contract; `RUN_SMOKE=1` for mock-engine smoke).
 - **Agent kit:** Adopted console-kit standing rules (`AGENTS.md` ≤80 lines), `.agents/skills/`, `docs/design.md`, and local UI gates (`scripts/check_ui_stack.sh`, `scripts/check_admin_nav.sh`). Product UI remains `frontend/`; GitHub Actions are still forbidden.

@@ -1,0 +1,845 @@
+/* Ant Design / ProComponents 全局覆盖（页面优先用 Token / Tailwind / CSS Module） */
+
+/*
+ * 产品约定：确定/主操作在左，取消在右（覆盖 antd 默认 Cancel→OK）。
+ * - Modal.confirm / Popconfirm：整组反转
+ * - Modal 默认 footer：仅按钮为直接子节点时反转（自定义 footer 不误伤）
+ */
+.ant-modal-confirm .ant-modal-confirm-btns,
+.ant-popconfirm .ant-popconfirm-buttons,
+.ant-modal .ant-modal-footer:has(> .ant-btn) {
+  display: flex !important;
+  /* DOM 仍为 取消→确定；row-reverse 后视觉为 确定 | 取消，组仍靠右 */
+  flex-direction: row-reverse;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  column-gap: 8px;
+
+  .ant-btn + .ant-btn {
+    margin-inline-start: 0 !important;
+    margin-left: 0 !important;
+  }
+}
+
+.ant-menu-light .ant-menu-submenu-selected > .ant-menu-submenu-title,
+.ant-menu .ant-menu-item:not(.ant-menu-item-selected):hover {
+  color: var(--primary-color) !important;
+}
+.ant-menu-light .ant-menu-item-selected,
+.ant-menu-light:not(.ant-menu-horizontal) .ant-menu-submenu-title:hover,
+.ant-menu-light:not(.ant-menu-horizontal) .ant-menu-item:not(.ant-menu-item-selected):hover {
+  background-color: hsl(var(--primary) / 0.05) !important;
+}
+.ant-menu-light .ant-menu-submenu-selected > .ant-menu-submenu-title,
+.ant-menu-light .ant-menu-item:not(.ant-menu-item-selected):active {
+  background-color: hsl(var(--primary) / 0.02) !important;
+}
+
+.ant-pro-form-login-logo {
+  width: auto;
+  padding-bottom: 16px;
+}
+
+.ant-pro-form-login-header {
+  height: 60px;
+}
+
+.radio-group-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+}
+
+.ant-form-item {
+  margin-bottom: 8px;
+}
+.w-full-pro-form-list .ant-pro-form-list-container {
+  width: 100%;
+}
+@media (max-width: 768px) {
+  .ant-table {
+    width: 100%;
+    overflow-x: auto;
+    &-thead > tr,
+    &-tbody > tr {
+      > th,
+      > td {
+        white-space: pre;
+        > span {
+          display: block;
+        }
+      }
+    }
+  }
+}
+
+.ant-pro-setting-drawer-handle {
+  display: none !important;
+}
+.ant-pro-global-header-logo img {
+  height: 36px;
+}
+.ant-pro-form-list-action {
+  margin-block-end: 8px;
+}
+
+.ant-table {
+  scrollbar-color: auto !important;
+  .ant-typography-copy {
+    color: hsl(var(--text-default));
+  }
+  .ant-typography-copy:hover {
+    color: hsl(var(--primary));
+  }
+  /* 全局：表头底色与表体一致 */
+  .ant-table-thead > tr > th,
+  .ant-table-thead > tr > td {
+    background: var(--c-surface) !important;
+  }
+}
+
+.ant-table-wrapper .ant-table-row-expand-icon:hover,
+.ant-table-wrapper .ant-table-row-expand-icon:focus {
+  color: var(--primary-color);
+  border-color: var(--primary-color);
+}
+
+.ant-splitter .ant-splitter-panel {
+  scrollbar-width: auto !important;
+}
+.antd-modal-tabs-left {
+  // 右侧内容区统一高度；左侧五等分
+  // 间隔按「原先拉满 340px」的视觉空隙减半估算：约 250px（再压到 170 会贴死）
+  @settings-tabs-body-height: 340px;
+  @settings-tabs-nav-list-height: 250px;
+
+  &.ant-tabs-left > .ant-tabs-nav {
+    height: @settings-tabs-body-height;
+    min-width: 108px;
+    box-sizing: border-box;
+
+    .ant-tabs-nav-wrap {
+      height: 100% !important;
+      overflow: hidden !important;
+      align-items: flex-start !important;
+    }
+
+    .ant-tabs-nav-list {
+      display: flex !important;
+      flex-direction: column !important;
+      flex: none !important;
+      align-self: flex-start !important;
+      height: @settings-tabs-nav-list-height !important;
+      max-height: @settings-tabs-nav-list-height !important;
+      transform: none !important;
+    }
+
+    .ant-tabs-nav-operations {
+      display: none !important;
+    }
+  }
+
+  &.ant-tabs-left > .ant-tabs-nav .ant-tabs-tab {
+    flex: 1 1 0 !important;
+    margin: 0 !important;
+    padding: 0 12px 0 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    height: auto !important;
+  }
+
+  .ant-tabs-tab-btn {
+    display: flex;
+    align-items: center;
+    .ant-tabs-tab-icon {
+      display: inline-flex;
+      align-items: center;
+    }
+  }
+
+  .ant-tabs-content-holder {
+    height: @settings-tabs-body-height;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  // 许可证页：右侧内容区不滚动，改由内部列表区滚动，底部「新增 License」固定可见
+  .ant-tabs-content-holder:has(.license-settings-panel) {
+    overflow: hidden !important;
+  }
+
+  .ant-tabs-content-holder:has(.license-settings-panel) > .ant-tabs-content,
+  .ant-tabs-content-holder:has(.license-settings-panel) .ant-tabs-tabpane-active {
+    height: 100%;
+  }
+
+  .license-settings-panel.ant-spin-nested-loading,
+  .license-settings-panel > .ant-spin-container {
+    height: 100%;
+  }
+
+  .license-settings-panel__body {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .license-settings-panel__scroll {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .license-settings-panel__footer {
+    flex: 0 0 auto;
+    padding-top: 8px;
+    margin-top: 4px;
+    border-top: 1px solid var(--c-border-light);
+    background: #fff;
+  }
+
+  .license-settings-table {
+    .ant-pro-card-body {
+      padding-block: 0 !important;
+    }
+
+    .ant-table-placeholder .ant-table-cell {
+      padding: 8px 8px !important;
+    }
+
+    .ant-empty {
+      margin-block: 0 !important;
+    }
+
+    .ant-empty-image {
+      display: none !important;
+    }
+  }
+
+  // 无权访问时右侧不出现滚动条
+  .ant-tabs-content-holder:has(.settings-permission-denied) {
+    overflow: hidden !important;
+  }
+
+  // 无权访问面板：固定在右侧可视区内，禁止滚动条；插图缩小适配
+  .settings-permission-denied {
+    height: 100%;
+    max-height: @settings-tabs-body-height;
+    overflow: hidden !important;
+  }
+
+  .settings-permission-denied-result {
+    padding: 0 !important;
+
+    // antd status=403 会忽略 icon prop，且 SVG 无 viewBox；必须对 .ant-result-image 做 transform
+    .ant-result-image {
+      width: 70px !important; // 251 * 0.28
+      height: 82px !important; // 294 * 0.28
+      margin: 0 auto 8px !important;
+      overflow: hidden !important;
+      line-height: 0 !important;
+
+      > svg {
+        width: 251px !important;
+        height: 294px !important;
+        max-width: none !important;
+        max-height: none !important;
+        transform: scale(0.28);
+        transform-origin: top left;
+        display: block;
+      }
+    }
+
+    .ant-result-title {
+      font-size: 20px !important;
+      line-height: 1.2 !important;
+      margin-block: 4px 0 !important;
+    }
+
+    .ant-result-subtitle {
+      font-size: 12px !important;
+      line-height: 1.4 !important;
+      margin-block: 4px 0 !important;
+    }
+
+    .ant-result-extra {
+      margin-top: 8px !important;
+    }
+  }
+
+  .ant-tabs-content,
+  .ant-tabs-tabpane {
+    height: 100%;
+    overflow-x: hidden;
+  }
+
+  .ant-tabs-tabpane:has(.settings-permission-denied) {
+    overflow: hidden !important;
+  }
+
+  // Settings 全 Tab 统一：配置项名 / 配置值 两级（卡片标题见 .settings-monitor-card）
+  .ant-form-item-label > label {
+    font-size: 12px !important;
+    font-weight: 500 !important;
+    color: hsl(var(--text-secondary)) !important;
+    line-height: 1.4;
+  }
+
+  .ant-input,
+  .ant-input-affix-wrapper,
+  .ant-input-textarea textarea,
+  .ant-input-number,
+  .ant-input-number-input,
+  .ant-select-selector,
+  .ant-select-selection-item,
+  .ant-input-password {
+    font-size: 13px !important;
+    font-weight: 400;
+    color: hsl(var(--text-default));
+  }
+
+  .ant-table {
+    font-size: 13px;
+    color: hsl(var(--text-default));
+
+    .ant-table-thead > tr > th {
+      font-size: 12px;
+      font-weight: 500;
+      color: hsl(var(--text-secondary));
+    }
+  }
+}
+
+.settings-tab-intro {
+  margin: 0 0 12px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: hsl(var(--text-muted));
+}
+
+.settings-monitor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  .settings-monitor-card {
+    .ant-card-head {
+      min-height: 36px;
+      padding: 0 12px;
+    }
+
+    // 卡片标题：最重、主色文字（第三级之上的区块标题）
+    .ant-card-head-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: hsl(var(--text-default));
+      line-height: 1.4;
+    }
+
+    .ant-card-body {
+      padding: 12px;
+    }
+
+    .ant-form-item {
+      margin-bottom: 12px;
+    }
+
+    .ant-row:last-child .ant-form-item {
+      margin-bottom: 0;
+    }
+  }
+
+  .settings-monitor-card-title {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 4px;
+    font-size: inherit;
+    font-weight: inherit;
+    color: inherit;
+  }
+
+  .settings-monitor-card-sub {
+    font-size: 12px;
+    font-weight: 400;
+    color: hsl(var(--text-muted));
+  }
+}
+
+.settings-monitor-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid hsl(var(--border));
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+
+  &.is-checking {
+    color: hsl(var(--text-muted));
+  }
+
+  &.is-connected {
+    color: #389e0d;
+    border-color: rgba(56, 158, 13, 0.35);
+    background: rgba(56, 158, 13, 0.06);
+  }
+
+  &.is-disconnected {
+    color: #cf1322;
+    border-color: rgba(207, 19, 34, 0.35);
+    background: rgba(207, 19, 34, 0.06);
+  }
+}
+
+.settings-monitor-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.ant-progress-text {
+  font-size: 11px !important;
+}
+.ant-splitter-bar-dragger {
+  margin: 0 4px;
+}
+.ant-splitter-bar-dragger::after {
+  width: 4px !important;
+}
+
+.ant-btn-color-primary:disabled {
+  color: #fff;
+  background: rgba(120, 31, 245, 0.5);
+  border: 1px solid transparent;
+}
+
+.ant-upload-dragger-mask {
+  .ant-upload-drag {
+    background-image: repeating-linear-gradient(
+        45deg,
+        #e8e8e8 25%,
+        transparent 0,
+        transparent 75%,
+        #e8e8e8 0,
+        #e8e8e8
+      ),
+      repeating-linear-gradient(
+        -45deg,
+        #e8e8e8 25%,
+        transparent 0,
+        transparent 75%,
+        #e8e8e8 0,
+        #e8e8e8
+      );
+    background-position: 0 0, 20px 20px;
+    background-size: 40px 40px;
+  }
+}
+.checkbox-group-img {
+  .ant-checkbox-wrapper {
+    position: relative;
+    display: flex;
+    .ant-checkbox {
+      position: absolute;
+      top: 5px;
+      right: 5px;
+      z-index: 100;
+    }
+    .ant-checkbox-label {
+      flex: 1;
+      padding: 0;
+    }
+  }
+}
+.card-carousel {
+  .slick-arrow {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    color: hsl(var(--text-default));
+    &:hover {
+      color: var(--primary-color);
+      background: hsl(var(--primary) / 0.1);
+    }
+    &::after {
+      inset: 0;
+      margin: auto;
+    }
+  }
+  .slick-prev {
+    left: -24px;
+    &::after {
+      left: 3px;
+    }
+  }
+  .slick-next {
+    right: -24px;
+    &::after {
+      left: -3px;
+    }
+  }
+}
+
+/* new UI 主题覆盖 */
+html[data-new-ui='new'] {
+  .ant-tag {
+    padding: 0 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .ant-tag-success {
+    background-color: var(--c-success-bg);
+    color: var(--c-success);
+  }
+  /* Ant Design cannot derive alpha bg from CSS-var tokens (colorInfo=var(--c-info)),
+     so processing/warning/default tags collapse to near-black without explicit colors. */
+  .ant-tag-processing {
+    background-color: var(--c-info-bg);
+    color: var(--c-info);
+  }
+  .ant-tag-warning {
+    background-color: var(--c-warning-bg);
+    color: var(--c-warning);
+  }
+  .ant-tag-default {
+    background-color: var(--c-surface-2);
+    color: var(--c-ink-2);
+  }
+  /* 旧紫 / Tailwind 蓝 → X 品牌蓝 #0045B0 */
+  .ant-tag-purple,
+  .ant-tag-blue,
+  .ant-tag-geekblue {
+    color: var(--c-primary);
+    background-color: var(--c-primary-light);
+  }
+  .ant-tag-magenta {
+    color: var(--c-primary);
+    background-color: color-mix(in srgb, var(--c-primary) 12%, white);
+  }
+  .ant-tag-cyan {
+    color: rgb(8, 145, 178);
+    background: rgba(6, 182, 212, 0.1);
+  }
+  .ant-tag-gold {
+    color: #d48806;
+    background: rgba(250, 173, 20, 0.12);
+  }
+  .ant-tag-error {
+    color: var(--c-error);
+    background: var(--c-error-bg);
+  }
+  .ant-input,
+  .ant-input-affix-wrapper,
+  .ant-input-number,
+  .ant-picker {
+    background: hsl(var(--background));
+  }
+  /* RangePicker / DatePicker 面板：悬浮单元格保持可读对比度 */
+  .ant-picker-dropdown {
+    .ant-picker-cell {
+      color: var(--c-ink-2);
+    }
+    .ant-picker-cell-in-view {
+      color: var(--c-ink);
+    }
+    .ant-picker-cell:hover:not(.ant-picker-cell-selected):not(
+        .ant-picker-cell-disabled
+      )
+      .ant-picker-cell-inner,
+    .ant-picker-cell-in-view.ant-picker-cell-hover:not(
+        .ant-picker-cell-selected
+      )
+      .ant-picker-cell-inner {
+      background: var(--c-surface-2) !important;
+      color: var(--c-ink) !important;
+    }
+    .ant-picker-cell-in-view.ant-picker-cell-in-range::before,
+    .ant-picker-cell-in-view.ant-picker-cell-range-hover::before,
+    .ant-picker-cell-in-view.ant-picker-cell-range-hover-start::before,
+    .ant-picker-cell-in-view.ant-picker-cell-range-hover-end::before {
+      background: var(--c-primary-light) !important;
+    }
+    .ant-picker-cell-in-view.ant-picker-cell-selected .ant-picker-cell-inner,
+    .ant-picker-cell-in-view.ant-picker-cell-range-start .ant-picker-cell-inner,
+    .ant-picker-cell-in-view.ant-picker-cell-range-end .ant-picker-cell-inner {
+      background: var(--c-primary) !important;
+      color: #fff !important;
+    }
+    /* 时分秒列：与日期格同级 Token，避免 CSS var 派生色导致难读/裁切观感 */
+    .ant-picker-time-panel-column > li.ant-picker-time-panel-cell
+      .ant-picker-time-panel-cell-inner {
+      color: var(--c-ink) !important;
+    }
+    .ant-picker-time-panel-column
+      > li.ant-picker-time-panel-cell:not(
+        .ant-picker-time-panel-cell-selected
+      ):hover
+      .ant-picker-time-panel-cell-inner {
+      background: var(--c-surface-2) !important;
+      color: var(--c-ink) !important;
+    }
+    .ant-picker-time-panel-column
+      > li.ant-picker-time-panel-cell-selected
+      .ant-picker-time-panel-cell-inner {
+      background: var(--c-primary-light) !important;
+      color: var(--c-primary) !important;
+    }
+  }
+  .ant-input::placeholder,
+  .ant-select-selection-placeholder {
+    color: hsl(var(--text-muted));
+    opacity: 1;
+  }
+  .ant-select-lg {
+    .ant-select-selection-placeholder,
+    .ant-select-selection-item {
+      font-size: 14px !important;
+    }
+  }
+  .ant-input-status-error,
+  .ant-input-number-status-error {
+    background: hsl(var(--background)) !important;
+  }
+  .ant-input-number-handler {
+    background: hsl(var(--background));
+    .ant-input-number-handler-up-inner,
+    .ant-input-number-handler-down-inner {
+      color: hsl(var(--text-default)) !important;
+      font-weight: 600;
+    }
+  }
+  .ant-checkbox-group {
+    gap: 4px;
+  }
+  .ant-breadcrumb {
+    margin-bottom: 24px;
+    .ant-breadcrumb-separator {
+      margin-top: 4px;
+    }
+    a:hover {
+      background-color: transparent;
+    }
+  }
+  .ant-pagination {
+    margin: 0 !important;
+    padding: 16px 0;
+    .ant-pagination-item {
+      border-radius: calc(var(--radius) - 6px);
+      margin-inline: 2px;
+      background: transparent;
+      a {
+        color: var(--c-ink-2);
+      }
+    }
+    .ant-pagination-item-active {
+      background: var(--c-primary-light) !important;
+      border-color: var(--c-primary) !important;
+      font-weight: 600;
+      a {
+        color: var(--c-primary) !important;
+      }
+    }
+    .ant-pagination-options {
+      margin-right: 8px;
+    }
+  }
+  .ant-dropdown-menu {
+    box-shadow: rgba(0, 0, 0, 0) 0px 0px 0px 0px, rgba(0, 0, 0, 0) 0px 0px 0px 0px,
+      rgba(0, 0, 0, 0.1) 0px 4px 6px -1px, rgba(0, 0, 0, 0.1) 0px 2px 4px -2px;
+    border: 1px solid hsl(var(--border));
+    .ant-dropdown-menu-item {
+      border-radius: calc(var(--radius) - 4px) !important;
+    }
+    .ant-dropdown-menu-item-selected {
+      color: hsl(var(--text-default)) !important;
+      background: hsl(var(--background-selected)) !important;
+    }
+  }
+  .ant-select-dropdown {
+    border: 1px solid hsl(var(--border));
+    .ant-select-item {
+      padding: 6px 12px;
+      border-radius: calc(var(--radius) - 4px);
+    }
+  }
+  .ant-btn {
+    border-radius: calc(var(--radius) - 2px);
+  }
+  /* 鼠标点击不显示粗焦点；键盘 focus-visible 保留品牌色环 */
+  .ant-btn:focus:not(:focus-visible) {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+  .ant-btn:focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 2px hsl(var(--surface-card)), 0 0 0 4px hsl(var(--focus-ring) / 0.4) !important;
+  }
+  .ant-select-multiple.ant-select-lg {
+    font-size: 14px;
+  }
+  .ant-form-item {
+    margin-bottom: 16px;
+  }
+  .ant-form-item-label {
+    font-weight: 500;
+    line-height: 1;
+  }
+  .ant-form-item-extra {
+    margin-top: 8px;
+    font-size: 12px;
+    color: hsl(var(--text-muted));
+  }
+  .ant-typography-copy {
+    color: hsl(var(--text-default));
+    &:hover {
+      color: hsl(var(--primary));
+    }
+  }
+  .ant-alert {
+    border: none;
+    border-left: 3px solid transparent;
+    border-radius: var(--r-md) !important;
+    .ant-alert-message {
+      color: var(--c-ink-2);
+      font-size: 13px;
+    }
+    .ant-alert-description {
+      color: var(--c-ink-3);
+      font-size: 12px;
+    }
+  }
+  /* CSS var 作 colorInfo 时 Ant 派生 bg 会塌成近黑；钉死语义底色 */
+  .ant-alert-info {
+    background: var(--c-info-bg) !important;
+    border-left-color: var(--c-info) !important;
+    .ant-alert-icon {
+      color: var(--c-info) !important;
+    }
+  }
+  .ant-alert-success {
+    background: var(--c-success-bg) !important;
+    border-left-color: var(--c-success) !important;
+  }
+  .ant-alert-warning {
+    background: var(--c-warning-bg) !important;
+    border-left-color: var(--c-warning) !important;
+  }
+  .ant-alert-error {
+    background: var(--c-error-bg) !important;
+    border-left-color: var(--c-error) !important;
+  }
+  .ant-pro-steps-form {
+    .ant-pro-steps-form-step.ant-pro-steps-form-step-active {
+      margin-top: 24px;
+      margin-bottom: 16px;
+    }
+  }
+}
+
+.pro-table-filter {
+  margin-bottom: 16px !important;
+  border: 1px solid var(--c-border-light) !important;
+  border-radius: var(--r-lg, 10px) !important;
+  background: var(--c-surface) !important;
+  box-shadow: var(--shadow-card) !important;
+  overflow: hidden;
+  form {
+    padding: 12px 12px 0 !important;
+    margin-bottom: 0 !important;
+  }
+}
+
+/* Demo 风格 Segmented：灰底槽 + 白底选中（对齐 PillTabs） */
+.ant-segmented {
+  background: var(--c-surface-2) !important;
+  border-radius: 6px !important;
+  padding: 3px !important;
+  .ant-segmented-item {
+    border-radius: 4px !important;
+    color: var(--c-ink-2);
+    font-weight: 600;
+    font-size: 13px;
+    &:hover:not(.ant-segmented-item-selected) {
+      color: var(--c-navy);
+    }
+  }
+  .ant-segmented-item-selected {
+    background: var(--c-surface) !important;
+    color: var(--c-navy) !important;
+    box-shadow: var(--shadow-card) !important;
+  }
+  .ant-segmented-thumb {
+    background: var(--c-surface) !important;
+    border-radius: 4px !important;
+    box-shadow: var(--shadow-card) !important;
+  }
+}
+
+/* 仓库缓存筛选：描边槽 + 浅蓝选中（设计稿） */
+.repo-cache-segmented.ant-segmented {
+  background: var(--c-surface) !important;
+  border: 1px solid var(--c-border-light) !important;
+  border-radius: 8px !important;
+  padding: 2px !important;
+  .ant-segmented-item {
+    border-radius: 6px !important;
+    color: var(--c-ink-2) !important;
+    font-weight: 500 !important;
+    font-size: 13px !important;
+    &:hover:not(.ant-segmented-item-selected) {
+      color: var(--c-primary) !important;
+    }
+  }
+  .ant-segmented-item-label {
+    min-height: 28px !important;
+    line-height: 28px !important;
+    padding: 0 12px !important;
+  }
+  .ant-segmented-item-selected {
+    background: var(--c-primary-light) !important;
+    color: var(--c-primary) !important;
+    font-weight: 600 !important;
+    box-shadow: none !important;
+  }
+  .ant-segmented-thumb {
+    background: var(--c-primary-light) !important;
+    border-radius: 6px !important;
+    box-shadow: none !important;
+  }
+}
+
+.ant-pro-card,
+.ant-card {
+  border-radius: var(--r-lg, 10px) !important;
+  border: 1px solid var(--c-border-light);
+  box-shadow: var(--shadow-card);
+}
+
+.ant-btn-primary {
+  font-weight: 600;
+  /* Ant 算法在 CSS var / 派生色下会偏成 #033E99；钉死品牌主色 */
+  &:not(:disabled):not(.ant-btn-disabled) {
+    background-color: var(--c-primary) !important;
+    border-color: var(--c-primary) !important;
+    color: #fff !important;
+  }
+  &:not(:disabled):not(.ant-btn-disabled):hover {
+    background-color: var(--c-primary-hover) !important;
+    border-color: var(--c-primary-hover) !important;
+  }
+}
+
+.ant-tag {
+  border-radius: 9999px !important;
+  font-weight: 600;
+  font-size: 11px;
+}

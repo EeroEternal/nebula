@@ -1,0 +1,18 @@
+/**
+ * 全局样式入口（F9：按职责拆到 styles/）
+ * - variables: 设计 Token
+ * - reset: 基础 reset / 滚动条
+ * - ant-overrides: Ant Design / Pro 覆盖
+ * - markdown / charts / utilities: 分域覆盖
+ * 页面样式优先 Token / Tailwind / CSS Module，避免继续堆叠本文件。
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import './styles/variables.less';
+@import './styles/reset.less';
+@import './styles/ant-overrides.less';
+@import './styles/markdown.less';
+@import './styles/charts.less';
+@import './styles/utilities.less';

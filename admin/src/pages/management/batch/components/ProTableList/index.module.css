@@ -1,0 +1,34 @@
+.title {
+  height: 23px;
+  line-height: 22px;
+  color: rgb(16, 16, 16);
+  font-size: 20px;
+  text-align: left;
+  font-weight: 900;
+  padding-left: 10px;
+  border-left: 3px solid #E5221F;
+  margin-bottom: 30px;
+}
+
+.contentList {
+  display: flex;
+  margin-bottom: 20px;
+}
+
+.item {
+  margin-right: 40px;
+}
+
+.query {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 20px;
+}
+
+.answer {
+  padding: 10px;
+  border: 1px solid #999;
+  border-radius: 5px;
+  margin-top: 10px;
+  min-height: 50px;
+}

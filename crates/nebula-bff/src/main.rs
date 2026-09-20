@@ -5,6 +5,7 @@ mod benchmark_svc;
 mod compat_slo;
 mod handlers;
 mod handlers_v2;
+mod powerllm_compat;
 mod selection_svc;
 mod service;
 mod state;
@@ -277,9 +278,36 @@ async fn main() -> anyhow::Result<()> {
         .merge(auth_routes)
         .merge(protected_routes);
 
+    let powerllm_routes = Router::new()
+        .route("/token", post(powerllm_compat::token_compat))
+        .route("/v1/user/signin", post(powerllm_compat::token_compat))
+        .route("/v1/user/info", get(powerllm_compat::user_info_compat))
+        .route(
+            "/v1/models/instances",
+            get(powerllm_compat::list_instances_compat),
+        )
+        .route(
+            "/v1/models/instances/:model_uid",
+            get(powerllm_compat::get_instance_detail_compat),
+        )
+        .route(
+            "/v1/models/instance",
+            post(powerllm_compat::launch_instance_compat),
+        )
+        .route(
+            "/v1/models/:model_uid",
+            delete(powerllm_compat::terminate_instance_compat),
+        )
+        .route(
+            "/v1/device/info",
+            get(powerllm_compat::device_info_compat),
+        )
+        .with_state(st.clone());
+
     let app = Router::new()
         .nest("/api", api_routes)
-        .nest("/api/v2", v2_routes);
+        .nest("/api/v2", v2_routes)
+        .merge(powerllm_routes);
 
     let listener = tokio::net::TcpListener::bind(&args.listen_addr).await?;
     axum::serve(listener, app).await?;

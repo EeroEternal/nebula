@@ -1,0 +1,32 @@
+.result-carousel-md {
+  :global {
+    .slick-arrow {
+      width: 24px;
+      height: 24px;
+      color: #8c8c8c;
+      border: 1px solid #8c8c8c;
+      border-radius: 50%;
+      &::after {
+        top: 6px;
+        width: 9px;
+        height: 9px;
+      }
+      &:hover {
+        color: var(--primary-color);
+        border-color: var(--primary-color);
+      }
+    }
+    .slick-prev {
+      left: -15px;
+      &::after {
+        left: 8px;
+      }
+    }
+    .slick-next {
+      right: -15px;
+      &::after {
+        left: 5px;
+      }
+    }
+  }
+}

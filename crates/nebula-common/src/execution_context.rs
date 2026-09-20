@@ -18,7 +18,7 @@ pub struct InferenceHint {
 }
 
 /// Propagated request context across Gateway → Router (and into traces/audit).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub struct ExecutionContext {
     pub request_id: String,
     pub session_id: Option<String>,
@@ -43,6 +43,8 @@ pub const HEADER_DEADLINE_MS: &str = "x-nebula-deadline-ms";
 pub const HEADER_BUDGET_TOKENS: &str = "x-nebula-budget-tokens";
 pub const HEADER_INFERENCE_HINT: &str = "x-nebula-inference-hint";
 pub const HEADER_HINT_TRUSTED: &str = "x-nebula-hint-trusted";
+/// Internal trust token header sent to downstream engines (e.g. PowerLLM) so they can bypass duplicate auth.
+pub const HEADER_INTERNAL_AUTH: &str = "x-nebula-internal-auth";
 
 pub fn parse_and_sanitize_inference_hint(raw: &str) -> Option<InferenceHint> {
     if raw.len() > MAX_HINT_HEADER_LEN {

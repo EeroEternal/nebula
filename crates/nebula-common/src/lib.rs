@@ -48,7 +48,7 @@ pub use engine_image::{EngineImage, ImagePullStatus, NodeImageStatus, VersionPol
 pub use execution_context::{
     build_execution_context, inject_execution_context, parse_and_sanitize_inference_hint,
     ExecutionContext, InferenceHint, HEADER_BUDGET_TOKENS, HEADER_DEADLINE_MS, HEADER_HINT_TRUSTED,
-    HEADER_INFERENCE_HINT, HEADER_PRIORITY, HEADER_REPLICA_ID, HEADER_REQUEST_ID,
+    HEADER_INFERENCE_HINT, HEADER_INTERNAL_AUTH, HEADER_PRIORITY, HEADER_REPLICA_ID, HEADER_REQUEST_ID,
     HEADER_SESSION_ID, HEADER_TENANT_ID,
 };
 pub use json_model::{

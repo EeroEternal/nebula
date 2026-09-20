@@ -1,0 +1,23 @@
+window.DOMAIN_API = '';
+// 目前暂支持http、https链接
+window.FAVICON = '';
+// 目前暂支持http、https链接；兼容旧配置
+window.LOGO = '';
+// 品牌蓝 logo（浅色侧栏/登录页默认，/logo-blue.png）
+window.LOGO_BLUE = '';
+// 深色 logo（/logo-dark.png）
+window.LOGO_DARK = '';
+// 白色 logo（深色底，/logo-white.png）
+window.LOGO_WHITE = '';
+// 默认展开收起状态，true表示默认收起，false或不设置表示默认展开
+window.DEFAULT_SIDER_COLLAPSED = false;
+// 路由前缀（例如：xmodels，请不要携带 / ）
+window.PREFIX_PATH = ''
+// 主题色（规范见仓库根 design.md）
+window.THEME_PRIMARY_COLOR = ''
+// 标题(logo旁边的标题，默认空)
+window.TITLE = ''
+// 可选：登录页环境标识（如 staging / prod，留空不展示）
+window.ENV_LABEL = ''
+// 可选：登录页版本号（留空不展示）
+window.VERSION = ''

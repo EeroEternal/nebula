@@ -1,0 +1,164 @@
+/* 设计规范：仓库根 design.md（唯一权威）
+ * 本文件是 Umi 实现 Token，重构时按 design.md 对齐
+ * - `--c-*` / `--sp-*` / `--r-*` 为规范源 Token
+ * - `--primary`（HSL）/ `--text-*` / `--surface-*` 为 Tailwind / Ant 兼容层
+ */
+:root {
+  /* ── Brand（design.md：Primary #2744A5） */
+  --c-primary: #2744a5;
+  --c-primary-hover: #1f3684;
+  --c-primary-light: rgba(39, 68, 165, 0.1);
+  --c-navy: var(--c-primary);
+  --c-navy-hover: var(--c-primary-hover);
+  --c-accent: #c9933a;
+  --c-accent-light: #f5e4c3;
+
+  /* ── Background / Surface（规范） */
+  --c-bg: #f4f4f5;
+  --c-surface: #ffffff;
+  --c-surface-2: #f4f4f5;
+  --c-border: #e4e4e7;
+  --c-border-light: #f4f4f5;
+
+  /* ── Text（规范） */
+  --c-ink: #22222a;
+  --c-ink-2: #71717a;
+  --c-ink-3: #71717a;
+  --c-ink-4: #a1a1aa;
+
+  /* ── Status（规范） */
+  --c-success: #21c45d;
+  --c-success-bg: rgba(33, 196, 93, 0.1);
+  --c-warning: #f0a020;
+  --c-warning-bg: #fef4e0;
+  --c-error: #ef4343;
+  --c-error-bg: rgba(239, 67, 67, 0.1);
+  --c-info: #2744a5;
+  --c-info-bg: rgba(39, 68, 165, 0.1);
+
+  /* ── Sidebar（Card 白底；选中 primary/10 + #2744A5） */
+  --c-sidebar-bg: #ffffff;
+  --c-sidebar-text: var(--c-ink-2);
+  --c-sidebar-text-hover: var(--c-ink);
+  --c-sidebar-hover: rgba(14, 21, 32, 0.04);
+  --c-sidebar-active-bg: var(--c-primary-light);
+  --c-sidebar-active-text: var(--c-primary);
+  --c-sidebar-group: var(--c-ink-3);
+  --c-sidebar-divider: var(--c-border-light);
+  /* logo 底框：与侧栏选中项同色（点击态浅蓝） */
+  --c-sidebar-logo-bg: var(--c-sidebar-active-bg);
+
+  /* ── Typography */
+  --font-body: 'Inter', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Courier New', monospace;
+
+  /* ── Radius */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 16px;
+  --r-pill: 9999px;
+  --radius: var(--r-lg);
+
+  /* ── Spacing */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-14: 56px;
+  --sp-18: 72px;
+  --space-1: var(--sp-1);
+  --space-2: var(--sp-2);
+  --space-3: var(--sp-3);
+  --space-4: var(--sp-4);
+  --space-6: var(--sp-6);
+  --space-8: var(--sp-8);
+
+  /* ── Shadows */
+  --shadow-card: 0 1px 4px rgba(10, 21, 60, 0.07);
+  --shadow-drop: 0 4px 16px rgba(10, 21, 60, 0.1);
+  --shadow-nav: 2px 0 12px rgba(10, 21, 60, 0.12);
+  --shadow-modal: 0 8px 32px rgba(10, 21, 60, 0.18);
+  --shadow-popover: var(--shadow-drop);
+
+  /* ── Motion */
+  --duration-micro: 120ms;
+  --duration-default: 200ms;
+  --duration-complex: 260ms;
+  --ease-default: ease;
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: ease-in;
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* ── Layout */
+  --sidebar-width: 256px;
+  --sidebar-width-collapsed: 48px;
+  --topbar-height: 56px;
+  --content-max-width: 1200px;
+
+  /* ── 兼容层：Ant / Tailwind（HSL channels，配合 hsl(var(--x))） */
+  --primary-color: #2744a5;
+  --primary: 226 62% 40%; /* #2744A5 */
+  --navy: 226 62% 40%; /* #2744A5（与 primary 同色） */
+  --accent: 38 58% 51%; /* #C9933A */
+
+  --text-default: 240 11% 15%; /* #22222A */
+  --text-primary: var(--text-default);
+  --text-muted: 240 4% 46%; /* #71717A */
+  --text-secondary: 240 4% 46%; /* #71717A */
+  --text-disabled: 240 5% 65%; /* #A1A1AA */
+  --text-danger: 0 84% 60%; /* #EF4343 */
+
+  --background: 240 5% 96%; /* #F4F4F5 */
+  --background-focused: 240 5% 96%;
+  --background-selected: 226 62% 95%;
+  --background-muted: 240 5% 96%;
+  --background-muted-hover: 240 5% 96%;
+  --background-danger: 0 84% 60%;
+
+  --surface-page: 220 33% 97%;
+  --surface-card: 0 0% 100%;
+  --surface-elevated: 0 0% 100%;
+
+  --status-success: 143 71% 45%; /* #21C45D */
+  --status-warning: 38 87% 53%; /* #F0A020 */
+  --status-error: 0 84% 60%; /* #EF4343 */
+  --status-info: 226 62% 40%; /* #2744A5 */
+
+  --border: 240 6% 90%; /* #E4E4E7 */
+  --border-muted: 240 5% 96%; /* #F4F4F5 */
+
+  --focus-ring: var(--primary);
+
+  --tw-ring-offset-shadow: 0 0 #0000;
+  --tw-ring-shadow: 0 0 #0000;
+  --tw-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+
+  /* ── 图表色（design.md §7.1） */
+  --chart-1: 226 62% 40%; /* 蓝 — GPU 利用率（design.md Primary） */
+  --chart-2: 38 58% 51%; /* 琥珀 — 显存 */
+  --chart-3: 143 71% 45%; /* 绿 — 在线 */
+  --chart-4: 38 87% 53%; /* 橙 — 告警 */
+  --chart-5: 0 84% 60%; /* 红 — 故障 */
+  --chart-6: 240 4% 46%; /* 灰 — 空闲 */
+  --chart-7: 226 62% 40%;
+  --chart-8: 38 58% 51%;
+  --chart-9: 143 71% 45%;
+  --chart-10: 38 87% 53%;
+
+  /* design.md §5.2 别名（实现仍用 --c-*） */
+  --color-primary: var(--c-primary);
+  --color-primary-rgb: 39, 68, 165;
+  --color-success: var(--c-success);
+  --color-destructive: var(--c-error);
+  --color-text-primary: var(--c-ink);
+  --color-text-secondary: var(--c-ink-2);
+  --color-border: var(--c-border);
+  --color-bg-muted: var(--c-bg);
+  --color-bg-card: var(--c-surface);
+  --sidebar-width-expanded: var(--sidebar-width);
+}

@@ -1,0 +1,73 @@
+/* 少量全局工具类 / 动画 */
+@keyframes pulse-status {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* GPU 利用率 >95% 进度条脉冲（design.md §5.6） */
+.progress-critical {
+  .ant-progress-bg {
+    animation: pulse-status 1.4s infinite ease-in-out;
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.fade-in {
+  animation: fadeIn 0.3s ease-in both;
+}
+
+.fade-out {
+  animation: fadeOut 0.3s ease-in both;
+}
+
+@keyframes fadeIn {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+@keyframes fadeOut {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.transition-out {
+  transition: all 0.4s ease-in-out;
+}
+
+.card-shadow {
+  box-shadow: var(--shadow-card);
+}
+.break-word {
+  word-break: break-word;
+}
+// 此处为了 err 提示过长，但又无法改变 colProps 布局，那么请在 formlist 组件添加此 className
+.form-list-explain-error {
+  .ant-form-item-explain {
+    position: relative;
+    height: 26px;
+    .ant-form-item-explain-error {
+      position: absolute;
+      width: 800px;
+    }
+  }
+}

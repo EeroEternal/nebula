@@ -201,6 +201,10 @@ pub async fn proxy_chat_completions(
 
         let mut req_headers = to_reqwest_headers(&headers);
         nebula_common::telemetry::inject_trace_context(&mut req_headers);
+        req_headers.insert(
+            nebula_common::HEADER_INTERNAL_AUTH,
+            reqwest::header::HeaderValue::from_static("1"),
+        );
 
         let url = format!("{base}{uri_path}{uri_query}");
         let mut builder = st

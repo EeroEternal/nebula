@@ -719,6 +719,7 @@ mod plan_version_tests {
             status_detail: None,
             grpc_target: None,
             base_url: Some(format!("http://127.0.0.1:{}", 8000 + replica_id)),
+            engine_type: None,
         }
     }
 
@@ -862,5 +863,27 @@ mod model_alias_tests {
             router.get_engine_model_name("qwen15_moe_vllm").as_deref(),
             Some("qwen15-moe-vllm")
         );
+    }
+
+    #[test]
+    fn routes_third_party_endpoint_without_plan_version() {
+        let router = Router::new();
+        // Endpoint registered by PowerLLM without scheduler plan_version (defaults to 0)
+        let json = r#"{
+            "model_uid": "qwen2.5-7b",
+            "replica_id": 0,
+            "status": "ready",
+            "base_url": "http://10.99.255.102:9997",
+            "engine_type": "powerllm"
+        }"#;
+        let ep: EndpointInfo = serde_json::from_str(json).unwrap();
+        router.upsert_endpoint(ep);
+
+        let ctx = ExecutionContext::default();
+        let selected = router.route(&ctx, "qwen2.5-7b").unwrap();
+        assert_eq!(selected.model_uid, "qwen2.5-7b");
+        assert_eq!(selected.replica_id, 0);
+        assert_eq!(selected.base_url.as_deref(), Some("http://10.99.255.102:9997"));
+        assert_eq!(selected.engine_type.as_deref(), Some("powerllm"));
     }
 }

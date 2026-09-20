@@ -197,6 +197,7 @@ mod tests {
             status_detail: None,
             grpc_target: None,
             base_url: Some("http://127.0.0.1:1".into()),
+            engine_type: None,
         }
     }
 

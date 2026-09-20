@@ -1,0 +1,83 @@
+@font-face {
+  font-family: "iconfont";
+  src: url('../fonts/font_3758222_v9w2gn72cl.woff2') format('woff2'),
+       url('../fonts/font_3758222_v9w2gn72cl.woff') format('woff'),
+       url('../fonts/font_3758222_v9w2gn72cl.ttf') format('truetype');
+}
+
+.iconfont {
+  font-family: "iconfont" !important;
+  font-size: 16px;
+  font-style: normal;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.icon-powerllm:before {
+  content: "\e623";
+}
+
+.icon-shuaxin:before {
+  content: "\e64f";
+}
+
+.icon-qingkong:before {
+  content: "\e62a";
+}
+
+.icon-tumo1:before {
+  content: "\e79d";
+}
+
+.icon-xiangpica1:before {
+  content: "\e605";
+}
+
+.icon-minglinghang:before {
+  content: "\e710";
+}
+
+.icon-yinpin:before {
+  content: "\e6b8";
+}
+
+.icon-empty1:before {
+  content: "\e628";
+}
+
+.icon-empty:before {
+  content: "\e627";
+}
+
+.icon-kuorong:before {
+  content: "\e650";
+}
+
+.icon-suorong:before {
+  content: "\e651";
+}
+
+.icon-markdown:before {
+  content: "\e96b";
+}
+
+.icon-kongshuju:before {
+  content: "\e612";
+}
+
+.icon-xiangqing:before {
+  content: "\e690";
+}
+
+.icon-database-2-fill:before {
+  content: "\e77c";
+}
+
+.icon-auth:before {
+  content: "\e604";
+}
+
+.icon-icon:before {
+  content: "\e620";
+}
+
