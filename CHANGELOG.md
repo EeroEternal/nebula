@@ -6,6 +6,12 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-09-20
+
+### Changed
+- **Frontend lint rules adopted from console-kit (no behavior change).** `frontend/eslint.config.js` now enforces console-kit's token and restricted-syntax rules: no hard-coded hex (use `index.css` semantic tokens), no palette-ramp classes (`bg/text/border-{gray,zinc,slate,red,…}-NN`), and no native `<select>` / `<dialog>` / `window.alert|confirm|prompt`. The six remaining native `<select>` usages were migrated to the shared `Select` component (`LoadModelDialog`, `account-settings`, `governance`, `images` ×2, `model-catalog`). `eslint`, `tsc -b --noEmit`, and the `vite` build are green.
+- **Local CI consolidated into `./scripts/ci.sh`.** The single local gate now mirrors the removed GitHub Actions workflow end-to-end: `cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test --workspace --all-targets` → OpenAPI contract check → UI-stack/nav checks → frontend `tsc + eslint + build`. `RUN_SMOKE=1` still opts into the release-build mock-engine smoke. The `pre-push-local-gates` skill checklist now points at the single entry point.
+
 ## [1.9.1] - 2026-09-20
 
 ### Changed
