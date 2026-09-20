@@ -1,6 +1,6 @@
 # Nebula 文档索引
 
-当前发布：**[v1.9.0](versions/v1.9.0.md)**。
+当前发布：**[v1.9.1](versions/v1.9.1.md)**。
 
 ## 产品与运维（`manual/`）
 
@@ -17,6 +17,7 @@
 
 | 文档 | 说明 |
 |------|------|
+| [`versions/v1.9.1.md`](versions/v1.9.1.md) | v1.9.1 文档边界澄清（PowerLLM 兼容层定位）与 Admin 安装脚本修复 |
 | [`versions/v1.9.0.md`](versions/v1.9.0.md) | v1.9.0 K8s 执行面控制器、PowerLLM 后端完全兼容与 Admin 控制台整合 |
 | [`versions/v1.8.0.md`](versions/v1.8.0.md) | v1.8.0 L2 算力池化（HardwarePool）与整机优雅排空（Node Drain） |
 | [`versions/v1.7.0.md`](versions/v1.7.0.md) | v1.7.0 架构升级：业务与资产全量迁入 PostgreSQL，下线单机 Lite |

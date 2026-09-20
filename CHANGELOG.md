@@ -6,6 +6,14 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-09-20
+
+### Changed
+- **Doc boundary for the PowerLLM compatibility layer (no behavior change).** `docs/dev/integration.md`, `docs/arch/control-plane-adapters.md`, `docs/arch/vision.md`, and `docs/arch/architecture.md` now state explicitly that the hot path (Gateway `:8081` / Router) and the etcd control plane stay platform-agnostic with zero platform branches, while the BFF (`:18090`) PowerLLM console compatibility layer shipped in v1.9.0 is a console-edge southbound adapter — not a `CONTROL_PLANE` adapter and never on the hot path. Removes the contradiction with the v1.9.0 release notes.
+
+### Fixed
+- **Admin console `npm install` in a nested checkout.** `admin/package.json` `prepare` no longer hard-fails on `husky install` when `admin/` is vendored without a surrounding git repository (`test -d ../.git && husky install || true`).
+
 ## [1.9.0] - 2026-09-20
 
 ### Added
