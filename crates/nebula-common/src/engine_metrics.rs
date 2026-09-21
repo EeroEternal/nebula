@@ -87,13 +87,17 @@ pub fn parse_vllm_metrics_text(
     }
 }
 
-/// Extract a numeric value from a Prometheus metric line, matching either the
-/// `name:metric` or `name_metric` form; the value is the last token.
+/// Extract a numeric value from a Prometheus metric line, matching the metric
+/// name *exactly* (full name before `{`/whitespace, allowing a `vllm:`/`vllm_`
+/// namespace prefix). Exact matching avoids e.g. `prefix_cache_hits_total`
+/// matching `external_prefix_cache_hits_total`.
 fn extract_metric(line: &str, metric_suffix: &str) -> Option<f64> {
-    let has_metric =
-        line.contains(&format!(":{metric_suffix}")) || line.contains(&format!("_{metric_suffix}"));
-
-    if !has_metric {
+    let name_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
+    let name = &line[..name_end];
+    let matched = name == metric_suffix
+        || name == format!("vllm:{metric_suffix}")
+        || name == format!("vllm_{metric_suffix}");
+    if !matched {
         return None;
     }
 
@@ -144,5 +148,24 @@ vllm:prefix_cache_queries_total{model_name=\"m\"} 200\n";
             extract_metric("unrelated_metric{} 1.0", "num_requests_waiting"),
             None
         );
+        // Must NOT match a longer name that merely contains the suffix.
+        assert_eq!(
+            extract_metric(
+                "vllm:external_prefix_cache_hits_total{engine=\"0\"} 0.0",
+                "prefix_cache_hits_total"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn ignores_external_prefix_cache_counters() {
+        let text = "\
+vllm:prefix_cache_queries_total{model_name=\"m\"} 200\n\
+vllm:prefix_cache_hits_total{model_name=\"m\"} 100\n\
+vllm:external_prefix_cache_queries_total{model_name=\"m\"} 0\n\
+vllm:external_prefix_cache_hits_total{model_name=\"m\"} 0\n";
+        let s = parse_vllm_metrics_text(text, "m", 0, 1);
+        assert_eq!(s.prefix_cache_hit_rate, Some(0.5));
     }
 }
