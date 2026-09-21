@@ -91,8 +91,44 @@ async fn ensure_model_running(
     dep: &ModelDeployment,
     spec: Option<&ModelSpec>,
 ) -> anyhow::Result<()> {
+    let replicas = dep.replicas.max(1);
+    for replica_id in 0..replicas {
+        ensure_replica_running(store, namespace, gpu_node, dep, spec, replica_id).await?;
+    }
+    Ok(())
+}
+
+/// Pod name: replica 0 keeps the legacy `nebula-{model}` name; others get a
+/// `-{replica_id}` suffix.
+fn replica_pod_name(model_uid: &str, replica_id: u32) -> String {
+    if replica_id == 0 {
+        format!("nebula-{model_uid}")
+    } else {
+        format!("nebula-{model_uid}-{replica_id}")
+    }
+}
+
+/// GPU index for a replica: from `replica_specs[i].gpu_indices[0]` when given,
+/// else the replica index itself.
+fn replica_gpu_index(dep: &ModelDeployment, replica_id: u32) -> u32 {
+    dep.replica_specs
+        .as_ref()
+        .and_then(|s| s.get(replica_id as usize))
+        .and_then(|rs| rs.gpu_indices.as_ref())
+        .and_then(|g| g.first().copied())
+        .unwrap_or(replica_id)
+}
+
+async fn ensure_replica_running(
+    store: &Arc<EtcdMetaStore>,
+    namespace: &str,
+    gpu_node: &str,
+    dep: &ModelDeployment,
+    spec: Option<&ModelSpec>,
+    replica_id: u32,
+) -> anyhow::Result<()> {
     let model_uid = &dep.model_uid;
-    let pod_name = format!("nebula-{model_uid}");
+    let pod_name = replica_pod_name(model_uid, replica_id);
 
     // Check if pod exists
     let status_output = Command::new("kubectl")
@@ -128,8 +164,9 @@ async fn ensure_model_running(
     }
 
     if need_create {
-        tracing::info!(model_uid=%model_uid, pod=%pod_name, "creating k8s pod for model");
-        create_vllm_pod(namespace, gpu_node, model_uid, spec)?;
+        let gpu_index = replica_gpu_index(dep, replica_id);
+        tracing::info!(model_uid=%model_uid, pod=%pod_name, replica_id, gpu_index, "creating k8s pod for replica");
+        create_vllm_pod(namespace, gpu_node, model_uid, replica_id, gpu_index, spec)?;
     }
 
     if is_running && !pod_ip.is_empty() {
@@ -143,11 +180,11 @@ async fn ensure_model_running(
         let health_url = format!("{base_url}/health");
         let is_ready = client.get(&health_url).send().await.is_ok();
 
-        let ep_key = format!("/endpoints/{model_uid}/0");
+        let ep_key = format!("/endpoints/{model_uid}/{replica_id}");
         if is_ready {
             let ep = EndpointInfo {
                 model_uid: model_uid.clone(),
-                replica_id: 0,
+                replica_id,
                 plan_version: dep.version,
                 node_id: gpu_node.to_string(),
                 endpoint_kind: EndpointKind::NativeHttp,
@@ -177,15 +214,16 @@ async fn ensure_model_stopped(
     dep: &ModelDeployment,
 ) -> anyhow::Result<()> {
     let model_uid = &dep.model_uid;
-    let pod_name = format!("nebula-{model_uid}");
+    let replicas = dep.replicas.max(1);
+    for replica_id in 0..replicas {
+        let ep_key = format!("/endpoints/{model_uid}/{replica_id}");
+        let _ = store.delete(&ep_key).await;
 
-    let ep_key = format!("/endpoints/{model_uid}/0");
-    let _ = store.delete(&ep_key).await;
-
-    let _ = Command::new("kubectl")
-        .args(["-n", namespace, "delete", "pod", &pod_name, "--wait=false"])
-        .output();
-
+        let pod_name = replica_pod_name(model_uid, replica_id);
+        let _ = Command::new("kubectl")
+            .args(["-n", namespace, "delete", "pod", &pod_name, "--wait=false"])
+            .output();
+    }
     Ok(())
 }
 
@@ -193,9 +231,11 @@ fn create_vllm_pod(
     namespace: &str,
     gpu_node: &str,
     model_uid: &str,
+    replica_id: u32,
+    gpu_index: u32,
     spec: Option<&ModelSpec>,
 ) -> anyhow::Result<()> {
-    let pod_name = format!("nebula-{model_uid}");
+    let pod_name = replica_pod_name(model_uid, replica_id);
     let host_model_path = spec
         .and_then(|s| s.model_path.as_deref())
         .unwrap_or("/opt/powerllm/worker/data/models/Qwen2.5-7B-Instruct");
@@ -226,7 +266,7 @@ fn create_vllm_pod(
                 ],
                 "env": [
                     { "name": "PYTHONUNBUFFERED", "value": "1" },
-                    { "name": "NVIDIA_VISIBLE_DEVICES", "value": "0" },
+                    { "name": "NVIDIA_VISIBLE_DEVICES", "value": gpu_index.to_string() },
                     { "name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility" }
                 ],
                 "ports": [{ "containerPort": 43537, "protocol": "TCP" }],
