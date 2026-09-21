@@ -42,3 +42,16 @@
 3. 路由时对请求前缀做 hash（`kv-hashing` 式），命中索引则定向到持有该前缀的副本，否则走 `LeastPending`。
 
 > 这是 Dynamo `kv-router`/`kv-hashing` 与 llm-d EPP 的做法 [`landscape.md`](landscape.md) §3。
+
+## 6. P1 收尾验证（2026-09-21，8×5090）
+
+| 项 | 结果 |
+|----|------|
+| **多副本** | ✅ 2 副本（各绑 GPU 0/1），2 endpoint + 2 `/stats/` |
+| **LeastPending 均衡** | ✅ 256 请求分布 **r0=132 / r1=128（≈50/50）**；吞吐 35.63 req/s、Mean TTFT 93.6ms |
+| **缩容清理** | ✅ `replicas 2→1`：replica 1 的 pod / endpoint / stats 全部删除，GPU1 释放 |
+| **终止态重建** | 代码修复（`23d9404`）；未真机触发 |
+
+修复：`23d9404` —— 缩容清理（`cleanup_extra_replicas`）、终止态 pod 重建（不再卡住）、非 Running 时清 stale `/endpoints` + `/stats`。
+
+**结论**：**多副本 + LeastPending 已做扎实**（均衡 ≈50/50、扩缩容/生命周期正确）。真前缀亲和仍待 P1c（KV events）。
