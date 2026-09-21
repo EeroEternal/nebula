@@ -69,3 +69,4 @@
 | [`dev/landscape.md`](dev/landscape.md) | 推理编排框架对照（Dynamo / llm-d）与 Nebula 的能力缺口 |
 | [`dev/direction.md`](dev/direction.md) | **发展方向备忘**：定位、三条主线、优先级与明确不做 |
 | [`dev/queue-admission.md`](dev/queue-admission.md) | **P0-#2 设计**：引擎级有界公平队列准入（不做 AIMD） |
+| [`dev/prefix-affinity.md`](dev/prefix-affinity.md) | **P1 进展**：多副本 + 前缀亲和（启发式实测无效，需 KV events） |
