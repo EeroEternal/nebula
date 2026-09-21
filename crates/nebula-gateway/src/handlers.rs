@@ -541,6 +541,7 @@ pub async fn proxy_post(
     if st.stage_timing {
         tracing::info!(
             target: "gateway_stage",
+            request_id = %prepared.request_id,
             recv_to_body_us = (t_body - t_recv).as_micros() as u64,
             body_to_prep_us = (t_prep - t_body).as_micros() as u64,
             prep_to_upstream_hdr_us = (t_sent - t_prep).as_micros() as u64,
