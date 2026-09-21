@@ -187,6 +187,9 @@ async fn ensure_replica_running(
 ) -> anyhow::Result<()> {
     let model_uid = &dep.model_uid;
     let pod_name = replica_pod_name(model_uid, replica_id);
+    let engine_type = spec
+        .and_then(|s| s.engine_type.as_deref())
+        .unwrap_or("vllm");
 
     // Check if pod exists
     let status_output = Command::new("kubectl")
@@ -221,7 +224,15 @@ async fn ensure_replica_running(
     if need_create {
         let gpu_index = replica_gpu_index(dep, replica_id);
         tracing::info!(model_uid=%model_uid, pod=%pod_name, replica_id, gpu_index, "creating k8s pod for replica");
-        create_vllm_pod(namespace, gpu_node, model_uid, replica_id, gpu_index, spec)?;
+        create_engine_pod(
+            namespace,
+            gpu_node,
+            model_uid,
+            replica_id,
+            gpu_index,
+            engine_type,
+            spec,
+        )?;
     }
 
     if is_running && !pod_ip.is_empty() {
@@ -252,7 +263,7 @@ async fn ensure_replica_running(
                 status_detail: None,
                 grpc_target: None,
                 base_url: Some(base_url.clone()),
-                engine_type: Some("vllm".to_string()),
+                engine_type: Some(engine_type.to_string()),
             };
             let val = serde_json::to_vec(&ep)?;
             store.put(&ep_key, val, Some(15000)).await?;
@@ -268,8 +279,12 @@ async fn ensure_replica_running(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as u64;
-                        let stats = nebula_common::engine_metrics::parse_vllm_metrics_text(
-                            &text, model_uid, replica_id, now,
+                        let stats = nebula_common::engine_metrics::parse_engine_metrics(
+                            Some(engine_type),
+                            &text,
+                            model_uid,
+                            replica_id,
+                            now,
                         );
                         if let Ok(v) = serde_json::to_vec(&stats) {
                             let stats_key = format!("/stats/{model_uid}/{replica_id}");
@@ -314,18 +329,71 @@ async fn ensure_model_stopped(
     Ok(())
 }
 
-fn create_vllm_pod(
+fn create_engine_pod(
     namespace: &str,
     gpu_node: &str,
     model_uid: &str,
     replica_id: u32,
     gpu_index: u32,
+    engine_type: &str,
     spec: Option<&ModelSpec>,
 ) -> anyhow::Result<()> {
     let pod_name = replica_pod_name(model_uid, replica_id);
     let host_model_path = spec
         .and_then(|s| s.model_path.as_deref())
         .unwrap_or("/opt/powerllm/worker/data/models/Qwen2.5-7B-Instruct");
+
+    let is_sglang = engine_type.eq_ignore_ascii_case("sglang");
+    let image = if is_sglang {
+        "lmsysorg/sglang:latest"
+    } else {
+        "vllm/vllm-openai:latest"
+    };
+    let args = if is_sglang {
+        json!([
+            "-m",
+            "sglang.launch_server",
+            "--model-path",
+            "/models/weights",
+            "--served-model-name",
+            model_uid,
+            "--port",
+            "43537",
+            "--trust-remote-code"
+        ])
+    } else {
+        json!([
+            "--model",
+            "/models/weights",
+            "--served-model-name",
+            model_uid,
+            "--port",
+            "43537",
+            "--tensor-parallel-size",
+            "1"
+        ])
+    };
+
+    let mut container = json!({
+        "name": "engine",
+        "image": image,
+        "imagePullPolicy": "IfNotPresent",
+        "args": args,
+        "env": [
+            { "name": "PYTHONUNBUFFERED", "value": "1" },
+            { "name": "NVIDIA_VISIBLE_DEVICES", "value": gpu_index.to_string() },
+            { "name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility" }
+        ],
+        "ports": [{ "containerPort": 43537, "protocol": "TCP" }],
+        "volumeMounts": [
+            { "mountPath": "/models/weights", "name": "weights" },
+            { "mountPath": "/dev/shm", "name": "dshm" }
+        ]
+    });
+    if is_sglang {
+        // SGLang image entrypoint is not the server; invoke the module explicitly.
+        container["command"] = json!(["python3"]);
+    }
 
     let manifest = json!({
         "apiVersion": "v1",
@@ -341,27 +409,7 @@ fn create_vllm_pod(
         "spec": {
             "nodeName": gpu_node,
             "restartPolicy": "Always",
-            "containers": [{
-                "name": "engine",
-                "image": "vllm/vllm-openai:latest",
-                "imagePullPolicy": "IfNotPresent",
-                "args": [
-                    "--model", "/models/weights",
-                    "--served-model-name", model_uid,
-                    "--port", "43537",
-                    "--tensor-parallel-size", "1"
-                ],
-                "env": [
-                    { "name": "PYTHONUNBUFFERED", "value": "1" },
-                    { "name": "NVIDIA_VISIBLE_DEVICES", "value": gpu_index.to_string() },
-                    { "name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility" }
-                ],
-                "ports": [{ "containerPort": 43537, "protocol": "TCP" }],
-                "volumeMounts": [
-                    { "mountPath": "/models/weights", "name": "weights" },
-                    { "mountPath": "/dev/shm", "name": "dshm" }
-                ]
-            }],
+            "containers": [container],
             "volumes": [
                 {
                     "name": "weights",

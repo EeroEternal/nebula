@@ -3,8 +3,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::process::Command;
 
-use nebula_common::EndpointStats;
-
 use super::{
     configure_process_group, container_name, find_available_port, kill_process_group,
     parse_yaml_defaults, stop_docker_container_by_name, wait_engine_ready, Engine, EngineHandle,
@@ -429,50 +427,9 @@ impl Engine for SglangEngine {
 // ---------------------------------------------------------------------------
 
 /// Parse a SGLang Prometheus `/metrics` body into `EndpointStats`.
-pub fn parse_sglang_metrics_text(
-    text: &str,
-    model_uid: &str,
-    replica_id: u32,
-    last_updated_ms: u64,
-) -> EndpointStats {
-    let mut pending_requests: u64 = 0;
-    let mut running_requests: u64 = 0;
-    let mut kv_cache_usage: Option<f64> = None;
-
-    for line in text.lines() {
-        if line.starts_with('#') {
-            continue;
-        }
-
-        // SGLang metric formats:
-        //   sglang:num_requests_waiting{...} 3
-        //   sglang:num_requests_running{...} 1
-        //   sglang:token_usage{...} 0.45          (KV cache usage ratio)
-        //   sglang_num_requests_waiting{...} 3     (underscore variant)
-        if let Some(val) = extract_sglang_metric(line, "num_requests_waiting") {
-            pending_requests = val as u64;
-        } else if let Some(val) = extract_sglang_metric(line, "num_requests_running") {
-            running_requests = val as u64;
-        } else if let Some(val) = extract_sglang_metric(line, "token_usage") {
-            kv_cache_usage = Some(val);
-        } else if kv_cache_usage.is_none() {
-            if let Some(val) = extract_sglang_metric(line, "cache_usage") {
-                kv_cache_usage = Some(val);
-            }
-        }
-    }
-
-    EndpointStats {
-        model_uid: model_uid.to_string(),
-        replica_id,
-        last_updated_ms,
-        pending_requests: pending_requests + running_requests,
-        // Prefix/prompt cache are not mapped until official metrics are confirmed.
-        prefix_cache_hit_rate: None,
-        prompt_cache_hit_rate: None,
-        kv_cache_usage,
-    }
-}
+/// Parse SGLang `/metrics` (shared with
+/// `nebula-common::engine_metrics`).
+pub use nebula_common::engine_metrics::parse_sglang_metrics_text;
 
 /// Scrape SGLang `/metrics` and parse into EndpointStats.
 pub async fn scrape_sglang_stats(
@@ -518,47 +475,9 @@ pub async fn scrape_sglang_stats(
 }
 
 /// Extract a numeric value from a SGLang Prometheus metric line.
-/// Matches lines like:
-///   sglang:metric_name{labels...} 123.45
-///   sglang_metric_name{labels...} 123.45
-fn extract_sglang_metric(line: &str, metric_suffix: &str) -> Option<f64> {
-    let has_metric =
-        line.contains(&format!(":{metric_suffix}")) || line.contains(&format!("_{metric_suffix}"));
-
-    if !has_metric {
-        return None;
-    }
-
-    let value_str = line.rsplit_once(|c: char| c.is_whitespace())?.1;
-    value_str.parse::<f64>().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_sglang_metric() {
-        assert_eq!(
-            extract_sglang_metric(
-                "sglang:num_requests_waiting{model=\"m\"} 3",
-                "num_requests_waiting"
-            ),
-            Some(3.0)
-        );
-        assert_eq!(
-            extract_sglang_metric("sglang:token_usage{engine=\"0\"} 0.45", "token_usage"),
-            Some(0.45)
-        );
-        assert_eq!(
-            extract_sglang_metric("sglang_num_requests_running{} 2", "num_requests_running"),
-            Some(2.0)
-        );
-        assert_eq!(
-            extract_sglang_metric("unrelated_metric{} 1.0", "num_requests_waiting"),
-            None,
-        );
-    }
 
     #[test]
     fn parse_basic_fixture() {

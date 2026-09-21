@@ -92,17 +92,87 @@ pub fn parse_vllm_metrics_text(
 /// namespace prefix). Exact matching avoids e.g. `prefix_cache_hits_total`
 /// matching `external_prefix_cache_hits_total`.
 fn extract_metric(line: &str, metric_suffix: &str) -> Option<f64> {
+    extract_ns_metric(line, "vllm", metric_suffix)
+}
+
+/// Same as [`extract_metric`] but for the SGLang namespace (`sglang:`/`sglang_`).
+fn extract_sglang_metric(line: &str, metric_suffix: &str) -> Option<f64> {
+    extract_ns_metric(line, "sglang", metric_suffix)
+}
+
+/// Match a Prometheus metric line whose name is exactly `suffix`, optionally
+/// prefixed by `{namespace}:` or `{namespace}_`.
+fn extract_ns_metric(line: &str, namespace: &str, metric_suffix: &str) -> Option<f64> {
     let name_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
     let name = &line[..name_end];
     let matched = name == metric_suffix
-        || name == format!("vllm:{metric_suffix}")
-        || name == format!("vllm_{metric_suffix}");
+        || name == format!("{namespace}:{metric_suffix}")
+        || name == format!("{namespace}_{metric_suffix}");
     if !matched {
         return None;
     }
 
     let value_str = line.rsplit_once(|c: char| c.is_whitespace())?.1;
     value_str.parse::<f64>().ok()
+}
+
+/// Parse SGLang `/metrics` into `EndpointStats`.
+///
+/// SGLang exposes `sglang:num_requests_waiting` / `num_requests_running` and
+/// `sglang:token_usage` (KV cache usage ratio). Prefix/prompt cache are not
+/// mapped until official metrics are confirmed.
+pub fn parse_sglang_metrics_text(
+    text: &str,
+    model_uid: &str,
+    replica_id: u32,
+    last_updated_ms: u64,
+) -> EndpointStats {
+    let mut pending_requests: u64 = 0;
+    let mut running_requests: u64 = 0;
+    let mut kv_cache_usage: Option<f64> = None;
+
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+
+        if let Some(val) = extract_sglang_metric(line, "num_requests_waiting") {
+            pending_requests = val as u64;
+        } else if let Some(val) = extract_sglang_metric(line, "num_requests_running") {
+            running_requests = val as u64;
+        } else if let Some(val) = extract_sglang_metric(line, "token_usage") {
+            kv_cache_usage = Some(val);
+        } else if kv_cache_usage.is_none() {
+            if let Some(val) = extract_sglang_metric(line, "cache_usage") {
+                kv_cache_usage = Some(val);
+            }
+        }
+    }
+
+    EndpointStats {
+        model_uid: model_uid.to_string(),
+        replica_id,
+        last_updated_ms,
+        pending_requests: pending_requests + running_requests,
+        prefix_cache_hit_rate: None,
+        prompt_cache_hit_rate: None,
+        kv_cache_usage,
+    }
+}
+
+/// Dispatch `/metrics` parsing by engine type (`sglang` vs vLLM default), so both
+/// execution planes (node / k8s-controller) treat engines uniformly.
+pub fn parse_engine_metrics(
+    engine_type: Option<&str>,
+    text: &str,
+    model_uid: &str,
+    replica_id: u32,
+    last_updated_ms: u64,
+) -> EndpointStats {
+    match engine_type.map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("sglang") => parse_sglang_metrics_text(text, model_uid, replica_id, last_updated_ms),
+        _ => parse_vllm_metrics_text(text, model_uid, replica_id, last_updated_ms),
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +237,33 @@ vllm:external_prefix_cache_queries_total{model_name=\"m\"} 0\n\
 vllm:external_prefix_cache_hits_total{model_name=\"m\"} 0\n";
         let s = parse_vllm_metrics_text(text, "m", 0, 1);
         assert_eq!(s.prefix_cache_hit_rate, Some(0.5));
+    }
+
+    #[test]
+    fn parses_sglang_metrics() {
+        let text = "\
+sglang:num_requests_waiting{model=\"m\"} 3\n\
+sglang:num_requests_running{model=\"m\"} 1\n\
+sglang:token_usage{model=\"m\"} 0.45\n";
+        let s = parse_sglang_metrics_text(text, "m", 0, 1);
+        assert_eq!(s.pending_requests, 4);
+        assert_eq!(s.kv_cache_usage, Some(0.45));
+        assert_eq!(s.prefix_cache_hit_rate, None);
+    }
+
+    #[test]
+    fn dispatch_by_engine() {
+        let v = "vllm:num_requests_waiting{} 2\n";
+        let sg = "sglang:num_requests_waiting{} 5\n";
+        assert_eq!(
+            parse_engine_metrics(Some("vllm"), v, "m", 0, 1).pending_requests,
+            2
+        );
+        assert_eq!(
+            parse_engine_metrics(Some("sglang"), sg, "m", 0, 1).pending_requests,
+            5
+        );
+        // Unknown engine falls back to vLLM.
+        assert_eq!(parse_engine_metrics(None, v, "m", 0, 1).pending_requests, 2);
     }
 }
