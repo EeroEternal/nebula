@@ -7,6 +7,7 @@ pub mod compat;
 pub mod endpoint;
 pub mod engine_args;
 pub mod engine_image;
+pub mod engine_metrics;
 pub mod execution_context;
 pub mod json_model;
 pub mod model_cache;

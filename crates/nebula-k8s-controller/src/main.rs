@@ -196,12 +196,33 @@ async fn ensure_replica_running(
                     .as_millis() as u64,
                 status_detail: None,
                 grpc_target: None,
-                base_url: Some(base_url),
+                base_url: Some(base_url.clone()),
                 engine_type: Some("vllm".to_string()),
             };
             let val = serde_json::to_vec(&ep)?;
             store.put(&ep_key, val, Some(15000)).await?;
             tracing::debug!(endpoint=%ep_key, "refreshed ready endpoint in etcd");
+
+            // Scrape vLLM metrics -> /stats/ so the router has per-replica
+            // signals (pending / kv_cache / prefix cache hit rate).
+            let metrics_url = format!("{base_url}/metrics");
+            if let Ok(resp) = client.get(&metrics_url).send().await {
+                if resp.status().is_success() {
+                    if let Ok(text) = resp.text().await {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let stats = nebula_common::engine_metrics::parse_vllm_metrics_text(
+                            &text, model_uid, replica_id, now,
+                        );
+                        if let Ok(v) = serde_json::to_vec(&stats) {
+                            let stats_key = format!("/stats/{model_uid}/{replica_id}");
+                            store.put(&stats_key, v, Some(15000)).await?;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -218,6 +239,9 @@ async fn ensure_model_stopped(
     for replica_id in 0..replicas {
         let ep_key = format!("/endpoints/{model_uid}/{replica_id}");
         let _ = store.delete(&ep_key).await;
+        let _ = store
+            .delete(&format!("/stats/{model_uid}/{replica_id}"))
+            .await;
 
         let pod_name = replica_pod_name(model_uid, replica_id);
         let _ = Command::new("kubectl")
