@@ -95,6 +95,64 @@ async fn ensure_model_running(
     for replica_id in 0..replicas {
         ensure_replica_running(store, namespace, gpu_node, dep, spec, replica_id).await?;
     }
+    cleanup_extra_replicas(store, namespace, &dep.model_uid, replicas).await?;
+    Ok(())
+}
+
+/// Delete pods / endpoints / stats for replicas >= `replicas` (scale-down).
+async fn cleanup_extra_replicas(
+    store: &Arc<EtcdMetaStore>,
+    namespace: &str,
+    model_uid: &str,
+    replicas: u32,
+) -> anyhow::Result<()> {
+    let out = Command::new("kubectl")
+        .args([
+            "-n",
+            namespace,
+            "get",
+            "pods",
+            "-l",
+            &format!("nebula.model_uid={model_uid}"),
+            "-o",
+            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
+        ])
+        .output();
+    let Ok(out) = out else { return Ok(()) };
+    if !out.status.success() {
+        return Ok(());
+    }
+
+    let base = format!("nebula-{model_uid}");
+    let names = String::from_utf8_lossy(&out.stdout).to_string();
+    for name in names.lines() {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let replica_id = if name == base {
+            0
+        } else if let Some(suffix) = name.strip_prefix(&format!("{base}-")) {
+            match suffix.parse::<u32>() {
+                Ok(n) => n,
+                Err(_) => continue,
+            }
+        } else {
+            continue;
+        };
+        if replica_id >= replicas {
+            tracing::info!(pod = %name, replica_id, "deleting extra replica (scale-down)");
+            let _ = Command::new("kubectl")
+                .args(["-n", namespace, "delete", "pod", name, "--wait=false"])
+                .output();
+            let _ = store
+                .delete(&format!("/endpoints/{model_uid}/{replica_id}"))
+                .await;
+            let _ = store
+                .delete(&format!("/stats/{model_uid}/{replica_id}"))
+                .await;
+        }
+    }
     Ok(())
 }
 
@@ -143,25 +201,22 @@ async fn ensure_replica_running(
         ])
         .output();
 
-    let mut need_create = true;
+    let mut phase = String::new();
     let mut pod_ip = String::new();
-    let mut is_running = false;
 
     if let Ok(out) = status_output {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let parts: Vec<&str> = s.split(':').collect();
-            if !parts.is_empty() && parts[0] == "Running" {
-                need_create = false;
-                is_running = true;
-                if parts.len() > 1 {
-                    pod_ip = parts[1].to_string();
-                }
-            } else if !parts.is_empty() && !parts[0].is_empty() {
-                need_create = false;
-            }
+            let mut parts = s.split(':');
+            phase = parts.next().unwrap_or_default().to_string();
+            pod_ip = parts.next().unwrap_or_default().to_string();
         }
     }
+
+    let is_running = phase == "Running";
+    // Recreate when the pod is gone or in a terminal phase; keep waiting while
+    // Pending (it is still starting).
+    let need_create = !matches!(phase.as_str(), "Running" | "Pending");
 
     if need_create {
         let gpu_index = replica_gpu_index(dep, replica_id);
@@ -224,6 +279,14 @@ async fn ensure_replica_running(
                 }
             }
         }
+    } else {
+        // Not running: drop any stale endpoint/stats for this replica.
+        let _ = store
+            .delete(&format!("/endpoints/{model_uid}/{replica_id}"))
+            .await;
+        let _ = store
+            .delete(&format!("/stats/{model_uid}/{replica_id}"))
+            .await;
     }
 
     Ok(())
