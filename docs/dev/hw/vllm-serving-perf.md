@@ -282,3 +282,26 @@ P0「单跳」已实现（`NEBULA_ROUTER_MODE=embedded`）。真机 A/B/C 验证
 **已排除**：跳数（§12）、同机放置（§12）、SSE 转发（T1）、loopback 伪影（12.1）、上游 Nagle（reqwest 默认 `tcp_nodelay=true`）。
 
 **未定位**：确切机制（候选：下游 socket Nagle、tokio 调度、额外一跳的抖动）。下一步需在 gateway 内加**分段时间戳埋点**（收包→读体→选路→上行→首 chunk 回写）定位。
+
+### 12.2 分段时间戳定位（`NEBULA_GATEWAY_STAGE_TIMING=1`）
+
+在埋点版 gateway（edge embedded）上跑 C=32/N=256，解析 1040 条 `gateway_stage` 日志（µs，p50/p90/p99）：
+
+| 段 | p50 | p90 | **p99** |
+|----|-----|-----|---------|
+| recv→body（读请求体） | 9 | 14 | 19 |
+| body→prep（鉴权/准入/构造 header） | 80 | 116 | 152 |
+| prep→upstream_hdr（选路+发引擎+引擎响应头） | 61116 | 94573 | 150961 |
+| upstream_hdr→first_chunk（引擎首 token + 中转） | 50238 | 65736 | 77445 |
+| **recv→first_chunk（gateway 内部总时长）** | **113541** | **150323** | **187159** |
+
+**结论（修正 §12/12.1）**：
+
+1. **gateway 自身处理可忽略**：读体 9µs + 鉴权/准入 80µs。
+2. 两个大段都是**引擎**的时间（prefill + 首 token）。
+3. **gateway 内部 `recv→first_chunk` p99 = 187ms ≈ 直连客户端 TTFT p99（~170–196ms）**。
+4. 而客户端经 gateway 的 TTFT p99 = 208–245ms → 差的 **~38ms 是「客户端 Pod ↔ 网关（host 网络）」的网络路径**，**不是 gateway 处理**。
+
+→ 那 +18% P99 **不是 Nebula 的处理开销**，而是 **pod → host 网络路径** 的尾延迟（拓扑/CNI 伪影）。gateway 处理本身 ≈ 0。
+
+**待办**：stage 日志带上 `request_id`，与客户端逐请求对齐，进一步钉死。
