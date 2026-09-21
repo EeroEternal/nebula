@@ -120,10 +120,11 @@ cmd_stop() {
     log "deleting deployment expectation /deployments/$MODEL_UID"
     etcdctl_ del "/deployments/$MODEL_UID" >/dev/null || true
   fi
-  # 2) delete the pod
+  # 2) delete all replica pods (label selector) + the legacy single pod name
   if have kubectl; then
-    log "deleting pod $K8S_NAMESPACE/$MODEL_POD"
+    log "deleting model pods $K8S_NAMESPACE (label nebula.model_uid=$MODEL_UID)"
     kubectl delete pod -n "$K8S_NAMESPACE" "$MODEL_POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+    kubectl delete pod -n "$K8S_NAMESPACE" -l "nebula.model_uid=$MODEL_UID" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
   # 3) stop the control plane
   local p
