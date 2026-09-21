@@ -20,6 +20,8 @@ pub struct AppState {
     pub retry_backoff_ms: u64,
     /// When set (`NEBULA_GATEWAY_STAGE_TIMING=1`), log per-stage latencies.
     pub stage_timing: bool,
+    /// Engine-level bounded fair queue admission (`NEBULA_GATEWAY_QUEUE_*`).
+    pub queues: Option<Arc<nebula_common::queue::EngineQueues>>,
     pub http: reqwest::Client,
     pub store: Arc<EtcdMetaStore>,
     pub auth: GatewayAuth,

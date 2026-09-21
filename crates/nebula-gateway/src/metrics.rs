@@ -41,6 +41,10 @@ pub struct Metrics {
     pub hint_untrusted_total: AtomicU64,
     /// Client disconnect / explicit abort — not counted as 5xx error budget.
     pub requests_aborted_total: AtomicU64,
+    /// Engine queue admission denials by low-cardinality reason.
+    pub queue_denied_full_total: AtomicU64,
+    pub queue_denied_tenant_total: AtomicU64,
+    pub queue_denied_timeout_total: AtomicU64,
 }
 
 impl Metrics {
@@ -70,6 +74,18 @@ impl Metrics {
             }
             _ => {}
         }
+    }
+
+    pub fn record_queue_deny(&self, code: &str) {
+        match code {
+            "tenant_queue_full" => self
+                .queue_denied_tenant_total
+                .fetch_add(1, Ordering::Relaxed),
+            "queue_timeout" => self
+                .queue_denied_timeout_total
+                .fetch_add(1, Ordering::Relaxed),
+            _ => self.queue_denied_full_total.fetch_add(1, Ordering::Relaxed),
+        };
     }
 
     pub fn record_upstream_error(&self, kind: &str) {
@@ -240,6 +256,22 @@ pub fn render_metrics(metrics: &Metrics) -> String {
          nebula_gateway_requests_aborted_total {}\n",
         metrics.requests_aborted_total.load(Ordering::Relaxed),
     ));
+    body.push_str(
+        "# HELP nebula_gateway_queue_denied_total Engine queue admission denials by reason.\n\
+         # TYPE nebula_gateway_queue_denied_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_queue_denied_total{{reason=\"queue_full\"}} {}\n",
+        metrics.queue_denied_full_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_queue_denied_total{{reason=\"tenant_queue_full\"}} {}\n",
+        metrics.queue_denied_tenant_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_queue_denied_total{{reason=\"queue_timeout\"}} {}\n",
+        metrics.queue_denied_timeout_total.load(Ordering::Relaxed),
+    ));
 
     body
 }
@@ -298,10 +330,42 @@ pub fn render_router_metrics(router: &nebula_router::Router) -> String {
     );
     body
 }
+/// Per-model engine-queue gauges when queue admission is enabled.
+fn render_queue_metrics(queues: &nebula_common::queue::EngineQueues) -> String {
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    let _ = writeln!(
+        body,
+        "# HELP nebula_gateway_queue_inflight In-flight requests per model (engine queue).\n\
+         # TYPE nebula_gateway_queue_inflight gauge"
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_gateway_queue_depth Waiting requests per model (engine queue).\n\
+         # TYPE nebula_gateway_queue_depth gauge"
+    );
+    for (model, q) in queues.snapshot() {
+        let _ = writeln!(
+            body,
+            "nebula_gateway_queue_inflight{{model=\"{model}\"}} {}",
+            q.inflight()
+        );
+        let _ = writeln!(
+            body,
+            "nebula_gateway_queue_depth{{model=\"{model}\"}} {}",
+            q.depth()
+        );
+    }
+    body
+}
+
 pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     let mut body = render_metrics(&st.metrics);
     if let Some(router) = st.router.as_ref() {
         body.push_str(&render_router_metrics(router));
+    }
+    if let Some(queues) = st.queues.as_ref() {
+        body.push_str(&render_queue_metrics(queues));
     }
     (
         axum::http::StatusCode::OK,

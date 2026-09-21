@@ -151,6 +151,44 @@ async fn main() {
     let stage_timing = std::env::var("NEBULA_GATEWAY_STAGE_TIMING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    // Engine-level bounded fair queue (off unless configured).
+    let queues = if std::env::var("NEBULA_GATEWAY_QUEUE_MODE").is_ok()
+        || std::env::var("NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY").is_ok()
+    {
+        let mode = std::env::var("NEBULA_GATEWAY_QUEUE_MODE")
+            .ok()
+            .and_then(|v| nebula_common::queue::QueueMode::parse(&v))
+            .unwrap_or(nebula_common::queue::QueueMode::Fair);
+        let num = |k: &str, d: u64| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(d)
+        };
+        let cfg = nebula_common::queue::QueueConfig {
+            mode,
+            max_concurrency: num("NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY", 32) as usize,
+            max_size: num("NEBULA_GATEWAY_QUEUE_MAX_SIZE", 500) as usize,
+            max_wait: std::time::Duration::from_millis(num(
+                "NEBULA_GATEWAY_QUEUE_MAX_WAIT_MS",
+                2000,
+            )),
+            tenant_share: std::env::var("NEBULA_GATEWAY_QUEUE_TENANT_SHARE")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.5),
+        };
+        tracing::info!(
+            mode = %cfg.mode.as_str(),
+            max_concurrency = cfg.max_concurrency,
+            max_size = cfg.max_size,
+            max_wait_ms = cfg.max_wait.as_millis() as u64,
+            "gateway engine queue admission enabled"
+        );
+        Some(nebula_common::queue::EngineQueues::new(cfg))
+    } else {
+        None
+    };
 
     let audit = AuditWriter::spawn(
         args.common.xtrace_url.as_deref(),
@@ -164,6 +202,7 @@ async fn main() {
         retry_max,
         retry_backoff_ms,
         stage_timing,
+        queues,
         http,
         store: Arc::new(store),
         auth,

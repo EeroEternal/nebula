@@ -25,7 +25,7 @@ use crate::interface::{
 };
 use crate::proxy_common::{
     classify_reqwest_error, forward_embedded, forward_upstream_response, post_router_chat,
-    prepare_upstream, prepare_upstream_from_json,
+    prepare_upstream, prepare_upstream_from_json, queue_deny_response,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
@@ -503,6 +503,28 @@ pub async fn proxy_post(
     };
     let t_prep = std::time::Instant::now();
 
+    // Engine-level bounded fair queue admission (opt-in via NEBULA_GATEWAY_QUEUE_*).
+    let _queue_permit = match st.queues.as_ref() {
+        Some(queues) => {
+            let model = prepared
+                .model
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            match queues
+                .for_model(&model)
+                .acquire(prepared.ctx.tenant_id.as_deref())
+                .await
+            {
+                Ok(p) => Some(p),
+                Err(deny) => {
+                    st.metrics.record_queue_deny(deny.code());
+                    return queue_deny_response(deny);
+                }
+            }
+        }
+        None => None,
+    };
+
     // Embedded router: route in-process and hit the engine directly (no router hop).
     let resp = if st.router.is_some() {
         match forward_embedded(
@@ -550,7 +572,14 @@ pub async fn proxy_post(
     }
     let _guard = prepared._conc_guard;
 
-    forward_upstream_response(&st, resp, Some(&prepared.request_id), Some(t_recv)).await
+    forward_upstream_response(
+        &st,
+        resp,
+        Some(&prepared.request_id),
+        Some(t_recv),
+        _queue_permit,
+    )
+    .await
 }
 
 pub async fn list_models(State(st): State<AppState>) -> impl IntoResponse {

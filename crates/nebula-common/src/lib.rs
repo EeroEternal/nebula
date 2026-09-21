@@ -17,6 +17,7 @@ pub mod model_template;
 pub mod node_status;
 pub mod placement;
 pub mod pool;
+pub mod queue;
 pub mod selection;
 pub mod slo;
 pub mod tenant;

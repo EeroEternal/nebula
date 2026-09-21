@@ -211,6 +211,27 @@ pub fn deny_response(code: TenantDenyCode) -> Response {
     resp
 }
 
+/// 429 for engine-queue admission denials (`queue_full` / `tenant_queue_full` /
+/// `queue_timeout`), with `Retry-After` and a stable deny code.
+pub fn queue_deny_response(deny: nebula_common::queue::QueueDeny) -> Response {
+    let mut resp = (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        axum::Json(serde_json::json!({
+            "error": { "code": deny.code(), "message": "engine queue full; retry later" }
+        })),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        HeaderName::from_static("retry-after"),
+        HeaderValue::from_static("1"),
+    );
+    if let Ok(v) = HeaderValue::from_str(deny.code()) {
+        resp.headers_mut()
+            .insert(HeaderName::from_static("x-nebula-deny-code"), v);
+    }
+    resp
+}
+
 pub fn to_reqwest_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {
     let mut out = reqwest::header::HeaderMap::new();
     for (k, v) in headers.iter() {
@@ -251,6 +272,7 @@ pub async fn forward_upstream_response(
     resp: reqwest::Response,
     request_id: Option<&str>,
     req_start: Option<std::time::Instant>,
+    permit: Option<nebula_common::queue::EnginePermit>,
 ) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
@@ -273,6 +295,8 @@ pub async fn forward_upstream_response(
         let t_upstream = std::time::Instant::now();
         let request_id_owned = request_id.map(|s| s.to_string());
         tokio::spawn(async move {
+            // Engine queue permit is held for the whole streamed response.
+            let _permit = permit;
             let mut first = true;
             loop {
                 tokio::select! {
