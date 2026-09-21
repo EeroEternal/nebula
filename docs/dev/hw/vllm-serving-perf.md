@@ -243,26 +243,24 @@ vLLM 有正式插件系统（Python `entry_points`，**不改源码**即可扩�
 
 **结论**：插件解决的是「扩展」问题，不是「解耦后提速」问题；Nebula 不应靠它碰引擎核心，主战场仍是 Zone C。
 
-## 12. 嵌入式 Router 验证方案（待执行）
+## 12. 嵌入式 Router 验证（已执行）
 
-P0「单跳」已实现：`nebula-gateway` 的 `NEBULA_ROUTER_MODE=embedded` 在进程内选路，省掉 gateway→router 的 HTTP 跳（含重试对等与 router 计数暴露）。本地门禁全绿，但 §2 测到的 **+19% TTFT P99 能否收回，需真机验证**。
+P0「单跳」已实现（`NEBULA_ROUTER_MODE=embedded`）。真机 A/B/C 验证（8×5090；客户端 = 引擎 Pod 内官方 `vllm bench serve`；C=32，N=256，random 128→32；**5 轮均值**）：
 
-**目标**：证明 embedded 的 P99 TTFT 明显低于 remote，且接近直连。
+| 组 | req/s | Mean TTFT | P99 TTFT |
+|----|-------|-----------|----------|
+| A direct（`127.0.0.1:43537`） | 66.4 | 140 ms | **189 ms** |
+| B remote（gateway 控制节点 `:8081` → router `:18081`） | 65.9 | 127 ms | 226 ms |
+| C embedded（gateway 控制节点 `:8082`） | 65.1 | 138 ms | 229 ms |
+| C′ embedded（gateway **与引擎同机** `:8082`） | 65.7 | 130 ms | 229 ms |
 
-**三组（同客户端、同 workload、交错 A/B/C 消除预热与顺序偏差）**
+**负结果（嵌入式已验证真的生效：日志 + `/metrics` 均含 `nebula_router_*`）**：
 
-| 组 | 路径 |
-|----|------|
-| A direct | client → engine `:43537` |
-| B remote | client → gateway(`:8081`, `remote`) → router(`:18081`) → engine |
-| C embedded | client → gateway(`:8082`, `embedded`) → engine |
+1. **embedded ≈ remote**：去掉 gateway→router 那一跳，**P99 无改善**。
+2. **router 跳不是成本**：gateway 与 router 同在控制节点（localhost）。
+3. **网关同机放置也无改善**：C′ ≈ B → §9.2 的 **B1 亦不成立**。
+4. **只是尾延迟**：gateway 路径的 Mean TTFT 与直连相当，**只有 P99 被抬高 ~+20%**。
 
-同 etcd + 同引擎；起两个 gateway 实例，不影响生产 gateway。
+→ 「+19% 来自两跳」的归因**不成立**；**P0-#1（单跳）未达成预期收益**。尾延迟来自 gateway 中转本身（store-and-forward / SSE 转发 / 连接池），需另查。
 
-**执行**：`CONTROL_HOST=<control-ip> scripts/verify-embedded-router.sh`
-
-- 客户端 = 引擎 Pod 内官方 `vllm bench serve`（与 §1/§4 同参：random 128→，C=32，N=256，`--num-warmups 4`）。
-- 指标：TTFT p50/p99、ITL p99、QPS。
-- 依赖：etcd 容器 + `nebula-router` + `nebula-k8s-controller` + engine Pod 已就绪（脚本会自行起两个 gateway 并等待就绪）。
-
-**预期**：C 的 P99 TTFT 显著低于 B，与 A 的差距从 +19% 收到个位数。若成立，§9.2 的 B1 收益即被确认。
+**未决对照**：`127.0.0.1` vs 非 loopback 的「无 gateway」基线——pod IP 在 pod 内 hairpin 不通，未能排除「loopback vs 网络」这一客户端伪影。

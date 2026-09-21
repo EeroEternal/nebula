@@ -61,24 +61,27 @@ DIRECT_URL="http://127.0.0.1:${ENGINE_PORT}"
 REMOTE_URL="http://${CONTROL_HOST}:${REMOTE_PORT}"
 EMBED_URL="http://${CONTROL_HOST}:${EMBED_PORT}"
 
-proc_running() { pgrep -f "$BIN_DIR/$1" >/dev/null 2>&1; }
+gateway_up() { curl -fsS -m 2 "http://127.0.0.1:$1/healthz" >/dev/null 2>&1; }
 
 start_gateways() {
   mkdir -p "$LOG_DIR"
-  if proc_running nebula-gateway && [ -n "${GATEWAYS_STARTED:-}" ]; then
-    log "gateways already started by this run"
-    return
+  if gateway_up "$REMOTE_PORT"; then
+    log "remote gateway :$REMOTE_PORT already up"
+  else
+    log "starting remote gateway :$REMOTE_PORT (mode=remote)"
+    NEBULA_AUTH_DISABLED=1 NEBULA_ROUTER_MODE=remote nohup "$BIN_DIR/nebula-gateway" \
+      --listen-addr "0.0.0.0:$REMOTE_PORT" \
+      --router-url "http://127.0.0.1:$ROUTER_PORT" \
+      --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/gw-remote.log" 2>&1 &
   fi
-  log "starting remote gateway  :$REMOTE_PORT"
-  NEBULA_ROUTER_MODE=remote nohup "$BIN_DIR/nebula-gateway" \
-    --listen-addr "0.0.0.0:$REMOTE_PORT" \
-    --router-url "http://127.0.0.1:$ROUTER_PORT" \
-    --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/gw-remote.log" 2>&1 &
-  log "starting embedded gateway :$EMBED_PORT"
-  NEBULA_ROUTER_MODE=embedded nohup "$BIN_DIR/nebula-gateway" \
-    --listen-addr "0.0.0.0:$EMBED_PORT" \
-    --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/gw-embedded.log" 2>&1 &
-  GATEWAYS_STARTED=1
+  if gateway_up "$EMBED_PORT"; then
+    log "embedded gateway :$EMBED_PORT already up"
+  else
+    log "starting embedded gateway :$EMBED_PORT (mode=embedded)"
+    NEBULA_AUTH_DISABLED=1 NEBULA_ROUTER_MODE=embedded nohup "$BIN_DIR/nebula-gateway" \
+      --listen-addr "0.0.0.0:$EMBED_PORT" \
+      --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/gw-embedded.log" 2>&1 &
+  fi
   sleep 2
 }
 
@@ -124,7 +127,7 @@ main() {
   wait_http "$REMOTE_URL/healthz" "remote gateway"
   wait_http "$EMBED_URL/healthz" "embedded gateway"
 
-  log "workload: C=$CONCURRENCY N=$NUM_PROMPTS in=$INPUT_LEN out=$OUTPUT_LEN rounds=$ROUNDS"
+  log "workload: C=$CONCURRENCY N=$NUM_PROMPTS in=$INPUT_LEN out=$OUTPUT_LEN rounds=$ROUNDS (gateways run with NEBULA_AUTH_DISABLED=1)"
   log "warmup"
   bench "$DIRECT_URL" >/dev/null
   bench "$REMOTE_URL" >/dev/null
