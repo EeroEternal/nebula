@@ -464,6 +464,7 @@ pub async fn proxy_post(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Response {
+    let t_recv = std::time::Instant::now();
     let base = st.router_base_url.trim_end_matches('/');
     let uri_path = req.uri().path().to_string();
     let uri_query = req
@@ -481,6 +482,7 @@ pub async fn proxy_post(
             return payload_too_large_response();
         }
     };
+    let t_body = std::time::Instant::now();
 
     // C5 tooling gate for chat completions (embeddings/rerank payloads rarely have tools).
     if uri_path.contains("chat/completions") {
@@ -499,6 +501,7 @@ pub async fn proxy_post(
         Ok(p) => p,
         Err(r) => return r,
     };
+    let t_prep = std::time::Instant::now();
 
     // Embedded router: route in-process and hit the engine directly (no router hop).
     let resp = if st.router.is_some() {
@@ -534,9 +537,19 @@ pub async fn proxy_post(
             }
         }
     };
+    let t_sent = std::time::Instant::now();
+    if st.stage_timing {
+        tracing::info!(
+            target: "gateway_stage",
+            recv_to_body_us = (t_body - t_recv).as_micros() as u64,
+            body_to_prep_us = (t_prep - t_body).as_micros() as u64,
+            prep_to_upstream_hdr_us = (t_sent - t_prep).as_micros() as u64,
+            "stage timing (request path)"
+        );
+    }
     let _guard = prepared._conc_guard;
 
-    forward_upstream_response(&st, resp, Some(&prepared.request_id)).await
+    forward_upstream_response(&st, resp, Some(&prepared.request_id), Some(t_recv)).await
 }
 
 pub async fn list_models(State(st): State<AppState>) -> impl IntoResponse {

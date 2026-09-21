@@ -18,6 +18,8 @@ pub struct AppState {
     /// Embedded-mode upstream retry policy (parity with `nebula-router`).
     pub retry_max: u32,
     pub retry_backoff_ms: u64,
+    /// When set (`NEBULA_GATEWAY_STAGE_TIMING=1`), log per-stage latencies.
+    pub stage_timing: bool,
     pub http: reqwest::Client,
     pub store: Arc<EtcdMetaStore>,
     pub auth: GatewayAuth,

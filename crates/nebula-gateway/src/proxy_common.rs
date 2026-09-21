@@ -250,6 +250,7 @@ pub async fn forward_upstream_response(
     st: &AppState,
     resp: reqwest::Response,
     request_id: Option<&str>,
+    req_start: Option<std::time::Instant>,
 ) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
@@ -268,7 +269,10 @@ pub async fn forward_upstream_response(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
+        let stage_timing = st.stage_timing;
+        let t_upstream = std::time::Instant::now();
         tokio::spawn(async move {
+            let mut first = true;
             loop {
                 tokio::select! {
                     biased;
@@ -282,6 +286,17 @@ pub async fn forward_upstream_response(
                     item = upstream.next() => {
                         match item {
                             Some(Ok(b)) => {
+                                if first {
+                                    first = false;
+                                    if stage_timing {
+                                        tracing::info!(
+                                            target: "gateway_stage",
+                                            upstream_hdr_to_first_chunk_us = t_upstream.elapsed().as_micros() as u64,
+                                            recv_to_first_chunk_us = req_start.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0),
+                                            "stage timing (first chunk)"
+                                        );
+                                    }
+                                }
                                 if tx.send(Ok(b)).await.is_err() {
                                     metrics
                                         .requests_aborted_total

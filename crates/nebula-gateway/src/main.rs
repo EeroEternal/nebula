@@ -148,6 +148,9 @@ async fn main() {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(75);
+    let stage_timing = std::env::var("NEBULA_GATEWAY_STAGE_TIMING")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let audit = AuditWriter::spawn(
         args.common.xtrace_url.as_deref(),
@@ -160,6 +163,7 @@ async fn main() {
         router: embedded_router,
         retry_max,
         retry_backoff_ms,
+        stage_timing,
         http,
         store: Arc::new(store),
         auth,
