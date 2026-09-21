@@ -273,6 +273,8 @@ pub async fn forward_upstream_response(
     request_id: Option<&str>,
     req_start: Option<std::time::Instant>,
     permit: Option<nebula_common::queue::EnginePermit>,
+    queue_wait_ms: u64,
+    upstream_ttft_ms: u64,
 ) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
@@ -346,6 +348,7 @@ pub async fn forward_upstream_response(
             .unwrap_or_else(|_| Response::new(Body::empty()));
         append_headers(&resp_headers, &mut out);
         inject_nebula_echo_headers(&mut out, request_id);
+        inject_ttft_split(&mut out, queue_wait_ms, upstream_ttft_ms);
         return out;
     }
 
@@ -365,6 +368,7 @@ pub async fn forward_upstream_response(
         .unwrap_or_else(|_| Response::new(Body::empty()));
     append_headers(&resp_headers, &mut out);
     inject_nebula_echo_headers(&mut out, request_id);
+    inject_ttft_split(&mut out, queue_wait_ms, upstream_ttft_ms);
     out
 }
 
@@ -377,6 +381,20 @@ fn inject_nebula_echo_headers(out: &mut Response, request_id: Option<&str>) {
             out.headers_mut()
                 .insert(HeaderName::from_static(HEADER_REQUEST_ID), v);
         }
+    }
+}
+
+/// Split client TTFT into queue wait and upstream first-byte time, so load
+/// tests do not read queue-induced delay as the gateway/model being slow.
+fn inject_ttft_split(out: &mut Response, queue_wait_ms: u64, upstream_ttft_ms: u64) {
+    use axum::http::{HeaderName, HeaderValue};
+    if let Ok(v) = HeaderValue::from_str(&queue_wait_ms.to_string()) {
+        out.headers_mut()
+            .insert(HeaderName::from_static("x-nebula-queue-wait-ms"), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&upstream_ttft_ms.to_string()) {
+        out.headers_mut()
+            .insert(HeaderName::from_static("x-nebula-upstream-ttft-ms"), v);
     }
 }
 

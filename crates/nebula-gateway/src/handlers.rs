@@ -504,6 +504,7 @@ pub async fn proxy_post(
     let t_prep = std::time::Instant::now();
 
     // Engine-level bounded fair queue admission (opt-in via NEBULA_GATEWAY_QUEUE_*).
+    let t_before_queue = std::time::Instant::now();
     let _queue_permit = match st.queues.as_ref() {
         Some(queues) => {
             let model = prepared
@@ -524,6 +525,8 @@ pub async fn proxy_post(
         }
         None => None,
     };
+    let t_acquired = std::time::Instant::now();
+    let queue_wait_ms = (t_acquired - t_before_queue).as_millis() as u64;
 
     // Embedded router: route in-process and hit the engine directly (no router hop).
     let resp = if st.router.is_some() {
@@ -560,6 +563,7 @@ pub async fn proxy_post(
         }
     };
     let t_sent = std::time::Instant::now();
+    let upstream_ttft_ms = (t_sent - t_acquired).as_millis() as u64;
     if st.stage_timing {
         tracing::info!(
             target: "gateway_stage",
@@ -578,6 +582,8 @@ pub async fn proxy_post(
         Some(&prepared.request_id),
         Some(t_recv),
         _queue_permit,
+        queue_wait_ms,
+        upstream_ttft_ms,
     )
     .await
 }
