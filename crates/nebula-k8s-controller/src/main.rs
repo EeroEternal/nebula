@@ -239,9 +239,9 @@ async fn ensure_replica_running(
         let port = 43537;
         let base_url = format!("http://{pod_ip}:{port}");
 
-        // Probe health
+        // Probe health. Timeout is generous: SGLang's /health can take >800ms.
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(800))
+            .timeout(Duration::from_secs(3))
             .build()?;
         let health_url = format!("{base_url}/health");
         let is_ready = client.get(&health_url).send().await.is_ok();
