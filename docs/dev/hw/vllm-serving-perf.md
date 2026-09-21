@@ -264,3 +264,21 @@ P0「单跳」已实现（`NEBULA_ROUTER_MODE=embedded`）。真机 A/B/C 验证
 → 「+19% 来自两跳」的归因**不成立**；**P0-#1（单跳）未达成预期收益**。尾延迟来自 gateway 中转本身（store-and-forward / SSE 转发 / 连接池），需另查。
 
 **未决对照**：`127.0.0.1` vs 非 loopback 的「无 gateway」基线——pod IP 在 pod 内 hairpin 不通，未能排除「loopback vs 网络」这一客户端伪影。
+
+### 12.1 公平基线（独立 bench Pod）与二次定位
+
+把压测客户端从「引擎 Pod 内」改为**独立 bench Pod**（独立 netns，非 loopback），5 轮均值：
+
+| 组（均从 bench Pod 出发） | Mean TTFT | P99 TTFT |
+|----|-----------|----------|
+| A 引擎 pod IP（**无 gateway**） | 143 ms | **187 ms** |
+| B gateway embedded（控制节点） | 135 ms | 223 ms |
+| C gateway embedded（边缘同机） | 124 ms | **220 ms** |
+
+→ **不是 loopback 伪影**：gateway 确实给 **P99** 加 ~+18%；而 **Mean 反而更低**（分布被拉散：中位更好、尾更差）。
+
+**T1（关流式）**：`--no-stream` 走非 SSE 路径，E2EL P99 仍是 A 526ms vs C 585ms → **SSE 中转不是唯一主因**，尾延迟来自转发这一跳本身。
+
+**已排除**：跳数（§12）、同机放置（§12）、SSE 转发（T1）、loopback 伪影（12.1）、上游 Nagle（reqwest 默认 `tcp_nodelay=true`）。
+
+**未定位**：确切机制（候选：下游 socket Nagle、tokio 调度、额外一跳的抖动）。下一步需在 gateway 内加**分段时间戳埋点**（收包→读体→选路→上行→首 chunk 回写）定位。
