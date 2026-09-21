@@ -357,9 +357,12 @@ fn create_engine_pod(
             "/models/weights",
             "--served-model-name",
             model_uid,
+            "--host",
+            "0.0.0.0",
             "--port",
             "43537",
-            "--trust-remote-code"
+            "--trust-remote-code",
+            "--enable-metrics"
         ])
     } else {
         json!([
