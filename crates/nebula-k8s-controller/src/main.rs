@@ -93,10 +93,24 @@ async fn ensure_model_running(
 ) -> anyhow::Result<()> {
     let replicas = dep.replicas.max(1);
     for replica_id in 0..replicas {
+        // Multi-node: this agent only manages replicas assigned to its node.
+        if replica_node(dep, replica_id, gpu_node) != gpu_node {
+            continue;
+        }
         ensure_replica_running(store, namespace, gpu_node, dep, spec, replica_id).await?;
     }
     cleanup_extra_replicas(store, namespace, &dep.model_uid, replicas).await?;
     Ok(())
+}
+
+/// Node a replica should run on: `replica_specs[i].node_id` when given, else the
+/// agent's own node.
+fn replica_node(dep: &ModelDeployment, replica_id: u32, default_node: &str) -> String {
+    dep.replica_specs
+        .as_ref()
+        .and_then(|s| s.get(replica_id as usize))
+        .and_then(|rs| rs.node_id.clone())
+        .unwrap_or_else(|| default_node.to_string())
 }
 
 /// Delete pods / endpoints / stats for replicas >= `replicas` (scale-down).
