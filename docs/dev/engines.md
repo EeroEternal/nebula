@@ -35,3 +35,15 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
 
 - 能力/契约：[`contracts.md`](contracts.md)（C4 Capability 三态、C6「引擎差在 scrape」）。
 - 执行面边界：[`k8s.md`](k8s.md)。
+
+## 6. replica_specs 放置对齐（C1，2026-09-21）
+
+真机（8×5090，vLLM）验证 `ModelDeployment.replica_specs`：
+
+| 项 | 结果 |
+|----|------|
+| `replica_specs[i].gpu_indices` | ✅ replica0 → GPU **1**、replica1 → GPU **3**（`NVIDIA_VISIBLE_DEVICES`） |
+| `replica_specs[i].node_id` | ✅ 指向其它节点的 replica **被跳过**（本节点 agent 不创建/不重建），多节点不会重复建 pod |
+| endpoint | ✅ `node_id: "xgateway"`、`engine_type: "vllm"`、`status: ready` |
+
+修复：`f130285` —— controller 原先忽略 `replica_specs[].node_id`、把所有副本都建在自己的 `--gpu-node` 上；多节点各跑一个 agent 时会重复建 pod。现按 `node_id`（缺省 = 本节点）过滤。
