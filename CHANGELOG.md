@@ -6,6 +6,33 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-22
+
+### Added
+- **Engine-level bounded fair queue admission (P0-#2).** The Gateway now admits requests through a per-model bounded queue before reaching the engine: `NEBULA_GATEWAY_QUEUE_ENABLED`, `NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY` (in-flight cap per model), `NEBULA_GATEWAY_QUEUE_MAX_WAITERS`, `NEBULA_GATEWAY_QUEUE_TIMEOUT_MS`, `NEBULA_GATEWAY_QUEUE_MODE` (`fair` | `fast_fail`), and `NEBULA_GATEWAY_QUEUE_TENANT_SHARE` (per-tenant share of concurrency). Over-limit requests are rejected with **HTTP 429** instead of being queued unboundedly. The guard spans the whole streaming lifetime, exposes queue depth/in-flight/wait metrics, and separates TTFT into `x-nebula-queue-wait-ms` and `x-nebula-upstream-ttft-ms` response headers. New module `crates/nebula-common/src/queue.rs` (`EngineQueue` / `EngineQueues` / `QueueConfig` / `QueueMode` / `EnginePermit`). Real-machine (RTX 5090, Qwen2.5-7B): engine-side P99 TTFT at concurrency 64 dropped **311 ms → 82 ms (−74 %)** with the same throughput.
+- **Multiple engine replicas per model.** `ModelDeployment.replicas` now provisions N engine pods per model (`nebula-{model}` for replica 0, `nebula-{model}-{n}` for the rest), each pinned to a distinct GPU, each registering its own `/endpoints/{model}/{replica}` lease and its own `/stats/{model}/{replica}` from that replica's `/metrics` scrape. Scaling down deletes surplus replicas, terminal pods are recreated, and stale endpoints are dropped when a replica leaves `Running`. Real-machine: 2 replicas, `LeastPending` split 132/128 (≈ 50/50), prefix-cache hit rate 0.92/0.93.
+- **Multi-engine alignment (vLLM / SGLang).** Engine metric parsing now lives in `nebula_common::engine_metrics` and is dispatched by `parse_engine_metrics(engine_type, …)`; both the bare-metal node and the Kubernetes controller reuse it instead of keeping private copies. The Kubernetes controller selects image and launch arguments from `ModelSpec.engine_type` (`vllm/vllm-openai:latest` vs `lmsysorg/sglang:latest`) and stamps `engine_type` onto the endpoint. Real-machine: an SGLang pod registers an endpoint with `engine_type: "sglang"`, its `/stats` come from the SGLang parser (`kv_cache_usage` ← `token_usage`), and a chat request through the Gateway returns a valid completion. See [`docs/dev/engines.md`](../../docs/dev/engines.md).
+- **`replica_specs[i].node_id` placement.** The Kubernetes controller now honours the per-replica target node (`node_id`, defaulting to the agent's own node) instead of placing every replica on its own `--gpu-node`; with multiple node agents this previously created duplicate pods for the same replica. `replica_specs[i].gpu_indices` was already honoured. Real-machine: `gpu_indices: [1, 3]` pins replica 0 to GPU 1 and replica 1 to GPU 3, and a replica pointed at another node is not created locally.
+- **Opt-in embedded router mode.** `NEBULA_ROUTER_MODE=embedded` (`NEBULA_ROUTER_STRATEGY=…`) routes `/v1/chat/completions`, `/v1/responses`, and `/v1/messages` through an in-process router with retry parity and router metrics, removing the separate `nebula-router` hop. Measured effect on P99 is **neutral** (the hop is loopback), so this remains opt-in; `remote` is still the default.
+- **Opt-in per-stage latency forensics.** `NEBULA_GATEWAY_STAGE_TIMING=1` logs per-request `recv → body → prep → upstream_hdr → first_chunk` timings correlated by request id. Measured `recv → first_chunk` p99 tracks direct-to-engine TTFT, i.e. the Gateway's own processing overhead is ≈ 0.
+- **Operations scripts.** `scripts/nebula-stack.sh` (`start` / `stop` / `status`) brings up and tears down etcd + controller + router + gateway + BFF, and `scripts/verify-embedded-router.sh` verifies the embedded-router path end to end.
+- **Design and measurement documents.** New reports under `docs/dev/`: `hw/vllm-serving-perf.md` (engine-boundary latency decomposition, vllm-rs vs Python frontend, plugin-system analysis, zero-code optimization checklist), `landscape.md` (vs NVIDIA Dynamo / llm-d), `direction.md` (strategic and product/performance focus), `queue-admission.md` (P0-#2 design), `prefix-affinity.md` (P1), and `engines.md` (multi-engine alignment).
+
+### Changed
+- **Engine metric parsers moved into `nebula-common`.** `parse_vllm_metrics_text` / `parse_sglang_metrics_text` / `parse_engine_metrics` and the `extract_*_metric` helpers now live in `crates/nebula-common/src/engine_metrics.rs`; `crates/nebula-node/src/engine/*` re-use them and the Kubernetes controller scrapes through the same dispatch.
+- **Router sync loops promoted into the library.** `crates/nebula-router/src/sync.rs` is public so the Gateway can embed the same loops instead of re-implementing them.
+
+### Fixed
+- **Engine metric substring over-match.** `extract_metric` matched metric names by substring, so querying `prefix_cache_*` also picked up `external_prefix_cache_*` counters and corrupted the derived hit-rate. Matching is now by full metric name (`crates/nebula-common/src/engine_metrics.rs`).
+- **SGLang would not come up reachable under the Kubernetes controller.** SGLang binds `127.0.0.1` by default (vLLM binds `0.0.0.0`), so the pod IP was unreachable; the controller now passes `--host 0.0.0.0` and `--enable-metrics` (without the latter `/metrics` returns 404).
+- **SGLang endpoints expired instead of refreshing.** SGLang's `/health` responds in **> 800 ms**, so the controller's 800 ms readiness probe failed and the `/endpoints/…` lease was left to expire; the probe timeout is raised to 3 s.
+- **Kubernetes controller scale-down and pod recovery.** Surplus replicas are deleted on scale-down and pods stuck in a terminal phase are recreated; stale endpoints are removed when a replica is not `Running`.
+- **`nebula-stack stop` left replica pods behind.** The script deleted only the replica-0 pod; it now deletes every pod carrying the `nebula.model_uid` label.
+- **`Cargo.lock` workspace versions** were out of sync with `Cargo.toml` after the v1.9.2 cut.
+
+### Removed
+- _(none)_
+
 ## [1.9.2] - 2026-09-20
 
 ### Changed
