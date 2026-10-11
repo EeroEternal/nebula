@@ -102,25 +102,41 @@ async fn main() -> anyhow::Result<()> {
     let auth = nebula_common::auth::parse_auth_from_env();
 
     // P1c: KV-event ingestion (opt-in). Engines publish block store/remove
-    // events over zmq; the router maintains the prefix→replica index. Sources:
-    // BIND (engines connect here) and/or CONNECT (peer router's fanout — HA);
-    // FANOUT re-publishes the stream for peer routers.
+    // events over zmq; the router maintains the prefix→replica index.
+    // HA fanout: PUSH_TO forwards raw frames to peer routers' sinks
+    // (SINK_BIND on the peers — Pub-connect→Sub-bind, the zeromq-0.4-safe
+    // pair). Forwarding is best-effort; reuse events self-heal drops.
     let kv_bind = std::env::var("NEBULA_ROUTER_KV_EVENTS_BIND").ok();
-    let kv_connect = std::env::var("NEBULA_ROUTER_KV_EVENTS_CONNECT").ok();
-    let kv_fanout = std::env::var("NEBULA_ROUTER_KV_EVENTS_FANOUT").ok();
-    if kv_bind.is_some() || kv_connect.is_some() {
+    let kv_push_to: Vec<String> = std::env::var("NEBULA_ROUTER_KV_EVENTS_PUSH_TO")
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if kv_bind.is_some() {
         let idx = router.prefix_index().clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                nebula_router::kv_events::kv_events_loop(kv_bind, kv_connect, kv_fanout, idx).await
+            if let Err(e) = nebula_router::kv_events::kv_events_loop(kv_bind, kv_push_to, idx).await
             {
                 tracing::error!(error = %e, "kv events loop exited");
             }
         });
-        let ttl_ms = std::env::var("NEBULA_ROUTER_PREFIX_TTL_MS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(300_000);
+    }
+    if let Ok(sink) = std::env::var("NEBULA_ROUTER_KV_EVENTS_SINK_BIND") {
+        let idx = router.prefix_index().clone();
+        tokio::spawn(async move {
+            if let Err(e) = nebula_router::kv_events::kv_sink_loop(sink, idx).await {
+                tracing::error!(error = %e, "kv sink loop exited");
+            }
+        });
+    }
+    let ttl_ms = std::env::var("NEBULA_ROUTER_PREFIX_TTL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300_000);
+    {
         let idx = router.prefix_index().clone();
         tokio::spawn(async move {
             loop {

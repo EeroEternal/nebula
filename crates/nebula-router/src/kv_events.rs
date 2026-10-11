@@ -261,68 +261,87 @@ fn now_ms() -> u64 {
 
 /// KV-event ingestion loop (P1c).
 ///
-/// Sources (either or both):
-/// - `bind`: engines connect here (`NEBULA_ROUTER_KV_EVENTS_BIND`)
-/// - `connect`: subscribe to a peer router's fanout
-///   (`NEBULA_ROUTER_KV_EVENTS_CONNECT`) — HA sharing
-///
-/// Optional `fanout` (`NEBULA_ROUTER_KV_EVENTS_FANOUT`) re-publishes every
-/// frame verbatim on a PUB socket so peer routers can share the stream.
+/// Engines connect to `bind` (`NEBULA_ROUTER_KV_EVENTS_BIND`); the loop
+/// parses batches into `index`. When `push_to` is set
+/// (`NEBULA_ROUTER_KV_EVENTS_PUSH_TO`, comma-separated peer sink addrs)
+/// every raw frame is also forwarded to peer routers' sinks (HA fanout).
 /// Forwarding is best-effort: PUB drops are self-healing because engines
 /// re-emit BlockStored on cache reuse.
+///
+/// shortcut: zeromq 0.4's PubSocket::bind and SubSocket::connect never
+/// resolve (verified locally), so HA uses only the proven pair —
+/// Pub-connect → Sub-bind; upgrade the crate to relax this.
 pub async fn kv_events_loop(
     bind: Option<String>,
-    connect: Option<String>,
-    fanout: Option<String>,
+    push_to: Vec<String>,
     index: Arc<PrefixIndex>,
 ) -> anyhow::Result<()> {
     use zeromq::{Socket, SocketRecv, SocketSend};
-    if bind.is_none() && connect.is_none() {
-        anyhow::bail!("kv events loop needs BIND or CONNECT");
+    let Some(bind) = bind else {
+        anyhow::bail!("kv events loop needs BIND");
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<bytes::Bytes>>();
+    if !push_to.is_empty() {
+        tokio::spawn(async move {
+            let mut pusher = zeromq::PubSocket::with_options(zeromq::SocketOptions::default());
+            for addr in &push_to {
+                if let Err(e) = pusher.connect(addr).await {
+                    tracing::warn!(addr = %addr, error = %e, "fanout connect failed");
+                }
+            }
+            tracing::info!(sinks = ?push_to, "kv events fanout pushing");
+            while let Some(frames) = rx.recv().await {
+                let mut msg = zeromq::ZmqMessage::from(frames[0].clone());
+                for f in &frames[1..] {
+                    msg.push_back(f.clone());
+                }
+                // Best-effort: drops self-heal via reuse events.
+                let _ = pusher.send(msg).await;
+            }
+        });
     }
     let mut socket = zeromq::SubSocket::new();
     socket.subscribe("").await?;
-    if let Some(b) = &bind {
-        socket.bind(b).await?;
-        tracing::info!(bind = %b, "kv events subscriber bound");
-    }
-    if let Some(c) = &connect {
-        socket.connect(c).await?;
-        tracing::info!(connect = %c, "kv events subscriber connected (peer fanout)");
-    }
-    let mut fanout_socket = match &fanout {
-        Some(f) => {
-            let mut p = zeromq::PubSocket::with_options(zeromq::SocketOptions::default());
-            p.bind(f).await?;
-            tracing::info!(fanout = %f, "kv events fanout bound");
-            Some(p)
-        }
-        None => None,
-    };
+    socket.bind(&bind).await?;
+    tracing::info!(bind = %bind, "kv events subscriber bound");
     loop {
         let frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
         if frames.len() < 3 {
             continue;
         }
-        if let Some(p) = fanout_socket.as_mut() {
-            let mut fwd = zeromq::ZmqMessage::from(frames[0].clone());
-            for f in &frames[1..] {
-                fwd.push_back(f.clone());
-            }
-            // Best-effort: drops self-heal via reuse events.
-            let _ = p.send(fwd).await;
-        }
-        let Some((model_uid, replica_id)) = parse_topic(&frames[0]) else {
-            tracing::warn!(
-                topic = %String::from_utf8_lossy(&frames[0]),
-                "unparseable kv event topic"
-            );
+        let _ = tx.send(frames.clone());
+        apply_frames(&frames, &index);
+    }
+}
+
+/// Peer-sink ingestion (HA): bind a SUB socket that fanout peers push to
+/// (`NEBULA_ROUTER_KV_EVENTS_SINK_BIND` on the replica routers).
+pub async fn kv_sink_loop(sink_bind: String, index: Arc<PrefixIndex>) -> anyhow::Result<()> {
+    use zeromq::{Socket, SocketRecv};
+    let mut socket = zeromq::SubSocket::new();
+    socket.subscribe("").await?;
+    socket.bind(&sink_bind).await?;
+    tracing::info!(sink = %sink_bind, "kv events peer sink bound");
+    loop {
+        let frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
+        if frames.len() < 3 {
             continue;
-        };
-        let events = parse_batch(&frames[2]);
-        if !events.is_empty() {
-            index.apply(&model_uid, replica_id, &events, now_ms());
         }
+        apply_frames(&frames, &index);
+    }
+}
+
+fn apply_frames(frames: &[bytes::Bytes], index: &PrefixIndex) {
+    let Some((model_uid, replica_id)) = parse_topic(&frames[0]) else {
+        tracing::warn!(
+            topic = %String::from_utf8_lossy(&frames[0]),
+            "unparseable kv event topic"
+        );
+        return;
+    };
+    let events = parse_batch(&frames[2]);
+    if !events.is_empty() {
+        index.apply(&model_uid, replica_id, &events, now_ms());
     }
 }
 
