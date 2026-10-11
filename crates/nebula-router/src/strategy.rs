@@ -6,12 +6,21 @@ pub struct Candidate<'a> {
     pub stats: Option<&'a EndpointStats>,
 }
 
+/// Result of a strategy selection: the chosen candidate index plus the
+/// reason when the primary signal was unusable and the strategy fell back to
+/// `LeastPending` (`"no_signal"` / `"below_threshold"`), so fallbacks are
+/// observable instead of silent.
+pub struct Selection {
+    pub index: usize,
+    pub fallback_reason: Option<&'static str>,
+}
+
 /// Trait for pluggable routing strategies.
 /// The Router filters candidates (model_uid match, Ready status, plan_version),
 /// then delegates selection to the strategy.
 pub trait RoutingStrategy: Send + Sync {
-    /// Select one candidate from the list. Returns the index into `candidates`.
-    fn select(&self, candidates: &[Candidate]) -> Option<usize>;
+    /// Select one candidate from the list.
+    fn select(&self, candidates: &[Candidate]) -> Option<Selection>;
 
     /// Human-readable name for logging / metrics.
     fn name(&self) -> &'static str;
@@ -24,7 +33,7 @@ pub trait RoutingStrategy: Send + Sync {
 pub struct LeastPending;
 
 impl RoutingStrategy for LeastPending {
-    fn select(&self, candidates: &[Candidate]) -> Option<usize> {
+    fn select(&self, candidates: &[Candidate]) -> Option<Selection> {
         let mut best_idx: Option<usize> = None;
         let mut best_pending = u64::MAX;
 
@@ -36,7 +45,10 @@ impl RoutingStrategy for LeastPending {
             }
         }
 
-        best_idx
+        best_idx.map(|index| Selection {
+            index,
+            fallback_reason: None,
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -52,7 +64,7 @@ impl RoutingStrategy for LeastPending {
 pub struct LeastKvCache;
 
 impl RoutingStrategy for LeastKvCache {
-    fn select(&self, candidates: &[Candidate]) -> Option<usize> {
+    fn select(&self, candidates: &[Candidate]) -> Option<Selection> {
         let mut best_idx: Option<usize> = None;
         let mut best_kv = f64::MAX;
         let mut has_kv_data = false;
@@ -68,11 +80,17 @@ impl RoutingStrategy for LeastKvCache {
         }
 
         if has_kv_data {
-            return best_idx;
+            return best_idx.map(|index| Selection {
+                index,
+                fallback_reason: None,
+            });
         }
 
         // Fallback: least pending
-        LeastPending.select(candidates)
+        LeastPending.select(candidates).map(|mut s| {
+            s.fallback_reason = Some("no_signal");
+            s
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -90,7 +108,7 @@ const PREFIX_CACHE_THRESHOLD: f64 = 0.1;
 pub struct PrefixCacheAware;
 
 impl RoutingStrategy for PrefixCacheAware {
-    fn select(&self, candidates: &[Candidate]) -> Option<usize> {
+    fn select(&self, candidates: &[Candidate]) -> Option<Selection> {
         let mut best_idx: Option<usize> = None;
         let mut best_hit_rate: f64 = -1.0;
         let mut has_cache_data = false;
@@ -106,11 +124,22 @@ impl RoutingStrategy for PrefixCacheAware {
         }
 
         if has_cache_data && best_hit_rate >= PREFIX_CACHE_THRESHOLD {
-            return best_idx;
+            return best_idx.map(|index| Selection {
+                index,
+                fallback_reason: None,
+            });
         }
 
         // Fallback: least pending
-        LeastPending.select(candidates)
+        let reason: &'static str = if has_cache_data {
+            "below_threshold"
+        } else {
+            "no_signal"
+        };
+        LeastPending.select(candidates).map(|mut s| {
+            s.fallback_reason = Some(reason);
+            s
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -189,7 +218,12 @@ mod tests {
             },
         ];
 
-        assert_eq!(LeastPending.select(&candidates), Some(1));
+        assert_eq!(
+            LeastPending
+                .select(&candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((1, None))
+        );
     }
 
     #[test]
@@ -210,7 +244,12 @@ mod tests {
             },
         ];
 
-        assert_eq!(LeastKvCache.select(&candidates), Some(1));
+        assert_eq!(
+            LeastKvCache
+                .select(&candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((1, None))
+        );
     }
 
     #[test]
@@ -232,7 +271,12 @@ mod tests {
         ];
 
         // No KV data → falls back to least pending
-        assert_eq!(LeastKvCache.select(&candidates), Some(1));
+        assert_eq!(
+            LeastKvCache
+                .select(&candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((1, Some("no_signal")))
+        );
     }
 
     #[test]
@@ -253,7 +297,12 @@ mod tests {
             },
         ];
 
-        assert_eq!(PrefixCacheAware.select(&candidates), Some(0));
+        assert_eq!(
+            PrefixCacheAware
+                .select(&candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((0, None))
+        );
     }
 
     #[test]
@@ -275,6 +324,39 @@ mod tests {
         ];
 
         // All below threshold → falls back to least pending (index 1)
-        assert_eq!(PrefixCacheAware.select(&candidates), Some(1));
+        assert_eq!(
+            PrefixCacheAware
+                .select(&candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((1, Some("below_threshold")))
+        );
+    }
+
+    #[test]
+    fn test_prefix_cache_aware_fallback_no_signal() {
+        let ep0 = make_ep("m", 0);
+        let ep1 = make_ep("m", 1);
+        // Stats present but prefix_cache_hit_rate None (e.g. broken metric
+        // parsing) → no signal, must fall back with a visible reason.
+        let s0 = make_stats("m", 0, 10, None, None);
+        let s1 = make_stats("m", 1, 3, None, None);
+
+        let candidates = vec![
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
+        ];
+
+        assert_eq!(
+            PrefixCacheAware
+                .select(&candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((1, Some("no_signal")))
+        );
     }
 }

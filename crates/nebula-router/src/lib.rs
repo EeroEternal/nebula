@@ -71,6 +71,11 @@ pub struct Router {
     hint_stale_degraded_total: AtomicU64,
     session_affinity_hit_total: AtomicU64,
     prefix_hint_hit_total: AtomicU64,
+    /// Strategy fell back to least_pending because the primary signal was
+    /// missing / below threshold. Counted so silent degradation is observable
+    /// (the engine_metrics bug hid exactly this way).
+    strategy_fallback_no_signal_total: AtomicU64,
+    strategy_fallback_below_threshold_total: AtomicU64,
     stats_max_age_ms: u64,
     circuit_failure_threshold: u32,
     circuit_open_ms: u64,
@@ -129,6 +134,8 @@ impl Router {
             hint_stale_degraded_total: AtomicU64::new(0),
             session_affinity_hit_total: AtomicU64::new(0),
             prefix_hint_hit_total: AtomicU64::new(0),
+            strategy_fallback_no_signal_total: AtomicU64::new(0),
+            strategy_fallback_below_threshold_total: AtomicU64::new(0),
             stats_max_age_ms,
             circuit_failure_threshold,
             circuit_open_ms,
@@ -217,6 +224,16 @@ impl Router {
 
     pub fn prefix_hint_hit_total(&self) -> u64 {
         self.prefix_hint_hit_total.load(Ordering::Relaxed)
+    }
+
+    pub fn strategy_fallback_no_signal_total(&self) -> u64 {
+        self.strategy_fallback_no_signal_total
+            .load(Ordering::Relaxed)
+    }
+
+    pub fn strategy_fallback_below_threshold_total(&self) -> u64 {
+        self.strategy_fallback_below_threshold_total
+            .load(Ordering::Relaxed)
     }
 
     pub fn record_endpoint_success(&self, model_uid: &str, replica_id: u32) {
@@ -607,16 +624,10 @@ impl Router {
                 }
                 candidates_data[idx].0.clone()
             } else {
-                self.strategy
-                    .select(&candidates)
-                    .map(|i| candidates_data[i].0.clone())
-                    .ok_or(RouteError::NoEndpoint)?
+                self.select_by_strategy(&candidates, &candidates_data)?
             }
         } else {
-            self.strategy
-                .select(&candidates)
-                .map(|i| candidates_data[i].0.clone())
-                .ok_or(RouteError::NoEndpoint)?
+            self.select_by_strategy(&candidates, &candidates_data)?
         };
 
         if let Some(session_id) = ctx.session_id.clone() {
@@ -636,6 +647,32 @@ impl Router {
         plan_version: u64,
     ) -> Result<EndpointInfo, RouteError> {
         self.route_internal(ctx, model_uid, Some(plan_version), None)
+    }
+
+    /// Run the configured strategy and count a fallback when the primary
+    /// signal was unusable, so degradation is observable instead of silent.
+    fn select_by_strategy(
+        &self,
+        candidates: &[Candidate<'_>],
+        candidates_data: &[(EndpointInfo, Option<EndpointStats>)],
+    ) -> Result<EndpointInfo, RouteError> {
+        let sel = self
+            .strategy
+            .select(candidates)
+            .ok_or(RouteError::NoEndpoint)?;
+        if let Some(reason) = sel.fallback_reason {
+            match reason {
+                "below_threshold" => &self.strategy_fallback_below_threshold_total,
+                _ => &self.strategy_fallback_no_signal_total,
+            }
+            .fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                strategy = self.strategy.name(),
+                reason,
+                "routing strategy fell back to least_pending"
+            );
+        }
+        Ok(candidates_data[sel.index].0.clone())
     }
 
     fn select_hint_biased_endpoint(
@@ -737,6 +774,30 @@ mod plan_version_tests {
         };
         let ep = router.route(&ctx, "m1").unwrap();
         assert_eq!(ep.replica_id, 1);
+    }
+
+    #[test]
+    fn strategy_fallback_counted_when_signal_missing() {
+        // least_kv_cache with no KV stats anywhere → falls back to
+        // least_pending; the fallback must be counted, not silent.
+        let router = Router::with_strategy(Box::new(strategy::LeastKvCache));
+        router.upsert_endpoint(ready_ep("m1", 0, 1));
+        router.upsert_endpoint(ready_ep("m1", 1, 1));
+        let ctx = ExecutionContext {
+            request_id: "r".into(),
+            session_id: None,
+            tenant_id: None,
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+            pinned_replica_id: None,
+            inference_hint: None,
+            hint_trusted: false,
+        };
+        let ep = router.route(&ctx, "m1").unwrap();
+        assert!(ep.replica_id <= 1);
+        assert_eq!(router.strategy_fallback_no_signal_total(), 1);
+        assert_eq!(router.strategy_fallback_below_threshold_total(), 0);
     }
 
     #[test]

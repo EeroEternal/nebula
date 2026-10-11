@@ -6,6 +6,9 @@ The format is based on Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+- **Router strategy fallback observability.** Routing strategies that degrade to `least_pending` now expose `nebula_router_strategy_fallback_total{strategy=…,reason="no_signal"|"below_threshold"}` on the router `/metrics` endpoint (embedded-router mode included). Previously a broken upstream signal — e.g. the `engine_metrics` exact-match bug fixed in `4b64a3f` — silently turned `prefix_cache_aware` / `least_kv_cache` into `least_pending` with no metric, log, or error.
+
 ## [1.10.0] - 2026-09-22
 
 ### Added
