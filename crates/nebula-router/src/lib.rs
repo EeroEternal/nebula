@@ -273,16 +273,34 @@ impl Router {
             .prompt_hashes(model_uid, name.as_deref(), prompt)
     }
 
-    /// Hash the prompt prefix blocks of an OpenAI-style body. v1: the `prompt`
-    /// field only (`/v1/completions`); chat bodies return None (chat template
-    /// gap — falls back visibly via the strategy fallback counters). Only
-    /// paid when the prefix_affinity strategy is active.
+    /// Hash the prompt prefix blocks of an OpenAI-style body. Covers
+    /// `/v1/completions` `prompt` (exact) and `/v1/chat/completions`
+    /// `messages` (rendered with the model's chat_template — verified
+    /// token-exact against the engine on the rig). Only paid when the
+    /// prefix_affinity strategy is active.
     pub fn body_prompt_hashes(&self, model_uid: &str, body: &[u8]) -> Option<Vec<[u8; 32]>> {
         if self.strategy_name() != "prefix_affinity" {
             return None;
         }
-        let prompt = extract_prompt_string(body)?;
-        self.prompt_hashes(model_uid, &prompt)
+        let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+        let name = self
+            .model_uids_to_names
+            .get(model_uid)
+            .map(|e| e.value().clone());
+        match v.get("prompt") {
+            Some(serde_json::Value::String(s)) => {
+                self.prefix_hasher.prompt_hashes(model_uid, name.as_deref(), s)
+            }
+            // list-of-strings prompt: hash the first element's prefix
+            Some(serde_json::Value::Array(a)) => a
+                .first()
+                .and_then(|x| x.as_str())
+                .and_then(|s| self.prefix_hasher.prompt_hashes(model_uid, name.as_deref(), s)),
+            _ if v.get("messages").is_some() => {
+                self.prefix_hasher.chat_hashes(model_uid, name.as_deref(), &v)
+            }
+            _ => None,
+        }
     }
 
     pub fn record_endpoint_success(&self, model_uid: &str, replica_id: u32) {

@@ -29,6 +29,7 @@ xtrace-client.workspace = true
 rmpv = "1"
 sha2 = "0.10"
 tokenizers = "0.21"
+minijinja = "2"
 zeromq = "0.4"
 
 nebula-common = { path = "../nebula-common" }
