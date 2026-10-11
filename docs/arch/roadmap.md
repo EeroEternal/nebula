@@ -238,6 +238,39 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 ---
 
+## P1c 后续（前缀亲和生产化，2026-10-11 真机验收后规划）
+
+> 依据与验收数据见 [`../dev/prefix-affinity.md`](../dev/prefix-affinity.md) §5–§6。排期单位为开发会话。
+
+### Batch 1：P1c 生产化加固（无外部依赖）
+
+| # | 任务 | 状态 | 验收标准 |
+|---|------|------|----------|
+| 1.1 | Chat 模板哈希（Router 侧渲染 chat_template + 复用哈希链，覆盖 `/v1/chat/completions`） | ⏳ | chat 请求走亲和；模板渲染 token 序列与引擎逐 token 对齐（fixture + 真机双验证） |
+| 1.2 | 索引自愈（vLLM `replay_endpoint` 重放 + reuse 事件版本查证钉入兼容矩阵） | ⏳ | Router 重启 + 暖引擎 → 60s 内索引恢复、no_signal 占比 <5% |
+| 1.3 | 亲和可观测（`prefix_index_hit_ratio` + 前缀热度 top-N：BFF API + 控制台卡片） | ⏳ | 控制台可回答亲和收益与前缀热度 |
+| 1.4 | HA 扇出（多 Router 共享事件流；索引元数据不进 etcd 热路径） | ⏳ | 双 Router 实例一致命中 |
+
+### Batch 2：全局 KV 索引服务（P1，依赖 1.4）
+
+- `PrefixIndex` 提升为独立组件（nebula-meta 旁挂），Router/嵌入式网关共享 lookup；索引服务故障 → 各 Router 本地兜底降级（可见）。
+
+### Batch 3：引擎版本策略 + PD 编排（S2 前置，节奏由引擎调研决定）
+
+1. 兼容矩阵：vLLM KVConnector/NIXL PD 路径可用版本 → 钉版本（方法论沿用 prefix-affinity §5.2 真机校准）。
+2. `pool.md` 扩展：`replica_specs` 角色字段（prefill/decode/混合）+ 放置约束，先设计评审后实现。
+3. 实现：角色化放置 + Gateway stage 路由 hint。
+
+### Batch 4：空闲容量吃批负载（独立，可插队）
+
+- benchmark/canary 调度到空闲副本（`/stats/` 忙闲信号 + 准入队列低优先级）；Phase 3 Selection 联动前置。
+
+### 顺手卫生项（夹带做）
+
+- 数据面 retry 语义收敛（首字节前可重试，单一实现）；review skill 增加引擎 adapter 仅声明 capability 规则。
+
+---
+
 ## 明确不做
 
 - 改架构主轴；Actor 回潮  
@@ -245,6 +278,7 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 - xtrace 当 Prometheus 替代或 xtrace→Loki 桥  
 - 应用直连 Loki  
 - 只有 metrics、没有 abort/drain SLO 口径  
+- 引擎内 Stage 重构（S1，vLLM 上游的活）；自造 KV 传输/shuffle；Decode 中途迁 KV（等 S3 层落地再评估）  
 
 ---
 
