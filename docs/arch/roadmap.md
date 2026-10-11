@@ -255,11 +255,11 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 - `nebula-indexd`（nebula-router crate 内独立二进制）：引擎唯一稳定端点 → 权威索引 → 原始帧 + 周期快照推送到所有 Router sink；热路径零依赖，故障降级可见。本地验收 4/4（转发/自愈/降级/双 Router 一致）。细节见 prefix-affinity.md §5.8。
 
-### Batch 3：引擎版本策略 + PD 编排（S2 前置，节奏由引擎调研决定）
+### Batch 3：引擎版本策略 + PD 编排（S2 前置）
 
-1. 兼容矩阵：vLLM KVConnector/NIXL PD 路径可用版本 → 钉版本（方法论沿用 prefix-affinity §5.2 真机校准）。
-2. `pool.md` 扩展：`replica_specs` 角色字段（prefill/decode/混合）+ 放置约束，先设计评审后实现。
-3. 实现：角色化放置 + Gateway stage 路由 hint。
+1. ✅ 2026-10-11 兼容矩阵与选型（[`engines.md`](../dev/engines.md) §7）：**PD 传输主路径 LMCache**（双硬件代码原生、torch 层传输不绑 GPU 厂商）、备选 Mooncake(TCP)；排除 NIXL（Dynamo 系）与 p2p_nccl（NVIDIA 专属）；**引擎版本钉死 vLLM v0.23.x**（kv-events 已字节级校准）。待验证：昇腾真机 lmcache PD e2e、CUDA 侧最小 PD、角色化放置设计。
+2. ⏳ `pool.md` 扩展：`replica_specs` 角色字段（prefill/decode/混合）+ connector 参数进 ModelSpec，先设计评审后实现。
+3. ⏳ 实现：角色化放置 + Gateway stage 路由 hint。
 
 ### Batch 4：空闲容量吃批负载（独立，可插队）
 

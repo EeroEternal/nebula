@@ -47,3 +47,34 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
 | endpoint | ✅ `node_id: "xgateway"`、`engine_type: "vllm"`、`status: ready` |
 
 修复：`f130285` —— controller 原先忽略 `replica_specs[].node_id`、把所有副本都建在自己的 `--gpu-node` 上；多节点各跑一个 agent 时会重复建 pod。现按 `node_id`（缺省 = 本节点）过滤。
+
+## 7. PD 分离传输选型与引擎版本钉死（Batch 3 第一步，2026-10-11）
+
+> 决策约束：**通用性优先**——NVIDIA 与昇腾（及其他后端）都要能跑；NIXL 出局（Dynamo 系方案）；p2p 连接器为 `p2p_nccl`（NVIDIA 专属）同样出局。以下为 rig 真机对两类部署镜像的实证。
+
+### 7.1 双镜像 connector 实测矩阵
+
+| 能力 | `vllm/vllm-openai:v0.23.0`（CUDA） | `quay.io/ascend/vllm-ascend:v0.23.0rc1-a3`（昇腾，arm64） |
+|---|---|---|
+| kv-events（zmq，P1c 依赖） | ✅ publisher `null`/`zmq` | ✅ **代码同构**（同上游 v0.23，9 处 zmq 引用） |
+| lmcache connector（v1） | ✅ 且 **`lmcache` 包内置** | ✅ 代码在；`lmcache` 包需 pip 安装（纯 Python，arm64 可装） |
+| mooncake connector（v1） | ✅ 且 `mooncake` 包内置 | ✅ 代码在；包需安装；TCP backend 可用（无 RDMA 降级跑） |
+| offloading / simple_cpu_offload | ✅（分层卸载，非 PD 传输） | ✅ |
+| p2p | `p2p_nccl`——NVIDIA 专属 | 同名文件 → **昇腾不可用** |
+| nixl / hf3fs / flexkv / moriio | ✅/需基础设施 | ✅/需基础设施（按决策排除或特定环境） |
+
+两镜像的 `kv_connector/v1` 模块集合**逐模块一致**（同一上游 + 后端插件差异）——vLLM 的 connector 抽象本身是硬件无关的，差异只在 pip 依赖与传输后端。
+
+### 7.2 决策
+
+1. **PD 传输主路径 = LMCache**。理由：vLLM 官方 disagg 示例即 lmcache（`examples/disaggregated/lmcache/`，双镜像都带）；传输在 torch tensor 层（D2H → TCP/本地/远端），**不绑传输库与 GPU 厂商**；与 P1c 同源的 block-hash 语义（前缀定位与 KV 对象定位一套键）。
+2. **高吞吐备选 = Mooncake（TCP backend）**；RDMA 属可选增强，不作为部署前提。
+3. **排除**：NIXL（用户决策）、p2p_nccl（NVIDIA 专属）、hf3fs/flexkv/moriio（特定基础设施）。
+4. **引擎版本钉死：vLLM v0.23.x**。CUDA 用 `vllm/vllm-openai:v0.23.0`；昇腾用 `vllm-ascend v0.23.0rc1+`。理由：kv-events 线上格式已在 v0.23 上字节级校准（§5.2 的 map-form/int-hash 学费），connector 集合双硬件同构。升级版本前必须重跑 prefix-affinity §5 的校准流程。
+
+### 7.3 待验证（PD 实现的前置）
+
+- [ ] 昇腾真机（arm64 + NPU）：`pip install lmcache` + LMCacheConnector PD e2e——rig 的昇腾镜像是 arm64 无法在 x86 主机执行，需昇腾机器。
+- [ ] CUDA 侧最小 PD 验证：1 producer + 1 consumer（LMCache TCP），确认 `--kv-transfer-config` 角色语义与 nebula 放置的映射。
+- [ ] nebula 侧设计：`replica_specs` 角色字段（prefill/decode/混合）+ connector 参数进 ModelSpec（adapter 声明能力，不走 Router 分支）——`pool.md` 扩展后评审。
+
