@@ -48,18 +48,43 @@ fn hashes_of(v: &Value) -> Option<Vec<Vec<u8>>> {
 }
 
 fn parse_event(v: &Value) -> Option<KvEvent> {
-    let arr = v.as_array()?;
-    match arr.first()?.as_str()? {
-        "BlockStored" => Some(KvEvent::Stored {
-            block_hashes: hashes_of(arr.get(1)?)?,
-            // Field order: tag, block_hashes, parent, token_ids, block_size,
-            // lora_id, medium.
-            medium: arr.get(6).and_then(|m| m.as_str()).map(str::to_string),
-        }),
-        "BlockRemoved" => Some(KvEvent::Removed {
-            block_hashes: hashes_of(arr.get(1)?)?,
-        }),
-        "AllBlocksCleared" => Some(KvEvent::Cleared),
+    match v {
+        // Engine path (v0.23 real wire format): msgspec map
+        // {"type": "BlockStored", "block_hashes": [u64|bytes], "medium": ...}
+        // (events are dict-externalized before publication).
+        Value::Map(m) => {
+            let get = |k: &str| {
+                m.iter()
+                    .find(|(key, _)| key.as_str() == Some(k))
+                    .map(|(_, val)| val)
+            };
+            match get("type")?.as_str()? {
+                "BlockStored" => Some(KvEvent::Stored {
+                    block_hashes: hashes_of(get("block_hashes")?)?,
+                    medium: get("medium").and_then(|m| m.as_str()).map(str::to_string),
+                }),
+                "BlockRemoved" => Some(KvEvent::Removed {
+                    block_hashes: hashes_of(get("block_hashes")?)?,
+                }),
+                "AllBlocksCleared" => Some(KvEvent::Cleared),
+                _ => None,
+            }
+        }
+        // Synthetic / in-container probe path: tagged array
+        // ["BlockStored", block_hashes, parent, token_ids, block_size, ...].
+        Value::Array(arr) => match arr.first()?.as_str()? {
+            "BlockStored" => Some(KvEvent::Stored {
+                block_hashes: hashes_of(arr.get(1)?)?,
+                // Field order: tag, block_hashes, parent, token_ids, block_size,
+                // lora_id, medium.
+                medium: arr.get(6).and_then(|m| m.as_str()).map(str::to_string),
+            }),
+            "BlockRemoved" => Some(KvEvent::Removed {
+                block_hashes: hashes_of(arr.get(1)?)?,
+            }),
+            "AllBlocksCleared" => Some(KvEvent::Cleared),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -218,8 +243,6 @@ impl PrefixIndex {
     }
 }
 
-static RECV_TOTAL: AtomicU64 = AtomicU64::new(0);
-
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -239,24 +262,7 @@ pub async fn kv_events_loop(bind: String, index: Arc<PrefixIndex>) -> anyhow::Re
     tracing::info!(bind = %bind, "kv events subscriber bound");
     loop {
         let frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
-        RECV_TOTAL.fetch_add(1, Ordering::Relaxed);
-        if RECV_TOTAL.load(Ordering::Relaxed) <= 3 {
-            tracing::info!(
-                topic = %String::from_utf8_lossy(&frames[0]),
-                payload_head = %frames.iter().map(|f| format!("[{}]", String::from_utf8_lossy(&f[..f.len().min(600)]))).collect::<String>(),
-                raw = %frames.last().map(|f| f.iter().take(600).map(|b| format!("{b:02x}")).collect::<String>()).unwrap_or_default(),
-                "kv event frame dump"
-            );
-        }
-        if RECV_TOTAL.load(Ordering::Relaxed) % 200 == 1 {
-            tracing::info!(
-                received = RECV_TOTAL.load(Ordering::Relaxed),
-                entries = index.len(),
-                "kv events loop alive"
-            );
-        }
         if frames.len() < 3 {
-            tracing::warn!(frames = frames.len(), "short zmq frame");
             continue;
         }
         let Some((model_uid, replica_id)) = parse_topic(&frames[0]) else {
@@ -469,6 +475,25 @@ mod tests {
         let mut req = [0u8; 32];
         req[24..].copy_from_slice(&1015703622044383654u64.to_be_bytes());
         assert_eq!(idx.lookup("m", &[req]), Some(1));
+    }
+
+    #[test]
+    fn parses_real_engine_map_form_frame() {
+        // Raw zmq payload captured from the LIVE engine (v0.23 on the rig,
+        // recreated pods): outer [ts, events, dp_rank] with the event as a
+        // msgpack MAP {"type":"BlockStored","block_hashes":[u64],"medium":"GPU"}.
+        let payload = unhex(
+            "93cb41dab2eb710e14e5918ba474797065ab426c6f636b53746f726564ac626c6f636b5f68617368657391cfcdfa5d16f31c2abcb1706172656e745f626c6f636b5f68617368c0a9746f6b656e5f696473dc0010cd906fcd1e2acd3af1cd2424cd0171cd09b0cd236bcd0fc2cd3022cd0a6ecd0edfcd11e7ce00014aa8cd271acd013bcd01f5aa626c6f636b5f73697a6510a76c6f72615f6964c0a66d656469756da3475055a96c6f72615f6e616d65c0aa65787472615f6b65797391c0a967726f75705f69647800b26b765f63616368655f737065635f6b696e64ae66756c6c5f617474656e74696f6e00",
+        );
+        let evs = parse_batch(&payload);
+        assert_eq!(evs.len(), 1);
+        assert_eq!(
+            evs[0],
+            KvEvent::Stored {
+                block_hashes: vec![0xcdfa_5d16_f31c_2abcu64.to_be_bytes().to_vec()],
+                medium: Some("GPU".into()),
+            }
+        );
     }
 
     #[test]
