@@ -6,10 +6,26 @@ pub struct Candidate<'a> {
     pub stats: Option<&'a EndpointStats>,
 }
 
+/// Request-scoped routing context (P1c): the replica currently holding the
+/// request's KV prefix chain, when it could be computed.
+pub struct SelectionCtx<'a> {
+    pub prefix_owner: Option<u32>,
+    pub _marker: std::marker::PhantomData<&'a ()>,
+}
+
+impl SelectionCtx<'_> {
+    pub fn none() -> Self {
+        Self {
+            prefix_owner: None,
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
 /// Result of a strategy selection: the chosen candidate index plus the
 /// reason when the primary signal was unusable and the strategy fell back to
-/// `LeastPending` (`"no_signal"` / `"below_threshold"`), so fallbacks are
-/// observable instead of silent.
+/// `LeastPending` (`"no_signal"` / `"below_threshold"` /
+/// `"owner_unavailable"`), so fallbacks are observable instead of silent.
 pub struct Selection {
     pub index: usize,
     pub fallback_reason: Option<&'static str>,
@@ -20,7 +36,7 @@ pub struct Selection {
 /// then delegates selection to the strategy.
 pub trait RoutingStrategy: Send + Sync {
     /// Select one candidate from the list.
-    fn select(&self, candidates: &[Candidate]) -> Option<Selection>;
+    fn select(&self, ctx: &SelectionCtx<'_>, candidates: &[Candidate]) -> Option<Selection>;
 
     /// Human-readable name for logging / metrics.
     fn name(&self) -> &'static str;
@@ -33,7 +49,7 @@ pub trait RoutingStrategy: Send + Sync {
 pub struct LeastPending;
 
 impl RoutingStrategy for LeastPending {
-    fn select(&self, candidates: &[Candidate]) -> Option<Selection> {
+    fn select(&self, _ctx: &SelectionCtx<'_>, candidates: &[Candidate]) -> Option<Selection> {
         let mut best_idx: Option<usize> = None;
         let mut best_pending = u64::MAX;
 
@@ -64,7 +80,7 @@ impl RoutingStrategy for LeastPending {
 pub struct LeastKvCache;
 
 impl RoutingStrategy for LeastKvCache {
-    fn select(&self, candidates: &[Candidate]) -> Option<Selection> {
+    fn select(&self, ctx: &SelectionCtx<'_>, candidates: &[Candidate]) -> Option<Selection> {
         let mut best_idx: Option<usize> = None;
         let mut best_kv = f64::MAX;
         let mut has_kv_data = false;
@@ -87,7 +103,7 @@ impl RoutingStrategy for LeastKvCache {
         }
 
         // Fallback: least pending
-        LeastPending.select(candidates).map(|mut s| {
+        LeastPending.select(ctx, candidates).map(|mut s| {
             s.fallback_reason = Some("no_signal");
             s
         })
@@ -108,7 +124,7 @@ const PREFIX_CACHE_THRESHOLD: f64 = 0.1;
 pub struct PrefixCacheAware;
 
 impl RoutingStrategy for PrefixCacheAware {
-    fn select(&self, candidates: &[Candidate]) -> Option<Selection> {
+    fn select(&self, ctx: &SelectionCtx<'_>, candidates: &[Candidate]) -> Option<Selection> {
         let mut best_idx: Option<usize> = None;
         let mut best_hit_rate: f64 = -1.0;
         let mut has_cache_data = false;
@@ -136,7 +152,7 @@ impl RoutingStrategy for PrefixCacheAware {
         } else {
             "no_signal"
         };
-        LeastPending.select(candidates).map(|mut s| {
+        LeastPending.select(ctx, candidates).map(|mut s| {
             s.fallback_reason = Some(reason);
             s
         })
@@ -147,14 +163,54 @@ impl RoutingStrategy for PrefixCacheAware {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PrefixAffinity (P1c) — route to the replica that holds the request's KV
+// prefix (learned from vLLM KV events; see `kv_events::PrefixIndex`).
+// ---------------------------------------------------------------------------
+
+pub struct PrefixAffinity;
+
+impl RoutingStrategy for PrefixAffinity {
+    fn select(&self, ctx: &SelectionCtx<'_>, candidates: &[Candidate]) -> Option<Selection> {
+        match ctx.prefix_owner {
+            Some(owner) => {
+                if let Some(index) = candidates
+                    .iter()
+                    .position(|c| c.endpoint.replica_id == owner)
+                {
+                    Some(Selection {
+                        index,
+                        fallback_reason: None,
+                    })
+                } else {
+                    // Owner was filtered out (draining / circuit / stale plan).
+                    LeastPending.select(ctx, candidates).map(|mut s| {
+                        s.fallback_reason = Some("owner_unavailable");
+                        s
+                    })
+                }
+            }
+            None => LeastPending.select(ctx, candidates).map(|mut s| {
+                s.fallback_reason = Some("no_signal");
+                s
+            }),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "prefix_affinity"
+    }
+}
+
 /// Parse a strategy name string into a boxed strategy.
 pub fn parse_strategy(name: &str) -> Result<Box<dyn RoutingStrategy>, String> {
     match name {
         "least_pending" => Ok(Box::new(LeastPending)),
         "least_kv_cache" => Ok(Box::new(LeastKvCache)),
         "prefix_cache_aware" => Ok(Box::new(PrefixCacheAware)),
+        "prefix_affinity" => Ok(Box::new(PrefixAffinity)),
         other => Err(format!(
-            "unknown routing strategy '{}', available: least_pending, least_kv_cache, prefix_cache_aware",
+            "unknown routing strategy '{}', available: least_pending, least_kv_cache, prefix_cache_aware, prefix_affinity",
             other
         )),
     }
@@ -220,7 +276,7 @@ mod tests {
 
         assert_eq!(
             LeastPending
-                .select(&candidates)
+                .select(&SelectionCtx::none(), &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((1, None))
         );
@@ -246,7 +302,7 @@ mod tests {
 
         assert_eq!(
             LeastKvCache
-                .select(&candidates)
+                .select(&SelectionCtx::none(), &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((1, None))
         );
@@ -273,7 +329,7 @@ mod tests {
         // No KV data → falls back to least pending
         assert_eq!(
             LeastKvCache
-                .select(&candidates)
+                .select(&SelectionCtx::none(), &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((1, Some("no_signal")))
         );
@@ -299,7 +355,7 @@ mod tests {
 
         assert_eq!(
             PrefixCacheAware
-                .select(&candidates)
+                .select(&SelectionCtx::none(), &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((0, None))
         );
@@ -326,7 +382,7 @@ mod tests {
         // All below threshold → falls back to least pending (index 1)
         assert_eq!(
             PrefixCacheAware
-                .select(&candidates)
+                .select(&SelectionCtx::none(), &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((1, Some("below_threshold")))
         );
@@ -354,7 +410,7 @@ mod tests {
 
         assert_eq!(
             PrefixCacheAware
-                .select(&candidates)
+                .select(&SelectionCtx::none(), &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((1, Some("no_signal")))
         );

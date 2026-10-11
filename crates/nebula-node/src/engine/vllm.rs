@@ -226,6 +226,18 @@ impl Engine for VllmEngine {
             vllm_args.push(v.to_string());
         }
 
+        // P1c: opt-in KV cache events → the router's prefix→replica index.
+        // Engines CONNECT to the router's zmq SUB socket; the topic identifies
+        // the publishing replica.
+        if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
+            let cfg = format!(
+                "{{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"{endpoint}\",\"topic\":\"{}/{}\"}}",
+                ctx.model_uid, ctx.replica_id
+            );
+            vllm_args.push("--kv-events-config".into());
+            vllm_args.push(cfg);
+        }
+
         let mut cmd;
         let process_kind;
 

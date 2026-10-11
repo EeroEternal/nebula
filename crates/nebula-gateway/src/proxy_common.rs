@@ -436,6 +436,11 @@ pub async fn forward_embedded(
         .unwrap_or_else(|| Bytes::copy_from_slice(body_bytes));
     let plan_version = router.plan_version_for(&model_uid).filter(|&v| v > 0);
 
+    // P1c: prompt prefix hashes for the prefix_affinity strategy (embedded
+    // router mode shares the same implementation as the standalone router).
+    let prefix_hashes = router.body_prompt_hashes(&model_uid, body_bytes);
+    let prefix_hashes = prefix_hashes.as_deref();
+
     let max_attempts = st.retry_max.saturating_add(1).max(1);
     let mut attempt: u32 = 0;
     let mut excluded: Option<(String, u32)> = None;
@@ -447,12 +452,15 @@ pub async fn forward_embedded(
                 &model_uid,
                 pv,
                 (m.as_str(), *r),
+                prefix_hashes,
             ),
-            (Some(pv), None) => router.route_with_plan_version(&prepared.ctx, &model_uid, pv),
-            (None, Some((m, r))) => {
-                router.route_excluding(&prepared.ctx, &model_uid, (m.as_str(), *r))
+            (Some(pv), None) => {
+                router.route_with_plan_version(&prepared.ctx, &model_uid, pv, prefix_hashes)
             }
-            (None, None) => router.route(&prepared.ctx, &model_uid),
+            (None, Some((m, r))) => {
+                router.route_excluding(&prepared.ctx, &model_uid, (m.as_str(), *r), prefix_hashes)
+            }
+            (None, None) => router.route(&prepared.ctx, &model_uid, prefix_hashes),
         };
         let ep = match routed {
             Ok(ep) => ep,

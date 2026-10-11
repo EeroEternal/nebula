@@ -282,16 +282,13 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         "# HELP nebula_router_strategy_fallback_total Strategy selections that fell back to least_pending, by reason.\n\
          # TYPE nebula_router_strategy_fallback_total counter\n",
     );
-    body.push_str(&format!(
-        "nebula_router_strategy_fallback_total{{strategy=\"{}\",reason=\"no_signal\"}} {}\n",
-        st.router.strategy_name(),
-        st.router.strategy_fallback_no_signal_total(),
-    ));
-    body.push_str(&format!(
-        "nebula_router_strategy_fallback_total{{strategy=\"{}\",reason=\"below_threshold\"}} {}\n",
-        st.router.strategy_name(),
-        st.router.strategy_fallback_below_threshold_total(),
-    ));
+    let strategy = st.router.strategy_name();
+    for reason in ["no_signal", "below_threshold", "owner_unavailable"] {
+        body.push_str(&format!(
+            "nebula_router_strategy_fallback_total{{strategy=\"{strategy}\",reason=\"{reason}\"}} {}\n",
+            st.router.strategy_fallback_total(strategy, reason),
+        ));
+    }
 
     // Per-model counters
     body.push_str(

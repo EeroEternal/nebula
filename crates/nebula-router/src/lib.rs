@@ -7,10 +7,13 @@ use nebula_common::{
     EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext, InferenceHint, ModelSpec,
 };
 
+pub mod kv_events;
+pub mod kv_hash;
+pub mod prompt_hash;
 pub mod strategy;
 pub mod sync;
 
-use strategy::{Candidate, LeastPending, RoutingStrategy};
+use strategy::{Candidate, LeastPending, RoutingStrategy, SelectionCtx};
 
 /// KV cache usage threshold (fraction 0.0–1.0). When ALL endpoints exceed this,
 /// admission control kicks in and returns Overloaded.
@@ -27,6 +30,18 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis() as u64
+}
+
+/// Extract the prompt text for prefix hashing: `/v1/completions`-style
+/// `prompt` (string, or first element of a string array). Chat/messages
+/// bodies return None — v1 does not hash those (chat template gap).
+pub fn extract_prompt_string(body: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    match v.get("prompt")? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(a) => a.first().and_then(|x| x.as_str()).map(str::to_string),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,11 +86,15 @@ pub struct Router {
     hint_stale_degraded_total: AtomicU64,
     session_affinity_hit_total: AtomicU64,
     prefix_hint_hit_total: AtomicU64,
-    /// Strategy fell back to least_pending because the primary signal was
-    /// missing / below threshold. Counted so silent degradation is observable
-    /// (the engine_metrics bug hid exactly this way).
-    strategy_fallback_no_signal_total: AtomicU64,
-    strategy_fallback_below_threshold_total: AtomicU64,
+    /// Strategy fell back to least_pending: (strategy, reason) → count.
+    /// Counted so silent degradation is observable (the engine_metrics bug
+    /// hid exactly this way). Reasons: no_signal / below_threshold /
+    /// owner_unavailable.
+    strategy_fallback: DashMap<(&'static str, &'static str), AtomicU64>,
+    /// P1c: prefix block-hash → replica index, fed by engine KV events.
+    /// Rebuildable cache — dropping it only loses routing hints.
+    prefix_index: Arc<kv_events::PrefixIndex>,
+    prefix_hasher: prompt_hash::PromptHasher,
     stats_max_age_ms: u64,
     circuit_failure_threshold: u32,
     circuit_open_ms: u64,
@@ -134,8 +153,9 @@ impl Router {
             hint_stale_degraded_total: AtomicU64::new(0),
             session_affinity_hit_total: AtomicU64::new(0),
             prefix_hint_hit_total: AtomicU64::new(0),
-            strategy_fallback_no_signal_total: AtomicU64::new(0),
-            strategy_fallback_below_threshold_total: AtomicU64::new(0),
+            strategy_fallback: DashMap::new(),
+            prefix_index: kv_events::PrefixIndex::new(),
+            prefix_hasher: prompt_hash::PromptHasher::from_env(),
             stats_max_age_ms,
             circuit_failure_threshold,
             circuit_open_ms,
@@ -226,14 +246,38 @@ impl Router {
         self.prefix_hint_hit_total.load(Ordering::Relaxed)
     }
 
-    pub fn strategy_fallback_no_signal_total(&self) -> u64 {
-        self.strategy_fallback_no_signal_total
-            .load(Ordering::Relaxed)
+    pub fn strategy_fallback_total(&self, strategy: &'static str, reason: &'static str) -> u64 {
+        self.strategy_fallback
+            .get(&(strategy, reason))
+            .map(|c| c.value().load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
-    pub fn strategy_fallback_below_threshold_total(&self) -> u64 {
-        self.strategy_fallback_below_threshold_total
-            .load(Ordering::Relaxed)
+    pub fn prefix_index(&self) -> &Arc<kv_events::PrefixIndex> {
+        &self.prefix_index
+    }
+
+    /// Tokenize `prompt` (via the model's tokenizer, when configured) and
+    /// chain its vLLM-compatible block hashes.
+    pub fn prompt_hashes(&self, model_uid: &str, prompt: &str) -> Option<Vec<[u8; 32]>> {
+        let name = self
+            .model_uids_to_names
+            .get(model_uid)
+            .map(|e| e.value().clone());
+        self.prefix_hasher
+            .prompt_hashes(model_uid, name.as_deref(), prompt)
+    }
+
+    /// Hash the prompt prefix blocks of an OpenAI-style body. v1: the `prompt`
+    /// field only (`/v1/completions`); chat bodies return None (chat template
+    /// gap — falls back visibly via the strategy fallback counters). Only
+    /// paid when the prefix_affinity strategy is active.
+    pub fn body_prompt_hashes(&self, model_uid: &str, body: &[u8]) -> Option<Vec<[u8; 32]>> {
+        if self.strategy_name() != "prefix_affinity" {
+            return None;
+        }
+        let prompt = extract_prompt_string(body)?;
+        self.prompt_hashes(model_uid, &prompt)
     }
 
     pub fn record_endpoint_success(&self, model_uid: &str, replica_id: u32) {
@@ -441,6 +485,7 @@ impl Router {
         model_uid: &str,
         plan_version: Option<u64>,
         exclude: Option<(&str, u32)>,
+        prefix_hashes: Option<&[[u8; 32]]>,
     ) -> Result<EndpointInfo, RouteError> {
         if ctx.inference_hint.is_some() {
             self.hint_received_total.fetch_add(1, Ordering::Relaxed);
@@ -616,6 +661,12 @@ impl Router {
             })
             .collect();
 
+        let prefix_owner = prefix_hashes.and_then(|hs| self.prefix_index.lookup(model_uid, hs));
+        let sel_ctx = SelectionCtx {
+            prefix_owner,
+            _marker: std::marker::PhantomData,
+        };
+
         let selected = if let Some(hint) = active_hint.as_ref() {
             if let Some(idx) = Self::select_hint_biased_endpoint(&candidates_data, hint) {
                 self.hint_adopted_total.fetch_add(1, Ordering::Relaxed);
@@ -624,10 +675,10 @@ impl Router {
                 }
                 candidates_data[idx].0.clone()
             } else {
-                self.select_by_strategy(&candidates, &candidates_data)?
+                self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
             }
         } else {
-            self.select_by_strategy(&candidates, &candidates_data)?
+            self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
         };
 
         if let Some(session_id) = ctx.session_id.clone() {
@@ -645,29 +696,31 @@ impl Router {
         ctx: &ExecutionContext,
         model_uid: &str,
         plan_version: u64,
+        prefix_hashes: Option<&[[u8; 32]]>,
     ) -> Result<EndpointInfo, RouteError> {
-        self.route_internal(ctx, model_uid, Some(plan_version), None)
+        self.route_internal(ctx, model_uid, Some(plan_version), None, prefix_hashes)
     }
 
     /// Run the configured strategy and count a fallback when the primary
     /// signal was unusable, so degradation is observable instead of silent.
     fn select_by_strategy(
         &self,
+        sel_ctx: &SelectionCtx<'_>,
         candidates: &[Candidate<'_>],
         candidates_data: &[(EndpointInfo, Option<EndpointStats>)],
     ) -> Result<EndpointInfo, RouteError> {
         let sel = self
             .strategy
-            .select(candidates)
+            .select(sel_ctx, candidates)
             .ok_or(RouteError::NoEndpoint)?;
         if let Some(reason) = sel.fallback_reason {
-            match reason {
-                "below_threshold" => &self.strategy_fallback_below_threshold_total,
-                _ => &self.strategy_fallback_no_signal_total,
-            }
-            .fetch_add(1, Ordering::Relaxed);
+            let name = self.strategy.name();
+            self.strategy_fallback
+                .entry((name, reason))
+                .or_insert_with(|| AtomicU64::new(0))
+                .fetch_add(1, Ordering::Relaxed);
             tracing::debug!(
-                strategy = self.strategy.name(),
+                strategy = name,
                 reason,
                 "routing strategy fell back to least_pending"
             );
@@ -712,16 +765,24 @@ impl Router {
         model_uid: &str,
         plan_version: u64,
         exclude: (&str, u32),
+        prefix_hashes: Option<&[[u8; 32]]>,
     ) -> Result<EndpointInfo, RouteError> {
-        self.route_internal(ctx, model_uid, Some(plan_version), Some(exclude))
+        self.route_internal(
+            ctx,
+            model_uid,
+            Some(plan_version),
+            Some(exclude),
+            prefix_hashes,
+        )
     }
 
     pub fn route(
         &self,
         ctx: &ExecutionContext,
         model_uid: &str,
+        prefix_hashes: Option<&[[u8; 32]]>,
     ) -> Result<EndpointInfo, RouteError> {
-        self.route_internal(ctx, model_uid, None, None)
+        self.route_internal(ctx, model_uid, None, None, prefix_hashes)
     }
 
     pub fn route_excluding(
@@ -729,8 +790,9 @@ impl Router {
         ctx: &ExecutionContext,
         model_uid: &str,
         exclude: (&str, u32),
+        prefix_hashes: Option<&[[u8; 32]]>,
     ) -> Result<EndpointInfo, RouteError> {
-        self.route_internal(ctx, model_uid, None, Some(exclude))
+        self.route_internal(ctx, model_uid, None, Some(exclude), prefix_hashes)
     }
 }
 
@@ -772,7 +834,7 @@ mod plan_version_tests {
             inference_hint: None,
             hint_trusted: false,
         };
-        let ep = router.route(&ctx, "m1").unwrap();
+        let ep = router.route(&ctx, "m1", None).unwrap();
         assert_eq!(ep.replica_id, 1);
     }
 
@@ -794,10 +856,69 @@ mod plan_version_tests {
             inference_hint: None,
             hint_trusted: false,
         };
-        let ep = router.route(&ctx, "m1").unwrap();
+        let ep = router.route(&ctx, "m1", None).unwrap();
         assert!(ep.replica_id <= 1);
-        assert_eq!(router.strategy_fallback_no_signal_total(), 1);
-        assert_eq!(router.strategy_fallback_below_threshold_total(), 0);
+        assert_eq!(
+            router.strategy_fallback_total("least_kv_cache", "no_signal"),
+            1
+        );
+        assert_eq!(
+            router.strategy_fallback_total("least_kv_cache", "below_threshold"),
+            0
+        );
+    }
+
+    #[test]
+    fn prefix_affinity_routes_to_owner_and_counts_fallback() {
+        let router = Router::with_strategy(Box::new(strategy::PrefixAffinity));
+        router.upsert_endpoint(ready_ep("m1", 0, 1));
+        router.upsert_endpoint(ready_ep("m1", 1, 1));
+        // Learn from a (synthetic) KV event: replica 1 holds hash H.
+        let h: [u8; 32] = [7; 32];
+        router.prefix_index().apply(
+            "m1",
+            1,
+            &[kv_events::KvEvent::Stored {
+                block_hashes: vec![h.to_vec()],
+                medium: None,
+            }],
+            1,
+        );
+        let ctx = ExecutionContext {
+            request_id: "r".into(),
+            session_id: None,
+            tenant_id: None,
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+            pinned_replica_id: None,
+            inference_hint: None,
+            hint_trusted: false,
+        };
+        let ep = router
+            .route(&ctx, "m1", Some(std::slice::from_ref(&h)))
+            .unwrap();
+        assert_eq!(ep.replica_id, 1);
+        // Unknown prefix → least_pending fallback, counted as no_signal.
+        let ep2 = router.route(&ctx, "m1", None).unwrap();
+        assert!(ep2.replica_id <= 1);
+        assert_eq!(
+            router.strategy_fallback_total("prefix_affinity", "no_signal"),
+            1
+        );
+        // Owner known but drained (not a candidate) → owner_unavailable,
+        // never a hard failure.
+        let mut drained = ready_ep("m1", 1, 1);
+        drained.status = EndpointStatus::Draining;
+        router.upsert_endpoint(drained);
+        let ep3 = router
+            .route(&ctx, "m1", Some(std::slice::from_ref(&h)))
+            .unwrap();
+        assert_eq!(ep3.replica_id, 0);
+        assert_eq!(
+            router.strategy_fallback_total("prefix_affinity", "owner_unavailable"),
+            1
+        );
     }
 
     #[test]
@@ -817,11 +938,13 @@ mod plan_version_tests {
             hint_trusted: false,
         };
 
-        let ep = router.route_with_plan_version(&ctx, "m1", 2).unwrap();
+        let ep = router.route_with_plan_version(&ctx, "m1", 2, None).unwrap();
         assert_eq!(ep.replica_id, 1);
         assert_eq!(ep.plan_version, 2);
 
-        let err = router.route_with_plan_version(&ctx, "m1", 99).unwrap_err();
+        let err = router
+            .route_with_plan_version(&ctx, "m1", 99, None)
+            .unwrap_err();
         assert!(matches!(err, RouteError::NoEndpoint));
     }
 
@@ -849,7 +972,7 @@ mod plan_version_tests {
             inference_hint: None,
             hint_trusted: false,
         };
-        let ep = router.route_with_plan_version(&ctx, "m2", 7).unwrap();
+        let ep = router.route_with_plan_version(&ctx, "m2", 7, None).unwrap();
         assert_eq!(ep.replica_id, 0);
     }
 
@@ -871,7 +994,9 @@ mod plan_version_tests {
             hint_trusted: false,
         };
         assert!(matches!(
-            router.route_with_plan_version(&ctx, "m1", 1).unwrap_err(),
+            router
+                .route_with_plan_version(&ctx, "m1", 1, None)
+                .unwrap_err(),
             RouteError::NoEndpoint
         ));
     }
@@ -937,7 +1062,7 @@ mod model_alias_tests {
         router.upsert_endpoint(ep);
 
         let ctx = ExecutionContext::default();
-        let selected = router.route(&ctx, "qwen2.5-7b").unwrap();
+        let selected = router.route(&ctx, "qwen2.5-7b", None).unwrap();
         assert_eq!(selected.model_uid, "qwen2.5-7b");
         assert_eq!(selected.replica_id, 0);
         assert_eq!(

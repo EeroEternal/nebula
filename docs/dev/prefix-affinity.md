@@ -33,15 +33,41 @@
 
 `engine_metrics::extract_metric` 用子串匹配：找 `prefix_cache_hits_total` 时会命中 `external_prefix_cache_hits_total`（后者排在后面、值为 0），导致 `prefix_cache_hit_rate` **恒为 None** → `PrefixCacheAware` 无信号、静默回落 `LeastPending`。已改为**精确匹配完整指标名**并加回归测试（`4b64a3f`）。
 
-## 5. 下一步（P1c）：KV-event 驱动的真前缀亲和
+## 5. P1c（已落地代码，待真机验收）：KV-event 驱动的真前缀亲和
 
-启发式不够。要真做前缀亲和，需**按请求前缀匹配**：
+启发式不够。要真做前缀亲和，需**按请求前缀匹配**。以下为**已校准并落地**的设计（对照 vLLM v0.11 源码，`kv_events.py` / `kv_cache_utils.py` / `utils/__init__.py`）：
 
-1. 订阅 vLLM **KV cache events**（block hash 的 `BlockStored`/`BlockRemoved`，见 vLLM `distributed/kv_events.py`，通过 `--kv-events-config` 发布）；
-2. 维护 `前缀hash → {endpoint}` 索引；
-3. 路由时对请求前缀做 hash（`kv-hashing` 式），命中索引则定向到持有该前缀的副本，否则走 `LeastPending`。
+### 5.1 传输：zmq PUB→SUB + msgpack（不是 HTTP）
 
-> 这是 Dynamo `kv-router`/`kv-hashing` 与 llm-d EPP 的做法 [`landscape.md`](landscape.md) §3。
+- vLLM 核心（v0.11 与 main）只内置 `null` 与 `zmq` 两种 publisher，**http publisher 不在核心里**——§5 旧设想作废。
+- 拓扑：**Router 绑定 SUB**（`NEBULA_ROUTER_KV_EVENTS_BIND`，如 `tcp://0.0.0.0:5557`），引擎 connect 过来；每副本发布在 topic `{model_uid}/{replica_id}`（由 node / k8s-controller 注入 `--kv-events-config`）。
+- 消息为 `(topic, seq, msgpack)` 三帧；msgpack 为 msgspec `array_like+tag` 格式：`[ts, ["BlockStored", block_hashes, parent, token_ids, block_size, lora_id, medium], ...]`。
+- PUB 慢订阅者丢消息——索引是缓存，丢只损失提示，不损正确性。
+
+### 5.2 hash：sha256_cbor 链式（与 v0.11 默认一致）
+
+- 每满 16 token 一块：`sha256(cbor2.dumps((parent_hash, tuple(token_ids), None), canonical=True))`，首块 parent 为 `NONE_HASH = sha256_cbor("vllm-none-hash")`。
+- Rust 端口在 `kv_hash.rs`，测试向量与参考 Python 实现逐字节对齐（含 1/2/3 字节最小整数编码）。**注意：main 分支 vLLM 已改用 xxhash_cbor**，未来升级引擎版本时需重新校准。
+- 块哈希链式⇒任意一块命中即证明 token 级前缀完全一致；索引按最深链投票选副本。
+
+### 5.3 索引与请求侧
+
+- `PrefixIndex`：内存 DashMap `(model_uid, hash) → (replica, last_seen)`；TTL 默认 300s（`NEBULA_ROUTER_PREFIX_TTL_MS`），30s 扫一次；可丢可重建，不进 etcd。
+- 请求侧：`Router::body_prompt_hashes()` 仅对 `/v1/completions` 的 `prompt` 字段精确分词（tokenizer 从 `NEBULA_ROUTER_TOKENIZER_DIR/<model_name|model_uid>/tokenizer.json` 加载，带缓存）。
+- **shortcut**: chat bodies 不 hash（引擎侧 chat template 渲染后 token 序列与裸拼接不一致，硬算必 miss）；等 router 能渲染 chat template 时升级。会话内亲和由既有 session_affinity 覆盖。
+
+### 5.4 策略与可见性
+
+- 新策略 `prefix_affinity`：查索引命中→定向；未命中/无 hash→`least_pending`，**全部计入** `nebula_router_strategy_fallback_total{strategy=,reason="no_signal"|"owner_unavailable"}`（任务 1 的计数器体系直接复用）。
+- SGLang 无 KV events publisher（capability gap）：SGLang 模型只能回落，计数器持续可见。
+
+### 5.5 引擎侧开关
+
+- 执行面设 `NEBULA_KV_EVENTS_ENDPOINT`（router 的 SUB 地址）→ node 与 k8s-controller 为 vLLM 副本追加 `--kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":…,"topic":"model/replica"}`。
+
+### 5.6 验收（待真机）
+
+重跑 §3 协议：`/v1/completions`、`prefix_repetition`（prefix 2048 / suffix 128 / 4 prefixes）、2 副本、C=16、N=256、**交错**对比 `least_pending` vs `prefix_affinity`。预期：命中请求跳过 2048 token prefill，TTFT 显著下降；若无效，这次信号/回退全程可观测，结论可信。
 
 ## 6. P1 收尾验证（2026-09-21，8×5090）
 
@@ -54,4 +80,4 @@
 
 修复：`23d9404` —— 缩容清理（`cleanup_extra_replicas`）、终止态 pod 重建（不再卡住）、非 Running 时清 stale `/endpoints` + `/stats`。
 
-**结论**：**多副本 + LeastPending 已做扎实**（均衡 ≈50/50、扩缩容/生命周期正确）。真前缀亲和仍待 P1c（KV events）。
+**结论**：**多副本 + LeastPending 已做扎实**（均衡 ≈50/50、扩缩容/生命周期正确）。P1c 代码已落地（见 §5），待真机验收。

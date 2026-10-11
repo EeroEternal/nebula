@@ -101,6 +101,35 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = nebula_common::auth::parse_auth_from_env();
 
+    // P1c: KV-event ingestion (opt-in). Engines publish block store/remove
+    // events over zmq; the router maintains the prefix→replica index.
+    if let Ok(bind) = std::env::var("NEBULA_ROUTER_KV_EVENTS_BIND") {
+        let idx = router.prefix_index().clone();
+        tokio::spawn(async move {
+            if let Err(e) = nebula_router::kv_events::kv_events_loop(bind, idx).await {
+                tracing::error!(error = %e, "kv events loop exited");
+            }
+        });
+        let ttl_ms = std::env::var("NEBULA_ROUTER_PREFIX_TTL_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(300_000);
+        let idx = router.prefix_index().clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let evicted = idx.evict_expired(now, ttl_ms);
+                if evicted > 0 {
+                    tracing::debug!(evicted, "prefix index ttl sweep");
+                }
+            }
+        });
+    }
+
     let st = AppState {
         model_uid: args.model_uid,
         router,

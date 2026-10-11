@@ -144,6 +144,15 @@ pub async fn proxy_chat_completions(
 
     let plan_version = st.router.plan_version_for(&model_uid).filter(|&v| v > 0);
 
+    // P1c: hash the prompt's prefix blocks so the prefix_affinity strategy
+    // can route to the replica that already holds the KV. No-op unless the
+    // strategy is active; chat bodies are not hashed (template gap — falls
+    // back visibly via the strategy fallback counters).
+    let prefix_hashes = body_bytes
+        .as_deref()
+        .and_then(|b| st.router.body_prompt_hashes(&model_uid, b));
+    let prefix_hashes = prefix_hashes.as_deref();
+
     let mut attempt: u32 = 0;
     let max_attempts = st.retry_max.saturating_add(1).max(1);
     let mut excluded_endpoint: Option<(String, u32)> = None;
@@ -156,15 +165,20 @@ pub async fn proxy_chat_completions(
                     &model_uid,
                     pv,
                     (exclude_model_uid.as_str(), *exclude_replica_id),
+                    prefix_hashes,
                 )
             }
-            (Some(pv), None) => st.router.route_with_plan_version(&ctx, &model_uid, pv),
+            (Some(pv), None) => {
+                st.router
+                    .route_with_plan_version(&ctx, &model_uid, pv, prefix_hashes)
+            }
             (None, Some((exclude_model_uid, exclude_replica_id))) => st.router.route_excluding(
                 &ctx,
                 &model_uid,
                 (exclude_model_uid.as_str(), *exclude_replica_id),
+                prefix_hashes,
             ),
-            (None, None) => st.router.route(&ctx, &model_uid),
+            (None, None) => st.router.route(&ctx, &model_uid, prefix_hashes),
         };
 
         let ep = match ep {

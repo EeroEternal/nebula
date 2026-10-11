@@ -363,7 +363,7 @@ fn create_engine_pod(
     } else {
         "vllm/vllm-openai:latest"
     };
-    let args = if is_sglang {
+    let mut args = if is_sglang {
         json!([
             "-m",
             "sglang.launch_server",
@@ -390,6 +390,19 @@ fn create_engine_pod(
             "1"
         ])
     };
+    // P1c: opt-in KV cache events → the router's prefix→replica index (vLLM
+    // only; SGLang has no equivalent publisher — capability gap, the
+    // prefix_affinity strategy falls back visibly for SGLang models).
+    if !is_sglang {
+        if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
+            if let Some(arr) = args.as_array_mut() {
+                arr.push(json!("--kv-events-config"));
+                arr.push(json!(format!(
+                    "{{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"{endpoint}\",\"topic\":\"{model_uid}/{replica_id}\"}}"
+                )));
+            }
+        }
+    }
 
     let mut container = json!({
         "name": "engine",
