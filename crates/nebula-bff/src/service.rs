@@ -1828,6 +1828,28 @@ nebula_route_ttft_seconds_bucket{model_uid="b",le="+Inf"} 2
     }
 
     #[test]
+    fn prefix_affinity_parses_router_metrics() {
+        let text = "nebula_router_prefix_index_entries 42\n"
+            .to_string()
+            + "nebula_router_prefix_lookup_total{model_uid=\"m1\"} 100\n"
+            + "nebula_router_prefix_hit_total{model_uid=\"m1\"} 90\n"
+            + "nebula_router_prefix_index_model_entries{model_uid=\"m1\"} 37\n"
+            + "nebula_router_prefix_lookup_total{model_uid=\"m2\"} 10\n"
+            + "nebula_router_prefix_hit_total{model_uid=\"m2\"} 0\n"
+            + "nebula_router_strategy_fallback_total{strategy=\"prefix_affinity\",reason=\"no_signal\"} 8\n"
+            + "nebula_router_strategy_fallback_total{strategy=\"prefix_affinity\",reason=\"owner_unavailable\"} 2\n";
+        let r = prefix_affinity_from_metrics(&text).unwrap();
+        assert_eq!(r.index_entries, 42);
+        assert_eq!(r.models.len(), 2);
+        assert_eq!(r.models[0].model_uid, "m1");
+        assert_eq!(r.models[0].hit_rate, 90.0);
+        assert_eq!(r.models[0].index_entries, 37);
+        assert_eq!(r.models[1].hit_rate, 0.0);
+        assert_eq!(r.fallback.get("no_signal"), Some(&8));
+        assert_eq!(r.fallback.get("owner_unavailable"), Some(&2));
+    }
+
+    #[test]
     fn overview_rejects_bad_window() {
         assert!(matches!(
             gateway_overview_from_metrics("", "2m".into()),
@@ -1926,4 +1948,100 @@ nebula_router_upstream_error_total{kind="connect"} 1
             AggregatedModelState::Degraded
         );
     }
+}
+
+// ── P1c prefix-affinity observability ────────────────────────────────────────
+
+#[derive(Serialize)]
+pub struct PrefixAffinityModel {
+    pub model_uid: String,
+    pub lookups: u64,
+    pub hits: u64,
+    /// hits / lookups (0 when no lookups yet).
+    pub hit_rate: f64,
+    pub index_entries: u64,
+}
+
+#[derive(Serialize)]
+pub struct PrefixAffinityResponse {
+    pub data_source: &'static str,
+    pub index_entries: u64,
+    pub models: Vec<PrefixAffinityModel>,
+    /// strategy fallback counts by reason (no_signal / below_threshold /
+    /// owner_unavailable) — visible degradation, not failures.
+    pub fallback: std::collections::BTreeMap<String, u64>,
+}
+
+pub fn prefix_affinity_from_metrics(text: &str) -> Result<PrefixAffinityResponse, ServiceError> {
+    let index_entries = parse_metric_sum(text, "nebula_router_prefix_index_entries") as u64;
+
+    // model → (lookups, hits, index_entries)
+    let mut models: std::collections::BTreeMap<String, (u64, u64, u64)> = Default::default();
+    let mut fallback: std::collections::BTreeMap<String, u64> = Default::default();
+
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        let value = match line
+            .split_whitespace()
+            .last()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(v) => v,
+            None => continue,
+        };
+        let set = |m: &mut std::collections::BTreeMap<String, (u64, u64, u64)>,
+                   model: String,
+                   slot: usize,
+                   value: u64| {
+            let e = m.entry(model).or_insert((0, 0, 0));
+            match slot {
+                0 => e.0 = value,
+                1 => e.1 = value,
+                _ => e.2 = value,
+            }
+        };
+        if line.starts_with("nebula_router_prefix_lookup_total{") {
+            if let Some(model) = extract_label_value(line, "model_uid") {
+                set(&mut models, model, 0, value);
+            }
+        } else if line.starts_with("nebula_router_prefix_hit_total{") {
+            if let Some(model) = extract_label_value(line, "model_uid") {
+                set(&mut models, model, 1, value);
+            }
+        } else if line.starts_with("nebula_router_prefix_index_model_entries{") {
+            if let Some(model) = extract_label_value(line, "model_uid") {
+                set(&mut models, model, 2, value);
+            }
+        } else if line.starts_with("nebula_router_strategy_fallback_total{") {
+            if let Some(reason) = extract_label_value(line, "reason") {
+                *fallback.entry(reason).or_insert(0) += value;
+            }
+        }
+    }
+
+    let models = models
+        .into_iter()
+        .map(
+            |(model_uid, (lookups, hits, index_entries))| PrefixAffinityModel {
+                model_uid,
+                lookups,
+                hits,
+                hit_rate: if lookups > 0 {
+                    (hits as f64 / lookups as f64 * 10_000.0).round() / 100.0
+                } else {
+                    0.0
+                },
+                index_entries,
+            },
+        )
+        .collect();
+
+    Ok(PrefixAffinityResponse {
+        data_source: "router",
+        index_entries,
+        models,
+        fallback,
+    })
 }

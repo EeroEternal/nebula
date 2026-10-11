@@ -116,6 +116,7 @@ import type {
   CostPriceConfig,
   TenantQuota,
   GatewayLatency,
+  GatewayPrefixAffinity,
   GatewayOverview,
   GatewayProtection,
   GatewayReliability,
@@ -215,6 +216,8 @@ export const v2 = {
 
   gatewayLatency: (window: string, token?: string) =>
     apiGetWithParams<GatewayLatency>('/v2/observability/gateway/latency', { window }, token),
+  gatewayPrefixAffinity: (token?: string) =>
+    apiGet<GatewayPrefixAffinity>('/v2/observability/gateway/prefix-affinity', token),
 
   listCompatRules: (token?: string) =>
     apiGet<CompatibilityRule[]>('/v2/compat', token),

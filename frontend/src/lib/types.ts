@@ -371,6 +371,21 @@ export interface GatewayLatency {
   }
 }
 
+export interface GatewayPrefixAffinityModel {
+  model_uid: string
+  lookups: number
+  hits: number
+  hit_rate: number
+  index_entries: number
+}
+
+export interface GatewayPrefixAffinity {
+  data_source?: string
+  index_entries: number
+  models: GatewayPrefixAffinityModel[]
+  fallback: Record<string, number>
+}
+
 export interface AuthUser {
   id: string
   username: string

@@ -102,11 +102,18 @@ async fn main() -> anyhow::Result<()> {
     let auth = nebula_common::auth::parse_auth_from_env();
 
     // P1c: KV-event ingestion (opt-in). Engines publish block store/remove
-    // events over zmq; the router maintains the prefix→replica index.
-    if let Ok(bind) = std::env::var("NEBULA_ROUTER_KV_EVENTS_BIND") {
+    // events over zmq; the router maintains the prefix→replica index. Sources:
+    // BIND (engines connect here) and/or CONNECT (peer router's fanout — HA);
+    // FANOUT re-publishes the stream for peer routers.
+    let kv_bind = std::env::var("NEBULA_ROUTER_KV_EVENTS_BIND").ok();
+    let kv_connect = std::env::var("NEBULA_ROUTER_KV_EVENTS_CONNECT").ok();
+    let kv_fanout = std::env::var("NEBULA_ROUTER_KV_EVENTS_FANOUT").ok();
+    if kv_bind.is_some() || kv_connect.is_some() {
         let idx = router.prefix_index().clone();
         tokio::spawn(async move {
-            if let Err(e) = nebula_router::kv_events::kv_events_loop(bind, idx).await {
+            if let Err(e) =
+                nebula_router::kv_events::kv_events_loop(kv_bind, kv_connect, kv_fanout, idx).await
+            {
                 tracing::error!(error = %e, "kv events loop exited");
             }
         });

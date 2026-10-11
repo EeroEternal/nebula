@@ -285,6 +285,33 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         st.router.prefix_index_entries(),
     ));
     body.push_str(
+        "# HELP nebula_router_prefix_lookup_total Prefix-index lookups by model.\n\
+         # TYPE nebula_router_prefix_lookup_total counter\n",
+    );
+    for (model, lookup, hit) in st.router.prefix_lookup_stats() {
+        body.push_str(&format!(
+            "nebula_router_prefix_lookup_total{{model_uid=\"{model}\"}} {lookup}\n"
+        ));
+        body.push_str(&format!(
+            "nebula_router_prefix_hit_total{{model_uid=\"{model}\"}} {hit}\n"
+        ));
+    }
+    body.push_str(
+        "# HELP nebula_router_prefix_index_model_entries Prefix-index entries by model.\n\
+         # TYPE nebula_router_prefix_index_model_entries gauge\n",
+    );
+    let mut by_model: Vec<_> = st
+        .router
+        .prefix_index_entries_by_model()
+        .into_iter()
+        .collect();
+    by_model.sort();
+    for (model, n) in by_model {
+        body.push_str(&format!(
+            "nebula_router_prefix_index_model_entries{{model_uid=\"{model}\"}} {n}\n"
+        ));
+    }
+    body.push_str(
         "# HELP nebula_router_strategy_fallback_total Strategy selections that fell back to least_pending, by reason.\n\
          # TYPE nebula_router_strategy_fallback_total counter\n",
     );

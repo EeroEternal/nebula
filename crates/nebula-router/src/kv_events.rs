@@ -145,6 +145,15 @@ impl PrefixIndex {
         self.map.len()
     }
 
+    /// Live entries per model (O(n) — for metrics scrapes only).
+    pub fn entries_by_model(&self) -> std::collections::HashMap<String, usize> {
+        let mut out = std::collections::HashMap::new();
+        for e in self.map.iter() {
+            *out.entry(e.key().0.clone()).or_insert(0) += 1;
+        }
+        out
+    }
+
     pub fn apply(&self, model_uid: &str, replica_id: u32, events: &[KvEvent], now_ms: u64) {
         // Canonical 8-byte external keyspace (see hash_to_key).
         let canon = |h: &Vec<u8>| -> Vec<u8> {
@@ -250,20 +259,58 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// ZeroMQ SUB ingestion loop: engines publish on topic `"{model_uid}/{replica}"`
-/// (set via `--kv-events-config` by the node / k8s-controller); each message
-/// is `(topic, seq, msgpack batch)`. PUB drops on slow subscribers — the
-/// index is a cache, loss only costs routing hints.
-pub async fn kv_events_loop(bind: String, index: Arc<PrefixIndex>) -> anyhow::Result<()> {
-    use zeromq::{Socket, SocketRecv};
+/// KV-event ingestion loop (P1c).
+///
+/// Sources (either or both):
+/// - `bind`: engines connect here (`NEBULA_ROUTER_KV_EVENTS_BIND`)
+/// - `connect`: subscribe to a peer router's fanout
+///   (`NEBULA_ROUTER_KV_EVENTS_CONNECT`) — HA sharing
+///
+/// Optional `fanout` (`NEBULA_ROUTER_KV_EVENTS_FANOUT`) re-publishes every
+/// frame verbatim on a PUB socket so peer routers can share the stream.
+/// Forwarding is best-effort: PUB drops are self-healing because engines
+/// re-emit BlockStored on cache reuse.
+pub async fn kv_events_loop(
+    bind: Option<String>,
+    connect: Option<String>,
+    fanout: Option<String>,
+    index: Arc<PrefixIndex>,
+) -> anyhow::Result<()> {
+    use zeromq::{Socket, SocketRecv, SocketSend};
+    if bind.is_none() && connect.is_none() {
+        anyhow::bail!("kv events loop needs BIND or CONNECT");
+    }
     let mut socket = zeromq::SubSocket::new();
     socket.subscribe("").await?;
-    socket.bind(&bind).await?;
-    tracing::info!(bind = %bind, "kv events subscriber bound");
+    if let Some(b) = &bind {
+        socket.bind(b).await?;
+        tracing::info!(bind = %b, "kv events subscriber bound");
+    }
+    if let Some(c) = &connect {
+        socket.connect(c).await?;
+        tracing::info!(connect = %c, "kv events subscriber connected (peer fanout)");
+    }
+    let mut fanout_socket = match &fanout {
+        Some(f) => {
+            let mut p = zeromq::PubSocket::with_options(zeromq::SocketOptions::default());
+            p.bind(f).await?;
+            tracing::info!(fanout = %f, "kv events fanout bound");
+            Some(p)
+        }
+        None => None,
+    };
     loop {
         let frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
         if frames.len() < 3 {
             continue;
+        }
+        if let Some(p) = fanout_socket.as_mut() {
+            let mut fwd = zeromq::ZmqMessage::from(frames[0].clone());
+            for f in &frames[1..] {
+                fwd.push_back(f.clone());
+            }
+            // Best-effort: drops self-heal via reuse events.
+            let _ = p.send(fwd).await;
         }
         let Some((model_uid, replica_id)) = parse_topic(&frames[0]) else {
             tracing::warn!(

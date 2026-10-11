@@ -124,6 +124,10 @@ async fn main() -> anyhow::Result<()> {
             get(handlers_v2::gateway_latency),
         )
         .route(
+            "/observability/gateway/prefix-affinity",
+            get(handlers_v2::gateway_prefix_affinity),
+        )
+        .route(
             "/models",
             get(handlers_v2::list_models).post(handlers_v2::create_model),
         )

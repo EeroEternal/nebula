@@ -928,3 +928,15 @@ pub async fn tenant_cost_summary(
     let s = crate::tenant_svc::tenant_cost_summary_db(&st.db, &tenant_id).await?;
     Ok((StatusCode::OK, Json(s)).into_response())
 }
+
+pub async fn gateway_prefix_affinity(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp);
+    }
+    let text = service::fetch_router_metrics_text(&st.http, &st.router_url).await?;
+    let response = service::prefix_affinity_from_metrics(&text)?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}

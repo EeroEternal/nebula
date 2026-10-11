@@ -95,6 +95,8 @@ pub struct Router {
     /// Rebuildable cache — dropping it only loses routing hints.
     prefix_index: Arc<kv_events::PrefixIndex>,
     prefix_hasher: prompt_hash::PromptHasher,
+    /// P1c affinity observability: model → (lookups, hits).
+    prefix_lookup: DashMap<String, (AtomicU64, AtomicU64)>,
     stats_max_age_ms: u64,
     circuit_failure_threshold: u32,
     circuit_open_ms: u64,
@@ -156,6 +158,7 @@ impl Router {
             strategy_fallback: DashMap::new(),
             prefix_index: kv_events::PrefixIndex::new(),
             prefix_hasher: prompt_hash::PromptHasher::from_env(),
+            prefix_lookup: DashMap::new(),
             stats_max_age_ms,
             circuit_failure_threshold,
             circuit_open_ms,
@@ -260,6 +263,26 @@ impl Router {
     /// Live prefix-index entry count (routing hints learned from KV events).
     pub fn prefix_index_entries(&self) -> usize {
         self.prefix_index.entries()
+    }
+
+    /// Affinity lookup/hit counters per model, for /metrics and BFF.
+    pub fn prefix_lookup_stats(&self) -> Vec<(String, u64, u64)> {
+        self.prefix_lookup
+            .iter()
+            .map(|e| {
+                let (l, h) = e.value();
+                (
+                    e.key().clone(),
+                    l.load(Ordering::Relaxed),
+                    h.load(Ordering::Relaxed),
+                )
+            })
+            .collect()
+    }
+
+    /// Live index entries per model (metrics scrapes only, O(n)).
+    pub fn prefix_index_entries_by_model(&self) -> std::collections::HashMap<String, usize> {
+        self.prefix_index.entries_by_model()
     }
 
     /// Tokenize `prompt` (via the model's tokenizer, when configured) and
@@ -688,7 +711,22 @@ impl Router {
             })
             .collect();
 
-        let prefix_owner = prefix_hashes.and_then(|hs| self.prefix_index.lookup(model_uid, hs));
+        let prefix_owner = prefix_hashes.and_then(|hs| {
+            if hs.is_empty() {
+                return None;
+            }
+            let entry = self
+                .prefix_lookup
+                .entry(model_uid.to_string())
+                .or_insert_with(|| (AtomicU64::new(0), AtomicU64::new(0)));
+            let (l, h) = entry.value();
+            l.fetch_add(1, Ordering::Relaxed);
+            let owner = self.prefix_index.lookup(model_uid, hs);
+            if owner.is_some() {
+                h.fetch_add(1, Ordering::Relaxed);
+            }
+            owner
+        });
         let sel_ctx = SelectionCtx {
             prefix_owner,
             _marker: std::marker::PhantomData,

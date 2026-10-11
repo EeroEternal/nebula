@@ -1,4 +1,5 @@
 import { Globe, Server } from "lucide-react"
+import { useEffect, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Card } from "@/components/ui/card"
@@ -11,11 +12,22 @@ import { useClusterOverview } from "@/hooks/useClusterOverview"
 import { useAuthStore } from "@/store/useAuthStore"
 import { endpointStatusTone, formatNodeGpu } from "@/lib/endpoint-status"
 import { useI18n } from "@/lib/useI18n"
+import { v2 } from "@/lib/api"
+import type { GatewayPrefixAffinity } from "@/lib/types"
 
 export function EndpointsView() {
     const { t } = useI18n()
     const { data: overview } = useClusterOverview()
     const { token } = useAuthStore()
+    const [affinity, setAffinity] = useState<GatewayPrefixAffinity | null>(null)
+
+    useEffect(() => {
+        let cancelled = false
+        v2.gatewayPrefixAffinity(token ?? undefined)
+            .then((data) => { if (!cancelled) setAffinity(data) })
+            .catch(() => { if (!cancelled) setAffinity(null) })
+        return () => { cancelled = true }
+    }, [token])
 
     const assignmentFor = (modelUid: string, replicaId: number) => {
         for (const p of overview?.placements ?? []) {
@@ -84,6 +96,47 @@ export function EndpointsView() {
                                 )}
                             </TableBody>
                         </Table>
+                    </Card>
+                    <Card className="gap-0 overflow-hidden py-0">
+                        <div className="flex items-baseline justify-between px-5 pt-4">
+                            <div className="text-sm font-medium">{t('endpoints.prefixAffinity')}</div>
+                            <div className="text-meta-sm text-muted-foreground">{t('endpoints.prefixAffinityDesc')}</div>
+                        </div>
+                        {affinity && affinity.models.length > 0 ? (
+                            <Table>
+                                <TableHeader>
+                                    <TableRow>
+                                        <TableHead className="pl-5">{t('endpoints.model')}</TableHead>
+                                        <TableHead className="text-right">{t('endpoints.lookups')}</TableHead>
+                                        <TableHead className="text-right">{t('endpoints.hits')}</TableHead>
+                                        <TableHead className="text-right">{t('endpoints.hitRate')}</TableHead>
+                                        <TableHead className="text-right">{t('endpoints.indexEntries')}</TableHead>
+                                        <TableHead className="pr-5 text-right">{t('endpoints.fallbacks')}</TableHead>
+                                    </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                    {affinity.models.map((m) => (
+                                        <TableRow key={m.model_uid} className="hover:bg-muted/50">
+                                            <TableCell className="pl-5 font-medium">{m.model_uid}</TableCell>
+                                            <TableCell className="text-right text-sm">{m.lookups}</TableCell>
+                                            <TableCell className="text-right text-sm">{m.hits}</TableCell>
+                                            <TableCell className="text-right text-sm">{m.hit_rate}%</TableCell>
+                                            <TableCell className="text-right text-sm">{m.index_entries}</TableCell>
+                                            <TableCell className="pr-5 text-right text-meta-sm text-muted-foreground">
+                                                {Object.entries(affinity.fallback)
+                                                    .filter(([, v]) => v > 0)
+                                                    .map(([k, v]) => `${k} ${v}`)
+                                                    .join(' · ') || '—'}
+                                            </TableCell>
+                                        </TableRow>
+                                    ))}
+                                </TableBody>
+                            </Table>
+                        ) : (
+                            <div className="h-16 px-5 pb-4 pt-2 text-meta-sm text-muted-foreground">
+                                {t('endpoints.noAffinityData')}
+                            </div>
+                        )}
                     </Card>
                 </div>
             </PageContainer>
