@@ -240,6 +240,14 @@ pub async fn kv_events_loop(bind: String, index: Arc<PrefixIndex>) -> anyhow::Re
     loop {
         let frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
         RECV_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if RECV_TOTAL.load(Ordering::Relaxed) <= 3 {
+            tracing::info!(
+                topic = %String::from_utf8_lossy(&frames[0]),
+                payload_head = %frames.iter().map(|f| format!("[{}]", String::from_utf8_lossy(&f[..f.len().min(48)]))).collect::<String>(),
+                raw = %frames.last().map(|f| f.iter().take(40).map(|b| format!("{b:02x}")).collect::<String>()).unwrap_or_default(),
+                "kv event frame dump"
+            );
+        }
         if RECV_TOTAL.load(Ordering::Relaxed) % 200 == 1 {
             tracing::info!(
                 received = RECV_TOTAL.load(Ordering::Relaxed),
