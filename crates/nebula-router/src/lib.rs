@@ -289,15 +289,17 @@ impl Router {
             .map(|e| e.value().clone());
         match v.get("prompt") {
             Some(serde_json::Value::String(s)) => {
-                self.prefix_hasher.prompt_hashes(model_uid, name.as_deref(), s)
+                self.prefix_hasher
+                    .prompt_hashes(model_uid, name.as_deref(), s)
             }
             // list-of-strings prompt: hash the first element's prefix
-            Some(serde_json::Value::Array(a)) => a
-                .first()
-                .and_then(|x| x.as_str())
-                .and_then(|s| self.prefix_hasher.prompt_hashes(model_uid, name.as_deref(), s)),
+            Some(serde_json::Value::Array(a)) => a.first().and_then(|x| x.as_str()).and_then(|s| {
+                self.prefix_hasher
+                    .prompt_hashes(model_uid, name.as_deref(), s)
+            }),
             _ if v.get("messages").is_some() => {
-                self.prefix_hasher.chat_hashes(model_uid, name.as_deref(), &v)
+                self.prefix_hasher
+                    .chat_hashes(model_uid, name.as_deref(), &v)
             }
             _ => None,
         }

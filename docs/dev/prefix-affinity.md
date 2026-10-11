@@ -85,7 +85,13 @@
 - **机制**：亲和让每个前缀的 KV 只驻留一份（least_pending 在两副本各存一份，有效缓存容量减半）→ 高前缀数量下命中率差距放大。这正是 Dynamo/llm-d 的 cache-aware routing 收益来源。
 - 过程中修掉的两个真 bug（不看真机不可能发现）：① spec 更新触发 Router DashMap get+remove 同键死锁（整进程冻结）；② **线上引擎实际发 msgpack MAP 形式事件**（`{"type":"BlockStored",...}`），与容器内直接构造 struct 的 tagged-array 形式不同——原 parser 静默丢弃全部事件。两种格式均已支持并各有真实帧回归 fixture。
 - **运营要求**（缺一则永不命中）：引擎 `PYTHONHASHSEED` 固定 + `--prefix-caching-hash-algo sha256_cbor`（node/controller 已自动注入）+ router 同 seed（`NEBULA_KV_HASH_SEED`）+ tokenizer 目录（`NEBULA_ROUTER_TOKENIZER_DIR`）。
-- **已知边界**：router 重启后索引清零（PUB/SUB 无重放，且引擎缓存命中不再发事件）——冷启动期回落 least_pending（可见）；vLLM publisher 有 replay 端点可后续接入。chat body 不 hash（模板缺口）。
+- **已知边界（2026-10-11 修正）**：router 重启后索引清零，但 **v0.23 在缓存命中（reuse）时也发 BlockStored 事件**——实测重启后 3 个请求内索引从 0 恢复到 9、no_signal 仅 +1，自愈成立（早先"命中不发事件"是 map-form 解析 bug 的误诊）。`replay_endpoint` 重放降级为可选优化（加快恢复窗口）；chat body 已支持 hash（见下）。
+
+### 5.7 Chat 模板哈希（P1c Batch 1.1，✅ 2026-10-11）
+
+- Router 用 minijinja 渲染模型的 `chat_template`（`tokenizer_config.json`，transformers 兼容子集：`tojson`/`loop.first`/空白控制），`add_special_tokens=false` 分词——与引擎 `apply_chat_template(tokenize=True)` **token 级对齐**（真机验证：6 个共享 system prompt 的 chat 请求全部集中到持有副本，no_signal 仅首请求 +1）。
+- shortcut：`chat_template_kwargs` 逐请求覆盖与奇异模板扩展 v1 不渲染——不匹配即 miss（可见回落），需要时再升级。
+- Chat 负载 A/B（暖引擎、4 前缀、N=256、C=16）：affinity vs least_pending = 36.9 vs 36.6 rps、TTFT mean 211 vs 231 ms（−8.6%）、**p99 342 vs 850 ms（−60%）**——小缓存稳态下收益集中在尾部；大缓存压力场景见 §5.6（+74% rps）。
 ## 6. P1 收尾验证（2026-09-21，8×5090）
 
 | 项 | 结果 |

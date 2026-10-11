@@ -246,8 +246,8 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 | # | 任务 | 状态 | 验收标准 |
 |---|------|------|----------|
-| 1.1 | Chat 模板哈希（Router 侧渲染 chat_template + 复用哈希链，覆盖 `/v1/chat/completions`） | ⏳ | chat 请求走亲和；模板渲染 token 序列与引擎逐 token 对齐（fixture + 真机双验证） |
-| 1.2 | 索引自愈（vLLM `replay_endpoint` 重放 + reuse 事件版本查证钉入兼容矩阵） | ⏳ | Router 重启 + 暖引擎 → 60s 内索引恢复、no_signal 占比 <5% |
+| 1.1 | Chat 模板哈希（Router 侧渲染 chat_template + 复用哈希链，覆盖 `/v1/chat/completions`） | ✅ 2026-10-11 | 真机：6 个共享前缀 chat 请求全集中持有副本；A/B：p99 −60%（暖引擎） |
+| 1.2 | 索引自愈 | ✅ 2026-10-11 | 实测 v0.23 命中（reuse）也发事件：重启后 3 请求内索引恢复、no_signal 仅 +1；`replay_endpoint` 转可选优化 |
 | 1.3 | 亲和可观测（`prefix_index_hit_ratio` + 前缀热度 top-N：BFF API + 控制台卡片） | ⏳ | 控制台可回答亲和收益与前缀热度 |
 | 1.4 | HA 扇出（多 Router 共享事件流；索引元数据不进 etcd 热路径） | ⏳ | 双 Router 实例一致命中 |
 

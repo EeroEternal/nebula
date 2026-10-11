@@ -40,7 +40,12 @@ impl PromptHasher {
         }
     }
 
-    fn candidate_paths(&self, model_uid: &str, model_name: Option<&str>, file: &str) -> Vec<String> {
+    fn candidate_paths(
+        &self,
+        model_uid: &str,
+        model_name: Option<&str>,
+        file: &str,
+    ) -> Vec<String> {
         let Some(dir) = self.dir.as_deref() else {
             return Vec::new();
         };
@@ -75,7 +80,8 @@ impl PromptHasher {
             return hit.value().clone();
         }
         let loaded = paths.iter().find_map(|p| {
-            let v: serde_json::Value = serde_json::from_reader(std::fs::File::open(p).ok()?).ok()?;
+            let v: serde_json::Value =
+                serde_json::from_reader(std::fs::File::open(p).ok()?).ok()?;
             match v.get("chat_template")? {
                 serde_json::Value::String(s) => Some(s.clone()),
                 serde_json::Value::Array(a) => a
@@ -123,7 +129,7 @@ impl PromptHasher {
         env.add_template("chat", tpl.as_str()).ok()?;
         // Context mirrors transformers apply_chat_template; chat_template_kwargs
         // per-request overrides are not supported v1 (shortcut).
-        let ctx = minijinja::Value::from_serialize(&serde_json::json!({
+        let ctx = minijinja::Value::from_serialize(serde_json::json!({
             "messages": messages,
             "add_generation_prompt": true,
             "tools": body.get("tools").cloned().unwrap_or(serde_json::Value::Null),
@@ -167,7 +173,7 @@ mod tests {
                 {"role": "user", "content": "hello"}
             ]
         });
-        let ctx = minijinja::Value::from_serialize(&serde_json::json!({
+        let ctx = minijinja::Value::from_serialize(serde_json::json!({
             "messages": body["messages"],
             "add_generation_prompt": true,
         }));
@@ -189,6 +195,8 @@ mod tests {
             block_size: 16,
         };
         assert!(h.prompt_hashes("m", Some("org/model"), "hello").is_none());
-        assert!(h.chat_hashes("m", None, &serde_json::json!({"messages": []})).is_none());
+        assert!(h
+            .chat_hashes("m", None, &serde_json::json!({"messages": []}))
+            .is_none());
     }
 }
