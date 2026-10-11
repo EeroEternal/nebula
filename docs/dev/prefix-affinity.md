@@ -44,10 +44,14 @@
 - 消息为 `(topic, seq, msgpack)` 三帧；msgpack 为 msgspec `array_like+tag` 格式：`[ts, ["BlockStored", block_hashes, parent, token_ids, block_size, lora_id, medium], ...]`。
 - PUB 慢订阅者丢消息——索引是缓存，丢只损失提示，不损正确性。
 
-### 5.2 hash：sha256_cbor 链式（与 v0.11 默认一致）
+### 5.2 hash：sha256_cbor 链式（需显式固定 seed + algo）
 
-- 每满 16 token 一块：`sha256(cbor2.dumps((parent_hash, tuple(token_ids), None), canonical=True))`，首块 parent 为 `NONE_HASH = sha256_cbor("vllm-none-hash")`。
-- Rust 端口在 `kv_hash.rs`，测试向量与参考 Python 实现逐字节对齐（含 1/2/3 字节最小整数编码）。**注意：main 分支 vLLM 已改用 xxhash_cbor**，未来升级引擎版本时需重新校准。
+**真机校准（v0.23.0 部署镜像，2026-10）**：
+
+- 块哈希：`sha256(cbor2.dumps((parent_hash, tuple(token_ids), None), canonical=True))`，首块 parent 为 `NONE_HASH`；与 v0.11 逐位一致。
+- **v0.23 默认 `--prefix-caching-hash-algo=sha256`（pickle 序列化）**——Rust 无法复刻，引擎必须显式设 `--prefix-caching-hash-algo sha256_cbor`。
+- **`PYTHONHASHSEED` 未设时 `NONE_HASH = os.urandom(32)`，每进程随机**——跨副本匹配必然失败。引擎必须固定 `PYTHONHASHSEED`，router 用同值（双方读 `NEBULA_KV_HASH_SEED`，默认 `"42"`；v0.11 未设时默认 `"vllm-none-hash"`）。
+- Rust 端口 `kv_hash.rs` 的测试向量：v0.23 部署容器内直接调用 `vllm.utils.hashing` 生成（seed=42：`NONE_HASH=9fa6eb…`、`H0=3f9c79…`、`H1=45e3af…`）；真实 zmq 帧已固化为 `kv_events.rs` 回归测试。
 - 块哈希链式⇒任意一块命中即证明 token 级前缀完全一致；索引按最深链投票选副本。
 
 ### 5.3 索引与请求侧
@@ -63,11 +67,13 @@
 
 ### 5.5 引擎侧开关
 
-- 执行面设 `NEBULA_KV_EVENTS_ENDPOINT`（router 的 SUB 地址）→ node 与 k8s-controller 为 vLLM 副本追加 `--kv-events-config {"enable_kv_cache_events":true,"publisher":"zmq","endpoint":…,"topic":"model/replica"}`。
+- 执行面设 `NEBULA_KV_EVENTS_ENDPOINT`（router 的 SUB 地址）→ node 与 k8s-controller 为 vLLM 副本追加 `--kv-events-config {…}` **并**注入 `PYTHONHASHSEED=$NEBULA_KV_HASH_SEED` + `--prefix-caching-hash-algo sha256_cbor`（见 §5.2，缺一则路由永不命中）。
 
-### 5.6 验收（待真机）
+### 5.6 验收（待 GPU 修复后真机）
 
 重跑 §3 协议：`/v1/completions`、`prefix_repetition`（prefix 2048 / suffix 128 / 4 prefixes）、2 副本、C=16、N=256、**交错**对比 `least_pending` vs `prefix_affinity`。预期：命中请求跳过 2048 token prefill，TTFT 显著下降；若无效，这次信号/回退全程可观测，结论可信。
+
+**已在无 GPU 环境完成的真机校准**（部署镜像 v0.23.0，runc 容器）：事件 msgpack 帧格式、hash 链算法与 seed 行为均已用真实库调用/真实 zmq 字节流验证并固化为回归测试。GPU e2e 阻塞于宿主机 nvidia 驱动损坏（`nvidia-smi` NVML mismatch、`/run/nvidia-persistenced/socket` 缺失，需管理员修复/重启）。
 
 ## 6. P1 收尾验证（2026-09-21，8×5090）
 

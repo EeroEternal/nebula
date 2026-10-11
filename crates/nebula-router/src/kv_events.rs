@@ -391,4 +391,51 @@ mod tests {
         assert_eq!(parse_topic(b"qwen_7b/1"), Some(("qwen_7b".into(), 1)));
         assert_eq!(parse_topic(b"nobody"), None);
     }
+
+    // Raw zmq payloads captured from the deployed
+    // vllm/vllm-openai:v0.23.0 container on the test rig
+    // (PYTHONHASHSEED=42, algo sha256_cbor, tokens 100..132):
+    // outer batch [ts, events, dp_rank]; BlockStored with 2 bin32 hashes.
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn parses_real_v023_deployed_frames() {
+        let stored = unhex(
+            "93cb3ff8000000000000919cab426c6f636b53746f72656492c4203f9c7995b81c03a2ab8ad3046caf562b8e746d217638d4dc5c672504f0cb3b66c42045e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250cc0dc00206465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7fcc80cc81cc82cc8310c0a3475055c0c0c0c0c000",
+        );
+        let evs = parse_batch(&stored);
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            KvEvent::Stored {
+                block_hashes,
+                medium,
+            } => {
+                assert_eq!(medium.as_deref(), Some("GPU"));
+                assert_eq!(
+                    block_hashes,
+                    &vec![
+                        unhex("3f9c7995b81c03a2ab8ad3046caf562b8e746d217638d4dc5c672504f0cb3b66"),
+                        unhex("45e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250c"),
+                    ]
+                );
+            }
+            other => panic!("expected BlockStored, got {other:?}"),
+        }
+
+        let removed = unhex(
+            "93cb3ff999999999999a9194ac426c6f636b52656d6f76656491c42045e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250ca3475055c000",
+        );
+        assert_eq!(
+            parse_batch(&removed),
+            vec![KvEvent::Removed {
+                block_hashes: vec![unhex(
+                    "45e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250c",
+                )],
+            }]
+        );
+    }
 }

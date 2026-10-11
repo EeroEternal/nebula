@@ -392,15 +392,23 @@ fn create_engine_pod(
     };
     // P1c: opt-in KV cache events → the router's prefix→replica index (vLLM
     // only; SGLang has no equivalent publisher — capability gap, the
-    // prefix_affinity strategy falls back visibly for SGLang models).
+    // prefix_affinity strategy falls back visibly for SGLang models). The
+    // hash seed must be pinned (v0.23+ randomizes NONE_HASH per process when
+    // PYTHONHASHSEED is unset) and the algo pinned to sha256_cbor (default
+    // "sha256" is pickle-based, not reproducible outside Python).
+    let mut kv_hash_seed: Option<String> = None;
     if !is_sglang {
         if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
+            let seed = std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string());
             if let Some(arr) = args.as_array_mut() {
                 arr.push(json!("--kv-events-config"));
                 arr.push(json!(format!(
                     "{{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"{endpoint}\",\"topic\":\"{model_uid}/{replica_id}\"}}"
                 )));
+                arr.push(json!("--prefix-caching-hash-algo"));
+                arr.push(json!("sha256_cbor"));
             }
+            kv_hash_seed = Some(seed);
         }
     }
 
@@ -420,6 +428,12 @@ fn create_engine_pod(
             { "mountPath": "/dev/shm", "name": "dshm" }
         ]
     });
+    if let Some(seed) = kv_hash_seed.as_deref() {
+        if let Some(envs) = container["env"].as_array_mut() {
+            envs.push(json!({ "name": "PYTHONHASHSEED", "value": seed }));
+        }
+    }
+
     if is_sglang {
         // SGLang image entrypoint is not the server; invoke the module explicitly.
         container["command"] = json!(["python3"]);

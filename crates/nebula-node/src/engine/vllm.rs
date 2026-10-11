@@ -228,15 +228,23 @@ impl Engine for VllmEngine {
 
         // P1c: opt-in KV cache events → the router's prefix→replica index.
         // Engines CONNECT to the router's zmq SUB socket; the topic identifies
-        // the publishing replica.
-        if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
+        // the publishing replica. The block-hash seed MUST be pinned
+        // (v0.23+ randomizes NONE_HASH per process when PYTHONHASHSEED is
+        // unset) and the algorithm pinned to sha256_cbor (the default
+        // "sha256" is pickle-based and not reproducible outside Python).
+        let kv_hash_seed = std::env::var("NEBULA_KV_EVENTS_ENDPOINT").ok().map(|endpoint| {
+            let seed =
+                std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string());
             let cfg = format!(
                 "{{\"enable_kv_cache_events\":true,\"publisher\":\"zmq\",\"endpoint\":\"{endpoint}\",\"topic\":\"{}/{}\"}}",
                 ctx.model_uid, ctx.replica_id
             );
             vllm_args.push("--kv-events-config".into());
             vllm_args.push(cfg);
-        }
+            vllm_args.push("--prefix-caching-hash-algo".into());
+            vllm_args.push("sha256_cbor".into());
+            seed
+        });
 
         let mut cmd;
         let process_kind;
@@ -294,6 +302,10 @@ impl Engine for VllmEngine {
             cmd.arg("-e").arg("XDG_CACHE_HOME=/model/.cache");
             cmd.arg("-e").arg("HF_HUB_DISABLE_XET=1");
 
+            if let Some(seed) = kv_hash_seed.as_deref() {
+                cmd.arg("-e").arg(format!("PYTHONHASHSEED={seed}"));
+            }
+
             if use_wrapper {
                 cmd.arg("-e").arg("FLASHINFER_DISABLE_VERSION_CHECK=1");
             }
@@ -348,6 +360,9 @@ impl Engine for VllmEngine {
                 cmd.env("HF_ENDPOINT", ep);
             }
             cmd.env("HF_HUB_DISABLE_XET", "1");
+            if let Some(seed) = kv_hash_seed.as_deref() {
+                cmd.env("PYTHONHASHSEED", seed);
+            }
             if let Some(ref indices) = ctx.gpu_indices {
                 let devs: Vec<String> = indices.iter().map(|i| i.to_string()).collect();
                 cmd.env("CUDA_VISIBLE_DEVICES", devs.join(","));
