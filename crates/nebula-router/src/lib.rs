@@ -377,10 +377,12 @@ impl Router {
     pub fn clear_model_mappings(&self, model_uid: &str) {
         if let Some((_, keys)) = self.model_alias_keys.remove(model_uid) {
             for key in keys {
-                if let Some(entry) = self.model_names.get(&key) {
-                    if entry.value() == model_uid {
-                        self.model_names.remove(&key);
-                    }
+                // Compare via a cloned value so the read guard is dropped
+                // before remove — get+remove on the same key deadlocks the
+                // shard (this exact bug froze the router on spec update).
+                let owned = self.model_names.get(&key).map(|e| e.value().clone());
+                if owned.as_deref() == Some(model_uid) {
+                    self.model_names.remove(&key);
                 }
             }
         }
@@ -1070,5 +1072,52 @@ mod model_alias_tests {
             Some("http://10.99.255.102:9997")
         );
         assert_eq!(selected.engine_type.as_deref(), Some("powerllm"));
+    }
+}
+
+#[cfg(test)]
+mod model_spec_update_tests {
+    use super::*;
+
+    fn spec(uid: &str, name: &str, served: Option<&str>) -> ModelSpec {
+        ModelSpec {
+            model_uid: uid.into(),
+            model_name: name.into(),
+            model_source: nebula_common::ModelSource::Local,
+            model_path: Some("/models/some-path".into()),
+            engine_type: Some("vllm".into()),
+            docker_image: None,
+            config: served.map(|s| {
+                serde_json::from_str(&format!(r#"{{"served_model_name":"{s}"}}"#)).unwrap()
+            }),
+            labels: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            created_by: None,
+        }
+    }
+
+    /// Regression: updating a spec re-registers mappings via
+    /// clear_model_mappings, which used to get+remove the same
+    /// `model_names` key under one read guard and deadlock the shard
+    /// (froze the whole router on a real-machine spec update).
+    #[test]
+    fn spec_update_does_not_deadlock() {
+        let router = Router::new();
+        router.register_model_spec(&spec("m1", "Org/Model-A", Some("m1")));
+        router.register_model_spec(&spec("m1", "Org/Model-B", Some("m1")));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let r = router.clone();
+        std::thread::spawn(move || {
+            for _ in 0..50 {
+                r.register_model_spec(&spec("m1", "Org/Model-A", Some("m1")));
+                r.register_model_spec(&spec("m1", "Org/Model-B", Some("m1")));
+            }
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("spec re-registration deadlocked (DashMap get+remove on same key)");
+        assert_eq!(router.resolve_model("Org/Model-B"), "m1");
+        assert_eq!(router.resolve_model("m1"), "m1");
     }
 }
