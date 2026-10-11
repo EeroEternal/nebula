@@ -218,6 +218,8 @@ impl PrefixIndex {
     }
 }
 
+static RECV_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -237,7 +239,16 @@ pub async fn kv_events_loop(bind: String, index: Arc<PrefixIndex>) -> anyhow::Re
     tracing::info!(bind = %bind, "kv events subscriber bound");
     loop {
         let frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
+        RECV_TOTAL.fetch_add(1, Ordering::Relaxed);
+        if RECV_TOTAL.load(Ordering::Relaxed) % 200 == 1 {
+            tracing::info!(
+                received = RECV_TOTAL.load(Ordering::Relaxed),
+                entries = index.len(),
+                "kv events loop alive"
+            );
+        }
         if frames.len() < 3 {
+            tracing::warn!(frames = frames.len(), "short zmq frame");
             continue;
         }
         let Some((model_uid, replica_id)) = parse_topic(&frames[0]) else {
