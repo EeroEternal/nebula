@@ -30,18 +30,21 @@ pub enum KvEvent {
     Cleared,
 }
 
-fn hash_to_bytes(v: &Value) -> Option<Vec<u8>> {
+/// Canonical index key: the 8-byte external form (see [`crate::kv_hash::external`]).
+/// Ints arrive as u64 (vLLM publishes `int.from_bytes(h, "big") & (2^64-1)`);
+/// byte hashes (int publication disabled) are canonicalized to their last 8
+/// bytes so both wire forms and request-side 32-byte hashes share one keyspace.
+fn hash_to_key(v: &Value) -> Option<Vec<u8>> {
     match v {
-        Value::Binary(b) => Some(b.to_vec()),
-        // Legacy int block hashes (pre-sha256_cbor vLLM): 8-byte big-endian.
-        Value::Integer(i) => i.as_i64().map(|i| i.to_be_bytes().to_vec()),
+        Value::Integer(i) => i.as_u64().map(|i| i.to_be_bytes().to_vec()),
+        Value::Binary(b) if b.len() >= 8 => Some(b[b.len() - 8..].to_vec()),
         _ => None,
     }
 }
 
 fn hashes_of(v: &Value) -> Option<Vec<Vec<u8>>> {
     v.as_array()
-        .map(|arr| arr.iter().filter_map(hash_to_bytes).collect())
+        .map(|arr| arr.iter().filter_map(hash_to_key).collect())
 }
 
 fn parse_event(v: &Value) -> Option<KvEvent> {
@@ -113,6 +116,14 @@ impl PrefixIndex {
     }
 
     pub fn apply(&self, model_uid: &str, replica_id: u32, events: &[KvEvent], now_ms: u64) {
+        // Canonical 8-byte external keyspace (see hash_to_key).
+        let canon = |h: &Vec<u8>| -> Vec<u8> {
+            if h.len() >= 8 {
+                h[h.len() - 8..].to_vec()
+            } else {
+                h.clone()
+            }
+        };
         for ev in events {
             match ev {
                 KvEvent::Stored {
@@ -126,16 +137,17 @@ impl PrefixIndex {
                     }
                     for h in block_hashes {
                         self.map
-                            .insert((model_uid.to_string(), h.clone()), (replica_id, now_ms));
+                            .insert((model_uid.to_string(), canon(h)), (replica_id, now_ms));
                     }
                     self.inserts_total.fetch_add(1, Ordering::Relaxed);
                 }
                 KvEvent::Removed { block_hashes } => {
                     for h in block_hashes {
-                        if let Some(entry) = self.map.get(&(model_uid.to_string(), h.clone())) {
+                        let key = (model_uid.to_string(), canon(h));
+                        if let Some(entry) = self.map.get(&key) {
                             if entry.value().0 == replica_id {
                                 drop(entry);
-                                self.map.remove(&(model_uid.to_string(), h.clone()));
+                                self.map.remove(&key);
                             }
                         }
                     }
@@ -163,7 +175,8 @@ impl PrefixIndex {
     pub fn lookup(&self, model_uid: &str, hashes: &[[u8; 32]]) -> Option<u32> {
         let mut best: Option<(usize, usize, u32)> = None; // (depth, count, replica)
         for (depth, h) in hashes.iter().enumerate() {
-            if let Some(entry) = self.map.get(&(model_uid.to_string(), h.to_vec())) {
+            let key = crate::kv_hash::external(h).to_vec();
+            if let Some(entry) = self.map.get(&(model_uid.to_string(), key)) {
                 let replica = entry.value().0;
                 let cur = best.unwrap_or((0, 0, u32::MAX));
                 let next = if cur.2 == replica {
@@ -287,11 +300,11 @@ mod tests {
             events,
             vec![
                 KvEvent::Stored {
-                    block_hashes: vec![H0.to_vec(), H1.to_vec()],
+                    block_hashes: vec![[0xaa; 8].to_vec(), [0xbb; 8].to_vec()],
                     medium: Some("GPU".into()),
                 },
                 KvEvent::Removed {
-                    block_hashes: vec![H0.to_vec()],
+                    block_hashes: vec![[0xaa; 8].to_vec()],
                 },
             ]
         );
@@ -402,6 +415,38 @@ mod tests {
             .collect()
     }
 
+    fn last8(hex32: &str) -> Vec<u8> {
+        unhex(hex32)[24..].to_vec()
+    }
+
+    #[test]
+    fn int_hashes_share_keyspace_with_request_hashes() {
+        // Real engine numbers (v0.23, PYTHONHASHSEED=42): the engine published
+        // int 1015703622044383654 = last-8-bytes-BE of the 32-byte block hash
+        // for the calibrated prompt. A request computing the full 32-byte hash
+        // must hit the same index entry.
+        let idx = PrefixIndex::new();
+        let ev = Value::Array(vec![
+            Value::from("BlockStored"),
+            Value::Array(vec![Value::from(1015703622044383654u64)]),
+            Value::Nil,
+            Value::Array((0..16).map(Value::from).collect()),
+            Value::from(16),
+            Value::Nil,
+            Value::from("GPU"),
+        ]);
+        let mut buf = Vec::new();
+        write_value(
+            &mut buf,
+            &Value::Array(vec![Value::from(1.0_f64), Value::Array(vec![ev])]),
+        )
+        .unwrap();
+        idx.apply("m", 1, &parse_batch(&buf), 1);
+        let mut req = [0u8; 32];
+        req[24..].copy_from_slice(&1015703622044383654u64.to_be_bytes());
+        assert_eq!(idx.lookup("m", &[req]), Some(1));
+    }
+
     #[test]
     fn parses_real_v023_deployed_frames() {
         let stored = unhex(
@@ -418,8 +463,8 @@ mod tests {
                 assert_eq!(
                     block_hashes,
                     &vec![
-                        unhex("3f9c7995b81c03a2ab8ad3046caf562b8e746d217638d4dc5c672504f0cb3b66"),
-                        unhex("45e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250c"),
+                        last8("3f9c7995b81c03a2ab8ad3046caf562b8e746d217638d4dc5c672504f0cb3b66"),
+                        last8("45e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250c"),
                     ]
                 );
             }
@@ -432,7 +477,7 @@ mod tests {
         assert_eq!(
             parse_batch(&removed),
             vec![KvEvent::Removed {
-                block_hashes: vec![unhex(
+                block_hashes: vec![last8(
                     "45e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250c",
                 )],
             }]

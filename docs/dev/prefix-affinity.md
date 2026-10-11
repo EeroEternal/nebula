@@ -52,7 +52,10 @@
 - **v0.23 默认 `--prefix-caching-hash-algo=sha256`（pickle 序列化）**——Rust 无法复刻，引擎必须显式设 `--prefix-caching-hash-algo sha256_cbor`。
 - **`PYTHONHASHSEED` 未设时 `NONE_HASH = os.urandom(32)`，每进程随机**——跨副本匹配必然失败。引擎必须固定 `PYTHONHASHSEED`，router 用同值（双方读 `NEBULA_KV_HASH_SEED`，默认 `"42"`；v0.11 未设时默认 `"vllm-none-hash"`）。
 - Rust 端口 `kv_hash.rs` 的测试向量：v0.23 部署容器内直接调用 `vllm.utils.hashing` 生成（seed=42：`NONE_HASH=9fa6eb…`、`H0=3f9c79…`、`H1=45e3af…`）；真实 zmq 帧已固化为 `kv_events.rs` 回归测试。
+- **事件外部形式是 int（u64）**：`maybe_convert_block_hash` 默认把内部 32 字节 sha256 转成 `int.from_bytes(h,"big") & (2^64-1)`（即尾 8 字节大端）。Router 索引把两种线上形式（int / bytes）与请求侧 32 字节哈希统一规范到同一 8 字节键空间（碰撞概率 2⁻⁶⁴ 量级，仅影响路由提示质量）。
 - 块哈希链式⇒任意一块命中即证明 token 级前缀完全一致；索引按最深链投票选副本。
+
+**真机全链路验证（60001，8×5090，Qwen2.5-7B @ v0.23.0）**：真实 prompt → 真实 tokenizer ids（`[37, 57610, …]`）→ Rust 链式哈希 `2763d1b3…79a6` → 尾 8 字节 = `1015703622044383654` = 引擎 BlockStored 事件值，**精确一致**（已固化为 `kv_hash`/`kv_events` 回归测试）。
 
 ### 5.3 索引与请求侧
 

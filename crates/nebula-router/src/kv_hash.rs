@@ -128,6 +128,15 @@ fn block_hash(parent: &[u8; 32], tokens: &[u32]) -> [u8; 32] {
     out
 }
 
+/// Canonical 8-byte external form of a block hash (vLLM
+/// `maybe_convert_block_hash`: `int.from_bytes(h, "big") & (2^64-1)` — the
+/// last 8 bytes, big-endian; verified against a real v0.23 engine).
+pub fn external(hash: &[u8; 32]) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&hash[24..]);
+    out
+}
+
 fn chain(token_ids: &[u32], block_size: usize, none: &[u8; 32]) -> Vec<[u8; 32]> {
     let block_size = block_size.max(1);
     let mut parent = *none;
@@ -231,5 +240,21 @@ mod tests {
         assert_eq!(chain(&toks, 16, &none).len(), 2);
         assert_eq!(chain(&toks[..16], 16, &none).len(), 1);
         assert_eq!(chain(&toks[..15], 16, &none).len(), 0);
+    }
+
+    #[test]
+    fn external_form_matches_real_engine_event() {
+        // Real machine: Qwen2.5-7B via vLLM v0.23.0 (sha256_cbor,
+        // PYTHONHASHSEED=42) published BlockStored hash 1015703622044383654
+        // for a prompt whose first 16 tokenizer ids are below.
+        let toks16 = [
+            37, 57610, 37611, 9934, 11, 7722, 1467, 1549, 11, 24132, 279, 4734, 1852, 15870, 17, 20,
+        ];
+        let h0 = block_hash(&none_hash_for_seed("42"), &toks16);
+        assert_eq!(
+            hex(&h0),
+            "2763d1b38ccd686cef2b915fc70c8de1b4c2590dc90848b00e188110150879a6"
+        );
+        assert_eq!(u64::from_be_bytes(external(&h0)), 1015703622044383654u64);
     }
 }
