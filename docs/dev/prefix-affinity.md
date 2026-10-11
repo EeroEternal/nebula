@@ -92,6 +92,16 @@
 - Router 用 minijinja 渲染模型的 `chat_template`（`tokenizer_config.json`，transformers 兼容子集：`tojson`/`loop.first`/空白控制），`add_special_tokens=false` 分词——与引擎 `apply_chat_template(tokenize=True)` **token 级对齐**（真机验证：6 个共享 system prompt 的 chat 请求全部集中到持有副本，no_signal 仅首请求 +1）。
 - shortcut：`chat_template_kwargs` 逐请求覆盖与奇异模板扩展 v1 不渲染——不匹配即 miss（可见回落），需要时再升级。
 - Chat 负载 A/B（暖引擎、4 前缀、N=256、C=16）：affinity vs least_pending = 36.9 vs 36.6 rps、TTFT mean 211 vs 231 ms（−8.6%）、**p99 342 vs 850 ms（−60%）**——小缓存稳态下收益集中在尾部；大缓存压力场景见 §5.6（+74% rps）。
+### 5.8 全局索引服务 `nebula-indexd`（Batch 2，✅ 2026-10-11）
+
+消除 1.4 残余的"单采集 Router"：引擎指向**唯一稳定端点** indexd，indexd 维护权威索引并向所有 Router sink 推送：
+
+- **原始帧逐字转发**（增量新鲜度）+ **周期快照**（`!reset/{model}` + `!snapshot/{model}/{replica}`，复用 map-form 事件编码，Router 端清后重建）——Router 重启不再等 reuse 事件，≤ 快照周期即恢复。
+- **热路径零依赖**：Router 只查本地索引副本；indexd 挂 → Router 用存量继续（回落计数器可见），恢复后快照重建。
+- 环境变量：`NEBULA_INDEXD_BIND`（引擎 SUB 端点）、`NEBULA_INDEXD_SINKS`（逗号分隔 Router sink）、`NEBULA_INDEXD_SNAPSHOT_SECS`（默认 60）、`NEBULA_ROUTER_PREFIX_TTL_MS`（与 Router 共用）。
+- **zeromq 0.4–0.6 的 PUB socket 对 re-bind 对端不重连**（实测三轮），推送方每 30s / 每快照轮**重建 socket**（帧经 channel 缓冲，不丢）。已升级 zeromq 0.6。
+- 本地验收 4/4：原始转发 ✓、Router 重启快照自愈 ✓、indexd 宕机降级保有 ✓、双 Router 索引一致 ✓。
+
 ## 6. P1 收尾验证（2026-09-21，8×5090）
 
 | 项 | 结果 |

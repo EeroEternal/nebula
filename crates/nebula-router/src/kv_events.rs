@@ -154,6 +154,39 @@ impl PrefixIndex {
         out
     }
 
+    /// Distinct models currently in the index (for snapshot rounds).
+    pub fn models(&self) -> Vec<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        for e in self.map.iter() {
+            seen.insert(e.key().0.clone());
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Per-replica canonical keys for one model (snapshot payload).
+    pub fn snapshot_for(&self, model_uid: &str) -> Vec<(u32, Vec<Vec<u8>>)> {
+        let mut per: std::collections::BTreeMap<u32, Vec<Vec<u8>>> = Default::default();
+        for e in self.map.iter() {
+            if e.key().0 == model_uid {
+                per.entry(e.value().0).or_default().push(e.key().1.clone());
+            }
+        }
+        per.into_iter().collect()
+    }
+
+    /// Drop every entry of a model (snapshot replace semantics).
+    pub fn clear_model(&self, model_uid: &str) {
+        let keys: Vec<(String, Vec<u8>)> = self
+            .map
+            .iter()
+            .filter(|e| e.key().0 == model_uid)
+            .map(|e| e.key().clone())
+            .collect();
+        for k in keys {
+            self.map.remove(&k);
+        }
+    }
+
     pub fn apply(&self, model_uid: &str, replica_id: u32, events: &[KvEvent], now_ms: u64) {
         // Canonical 8-byte external keyspace (see hash_to_key).
         let canon = |h: &Vec<u8>| -> Vec<u8> {
@@ -283,14 +316,17 @@ pub async fn kv_events_loop(
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<bytes::Bytes>>();
     if !push_to.is_empty() {
         tokio::spawn(async move {
-            let mut pusher = zeromq::PubSocket::with_options(zeromq::SocketOptions::default());
-            for addr in &push_to {
-                if let Err(e) = pusher.connect(addr).await {
-                    tracing::warn!(addr = %addr, error = %e, "fanout connect failed");
-                }
-            }
+            // shortcut: zeromq 0.4–0.6 PUB sockets never reconnect to a
+            // re-bound peer (verified locally), so the pusher is rebuilt
+            // every 30s; frames buffer in the channel meanwhile.
+            let mut pusher = connect_pusher(&push_to).await;
             tracing::info!(sinks = ?push_to, "kv events fanout pushing");
+            let mut last_rebuild = std::time::Instant::now();
             while let Some(frames) = rx.recv().await {
+                if last_rebuild.elapsed() >= std::time::Duration::from_secs(30) {
+                    pusher = connect_pusher(&push_to).await;
+                    last_rebuild = std::time::Instant::now();
+                }
                 let mut msg = zeromq::ZmqMessage::from(frames[0].clone());
                 for f in &frames[1..] {
                     msg.push_back(f.clone());
@@ -315,7 +351,10 @@ pub async fn kv_events_loop(
 }
 
 /// Peer-sink ingestion (HA): bind a SUB socket that fanout peers push to
-/// (`NEBULA_ROUTER_KV_EVENTS_SINK_BIND` on the replica routers).
+/// (`NEBULA_ROUTER_KV_EVENTS_SINK_BIND` on the replica routers). Besides
+/// raw engine frames (`{model}/{replica}`), the control topics from the
+/// index service are handled here: `!reset/{model}` clears a model's
+/// entries, `!snapshot/{model}/{replica}` applies a snapshot batch.
 pub async fn kv_sink_loop(sink_bind: String, index: Arc<PrefixIndex>) -> anyhow::Result<()> {
     use zeromq::{Socket, SocketRecv};
     let mut socket = zeromq::SubSocket::new();
@@ -327,8 +366,75 @@ pub async fn kv_sink_loop(sink_bind: String, index: Arc<PrefixIndex>) -> anyhow:
         if frames.len() < 3 {
             continue;
         }
-        apply_frames(&frames, &index);
+        let topic = String::from_utf8_lossy(&frames[0]).to_string();
+        if topic.starts_with('!') {
+            apply_control(&topic, &frames[2], &index);
+        } else {
+            apply_frames(&frames, &index);
+        }
     }
+}
+
+/// Handle index-service control topics (see [`kv_sink_loop`]).
+fn apply_control(topic: &str, payload: &[u8], index: &PrefixIndex) {
+    if let Some(model) = topic.strip_prefix("!reset/") {
+        index.clear_model(model);
+        return;
+    }
+    if let Some(rest) = topic.strip_prefix("!snapshot/") {
+        if let Some((model, replica)) = rest.rsplit_once('/') {
+            if let Ok(replica) = replica.parse::<u32>() {
+                let events = parse_batch(payload);
+                index.apply(model, replica, &events, now_ms());
+            }
+        }
+    }
+}
+
+/// Encode one msgpack batch `[ts, [BlockStored(map), ...], 0]` carrying the
+/// given canonical 8-byte keys — the index service's snapshot wire form
+/// (parses back through the regular map-form path).
+pub fn encode_stored_batch(keys: &[Vec<u8>]) -> Vec<u8> {
+    use rmpv::encode::write_value;
+    let events: Vec<rmpv::Value> = keys
+        .chunks(512)
+        .map(|chunk| {
+            rmpv::Value::Map(vec![
+                (rmpv::Value::from("type"), rmpv::Value::from("BlockStored")),
+                (
+                    rmpv::Value::from("block_hashes"),
+                    rmpv::Value::Array(
+                        chunk
+                            .iter()
+                            .map(|k| rmpv::Value::Binary(k.as_slice().into()))
+                            .collect(),
+                    ),
+                ),
+                (rmpv::Value::from("medium"), rmpv::Value::from("GPU")),
+            ])
+        })
+        .collect();
+    let batch = rmpv::Value::Array(vec![
+        rmpv::Value::from(0.0_f64),
+        rmpv::Value::Array(events),
+        rmpv::Value::from(0u64),
+    ]);
+    let mut buf = Vec::new();
+    let _ = write_value(&mut buf, &batch);
+    buf
+}
+
+/// Build a fresh PUB pusher connected to all sinks (see the rebuild note
+/// in [`kv_events_loop`]).
+pub async fn connect_pusher(push_to: &[String]) -> zeromq::PubSocket {
+    use zeromq::Socket;
+    let mut pusher = zeromq::PubSocket::with_options(zeromq::SocketOptions::default());
+    for addr in push_to {
+        if let Err(e) = pusher.connect(addr).await {
+            tracing::warn!(addr = %addr, error = %e, "fanout connect failed");
+        }
+    }
+    pusher
 }
 
 fn apply_frames(frames: &[bytes::Bytes], index: &PrefixIndex) {
@@ -541,6 +647,52 @@ mod tests {
         let mut req = [0u8; 32];
         req[24..].copy_from_slice(&1015703622044383654u64.to_be_bytes());
         assert_eq!(idx.lookup("m", &[req]), Some(1));
+    }
+
+    #[test]
+    fn snapshot_roundtrip_via_control_topics() {
+        // Build an index across two replicas, snapshot it, wipe, restore via
+        // the control-topic path (!reset + !snapshot/...) — lookups identical.
+        let idx = PrefixIndex::new();
+        let k = |b: u8| vec![b; 8];
+        idx.apply(
+            "m",
+            0,
+            &[KvEvent::Stored {
+                block_hashes: vec![k(0xaa), k(0xbb)],
+                medium: None,
+            }],
+            100,
+        );
+        idx.apply(
+            "m",
+            1,
+            &[KvEvent::Stored {
+                block_hashes: vec![k(0xcc)],
+                medium: None,
+            }],
+            100,
+        );
+        let snap = idx.snapshot_for("m");
+        assert_eq!(snap.len(), 2);
+
+        let restored = PrefixIndex::new();
+        apply_control("!reset/m", &[], &restored);
+        for (replica, keys) in &snap {
+            let payload = encode_stored_batch(keys);
+            apply_control(&format!("!snapshot/m/{replica}"), &payload, &restored);
+        }
+        let mut any = [0u8; 32];
+        any[24..].copy_from_slice(&[0xaa; 8]);
+        let mut deep = [0u8; 32];
+        deep[24..].copy_from_slice(&[0xcc; 8]);
+        assert_eq!(restored.lookup("m", &[any]), Some(0));
+        assert_eq!(restored.lookup("m", &[deep]), Some(1));
+        assert_eq!(restored.len(), 3);
+
+        // Replace semantics: reset alone clears.
+        apply_control("!reset/m", &[], &restored);
+        assert_eq!(restored.len(), 0);
     }
 
     #[test]

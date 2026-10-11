@@ -251,9 +251,9 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 | 1.3 | 亲和可观测（`prefix_index_hit_ratio` + 前缀热度 top-N：BFF API + 控制台卡片） | ⏳ | 控制台可回答亲和收益与前缀热度 |
 | 1.4 | HA 扇出（多 Router 共享事件流；索引元数据不进 etcd 热路径） | ⏳ | 双 Router 实例一致命中 |
 
-### Batch 2：全局 KV 索引服务（P1，依赖 1.4）
+### Batch 2：全局 KV 索引服务（P1，依赖 1.4）✅ 2026-10-11
 
-- `PrefixIndex` 提升为独立组件（nebula-meta 旁挂），Router/嵌入式网关共享 lookup；索引服务故障 → 各 Router 本地兜底降级（可见）。
+- `nebula-indexd`（nebula-router crate 内独立二进制）：引擎唯一稳定端点 → 权威索引 → 原始帧 + 周期快照推送到所有 Router sink；热路径零依赖，故障降级可见。本地验收 4/4（转发/自愈/降级/双 Router 一致）。细节见 prefix-affinity.md §5.8。
 
 ### Batch 3：引擎版本策略 + PD 编排（S2 前置，节奏由引擎调研决定）
 
