@@ -115,6 +115,11 @@ impl PrefixIndex {
         self.inserts_total.load(Ordering::Relaxed)
     }
 
+    /// Gauge for /metrics: live index entries (routing hints).
+    pub fn entries(&self) -> usize {
+        self.map.len()
+    }
+
     pub fn apply(&self, model_uid: &str, replica_id: u32, events: &[KvEvent], now_ms: u64) {
         // Canonical 8-byte external keyspace (see hash_to_key).
         let canon = |h: &Vec<u8>| -> Vec<u8> {

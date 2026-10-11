@@ -257,6 +257,11 @@ impl Router {
         &self.prefix_index
     }
 
+    /// Live prefix-index entry count (routing hints learned from KV events).
+    pub fn prefix_index_entries(&self) -> usize {
+        self.prefix_index.entries()
+    }
+
     /// Tokenize `prompt` (via the model's tokenizer, when configured) and
     /// chain its vLLM-compatible block hashes.
     pub fn prompt_hashes(&self, model_uid: &str, prompt: &str) -> Option<Vec<[u8; 32]>> {

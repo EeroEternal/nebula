@@ -278,6 +278,12 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         "nebula_router_affinity_hit_total{{kind=\"prefix_hint\"}} {}\n",
         st.router.prefix_hint_hit_total(),
     ));
+    body.push_str(&format!(
+        "# HELP nebula_router_prefix_index_entries Live prefix-index entries (KV-event routing hints).\n\
+         # TYPE nebula_router_prefix_index_entries gauge\n\
+         nebula_router_prefix_index_entries {}\n",
+        st.router.prefix_index_entries(),
+    ));
     body.push_str(
         "# HELP nebula_router_strategy_fallback_total Strategy selections that fell back to least_pending, by reason.\n\
          # TYPE nebula_router_strategy_fallback_total counter\n",
