@@ -68,13 +68,26 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
 ### 7.2 决策
 
 1. **PD 传输主路径 = LMCache**。理由：vLLM 官方 disagg 示例即 lmcache（`examples/disaggregated/lmcache/`，双镜像都带）；传输在 torch tensor 层（D2H → TCP/本地/远端），**不绑传输库与 GPU 厂商**；与 P1c 同源的 block-hash 语义（前缀定位与 KV 对象定位一套键）。
-2. **高吞吐备选 = Mooncake（TCP backend）**；RDMA 属可选增强，不作为部署前提。
-3. **排除**：NIXL（用户决策）、p2p_nccl（NVIDIA 专属）、hf3fs/flexkv/moriio（特定基础设施）。
+2. **排除**：NIXL（用户决策，Dynamo 系）、Mooncake（用户决策，收敛到 LMCache 单路径）、p2p_nccl（NVIDIA 专属）、hf3fs/flexkv/moriio（特定基础设施）。
 4. **引擎版本钉死：vLLM v0.23.x**。CUDA 用 `vllm/vllm-openai:v0.23.0`；昇腾用 `vllm-ascend v0.23.0rc1+`。理由：kv-events 线上格式已在 v0.23 上字节级校准（§5.2 的 map-form/int-hash 学费），connector 集合双硬件同构。升级版本前必须重跑 prefix-affinity §5 的校准流程。
+
+
+
+### 7.4 CUDA 侧 LMCache TCP PD 实测（2026-10-11，8×5090）
+
+按官方 `disagg_prefill_lmcache_v1` 示例（v0.23.0 镜像，lmcache 0.4.6），GPU0=producer / GPU1=consumer + disagg_proxy：
+
+- ✅ **引擎可启动**：`enable_nixl: False` 时 LMCache StorageManager 强制要求 `LocalCPUBackend` 分配器（官方示例默认 nixl 才关了 local_cpu）——**配置修正**：`local_cpu: True` + `max_local_cpu_size: 4`，两个角色均正常起服。LMCache 的 RPC/lookup 层本身是 **zmq**（`lmcache/v1/rpc_utils.py`），纯 TCP。
+- ❌ **首请求 consumer EngineCore 崩溃**：`request_finished → assert self.lmcache_engine is not None`（`lmcache/integration/vllm/vllm_v1_adapter.py:1783`）。init 无报错、但请求期引擎句柄为空——疑似 0.4.6 实验性 v1 disagg（需 `LMCACHE_USE_EXPERIMENTAL=True`）在无 NIXL 路径的 lifecycle bug，或缺少未在示例中说明的 lookup 辅助服务。
+- **结论**：LMCache 是唯一路径的决策不变，但 **v0.23.0+lmcache0.4.6 的无 NIXL PD 尚不可用**；下一步（按优先级）：
+  1. 升级 lmcache（0.4.7+/0.5）重试同配置；
+  2. 向 LMCache 上游报 issue（有完整复现：配置 + 断言栈）；
+  3. 备选形态：LMCache **共享存储模式**（producer 存 → 共享 fs/远端 → consumer 取，非进程间直传）——同样硬件中立，且更贴 S3 分层路线。
+- **Nebula 侧无需 Rust 重写**：LMCache 是引擎进程内的 KV 面，nebula 的边界仍是"控制面 + 路由"（启动参数/角色/放置 + P1c 索引），KV 字节永远不经过 nebula。重写 LMCache 于 Rust = 重写引擎侧组件，违反引擎零侵入原则，无路由收益。
 
 ### 7.3 待验证（PD 实现的前置）
 
 - [ ] 昇腾真机（arm64 + NPU）：`pip install lmcache` + LMCacheConnector PD e2e——rig 的昇腾镜像是 arm64 无法在 x86 主机执行，需昇腾机器。
-- [ ] CUDA 侧最小 PD 验证：1 producer + 1 consumer（LMCache TCP），确认 `--kv-transfer-config` 角色语义与 nebula 放置的映射。
+- [x] CUDA 侧最小 PD 验证（2026-10-11，见 §7.4）：角色语义确认（producer/consumer + disagg_proxy 前置），无 NIXL 路径待 lmcache 修复/升级。
 - [ ] nebula 侧设计：`replica_specs` 角色字段（prefill/decode/混合）+ connector 参数进 ModelSpec（adapter 声明能力，不走 Router 分支）——`pool.md` 扩展后评审。
 
