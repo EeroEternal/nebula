@@ -72,12 +72,20 @@
 
 - 执行面设 `NEBULA_KV_EVENTS_ENDPOINT`（router 的 SUB 地址）→ node 与 k8s-controller 为 vLLM 副本追加 `--kv-events-config {…}` **并**注入 `PYTHONHASHSEED=$NEBULA_KV_HASH_SEED` + `--prefix-caching-hash-algo sha256_cbor`（见 §5.2，缺一则路由永不命中）。
 
-### 5.6 验收（待 GPU 修复后真机）
+### 5.6 验收（✅ 真机完成，2026-10-11，8×5090）
 
-重跑 §3 协议：`/v1/completions`、`prefix_repetition`（prefix 2048 / suffix 128 / 4 prefixes）、2 副本、C=16、N=256、**交错**对比 `least_pending` vs `prefix_affinity`。预期：命中请求跳过 2048 token prefill，TTFT 显著下降；若无效，这次信号/回退全程可观测，结论可信。
+**协议**：`/v1/completions`、96 个共享前缀 × 2048 token / suffix 128 token、C=16、N=512、`stream=true` 测 TTFT、**每轮冷启动引擎**（消除预热假象，§3 的教训）、交错 A/B。
 
-**已在无 GPU 环境完成的真机校准**（部署镜像 v0.23.0，runc 容器）：事件 msgpack 帧格式、hash 链算法与 seed 行为均已用真实库调用/真实 zmq 字节流验证并固化为回归测试。GPU e2e 阻塞于宿主机 nvidia 驱动损坏（`nvidia-smi` NVML mismatch、`/run/nvidia-persistenced/socket` 缺失，需管理员修复/重启）。
+| 轮 | 策略 | req/s | TTFT mean | TTFT p50 | TTFT p99 |
+|----|------|-------|-----------|----------|----------|
+| A3 | least_pending | 13.73 | 568.5 ms | 455.1 ms | 2140 ms |
+| B3 | prefix_affinity | **23.86（+74%）** | **308.0（−46%）** | **143.9（−68%）** | 2151 ms |
 
+- B3 期间索引峰值 ~18.8k 条目（`nebula_router_prefix_index_entries` gauge）；no_signal 仅 102/520（冷启动首触期），此后全命中。
+- **机制**：亲和让每个前缀的 KV 只驻留一份（least_pending 在两副本各存一份，有效缓存容量减半）→ 高前缀数量下命中率差距放大。这正是 Dynamo/llm-d 的 cache-aware routing 收益来源。
+- 过程中修掉的两个真 bug（不看真机不可能发现）：① spec 更新触发 Router DashMap get+remove 同键死锁（整进程冻结）；② **线上引擎实际发 msgpack MAP 形式事件**（`{"type":"BlockStored",...}`），与容器内直接构造 struct 的 tagged-array 形式不同——原 parser 静默丢弃全部事件。两种格式均已支持并各有真实帧回归 fixture。
+- **运营要求**（缺一则永不命中）：引擎 `PYTHONHASHSEED` 固定 + `--prefix-caching-hash-algo sha256_cbor`（node/controller 已自动注入）+ router 同 seed（`NEBULA_KV_HASH_SEED`）+ tokenizer 目录（`NEBULA_ROUTER_TOKENIZER_DIR`）。
+- **已知边界**：router 重启后索引清零（PUB/SUB 无重放，且引擎缓存命中不再发事件）——冷启动期回落 least_pending（可见）；vLLM publisher 有 replay 端点可后续接入。chat body 不 hash（模板缺口）。
 ## 6. P1 收尾验证（2026-09-21，8×5090）
 
 | 项 | 结果 |
