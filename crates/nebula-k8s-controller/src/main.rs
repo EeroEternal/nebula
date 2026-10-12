@@ -60,8 +60,15 @@ async fn reconcile_once(
     let deps = store.list_prefix("/deployments/").await?;
 
     for (_k, v, _rev) in deps {
-        let Ok(dep) = serde_json::from_slice::<ModelDeployment>(&v) else {
-            continue;
+        let dep = match serde_json::from_slice::<ModelDeployment>(&v) {
+            Ok(dep) => dep,
+            Err(e) => {
+                // Never skip silently: an unparseable deployment means this
+                // agent manages nothing for that model (see the pd_split
+                // snake_case wire-format incident, 2026-10-12).
+                tracing::warn!(key = %_k, error = %e, "deployment spec unparseable; skipping");
+                continue;
+            }
         };
 
         let model_uid = dep.model_uid.clone();
@@ -385,11 +392,17 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         .unwrap_or("/opt/powerllm/worker/data/models/Qwen2.5-7B-Instruct");
 
     let is_sglang = engine_type.eq_ignore_ascii_case("sglang");
-    let image = if is_sglang {
+    // Honour the spec's pinned image (compat-matrix/baked-digest discipline,
+    // review #4). Falling back to a floating `:latest` made deployments
+    // depend on registry availability and silently drift from the pin.
+    let default_image = if is_sglang {
         "lmsysorg/sglang:latest"
     } else {
-        "vllm/vllm-openai:latest"
+        "vllm/vllm-openai:v0.23.0"
     };
+    let image = spec
+        .and_then(|s| s.docker_image.as_deref())
+        .unwrap_or(default_image);
     let mut args = if is_sglang {
         json!([
             "-m",

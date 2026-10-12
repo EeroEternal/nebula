@@ -16,6 +16,7 @@ pub enum DesiredState {
 /// `mixed` = full-request serving (today's behavior); `prefill`/`decode` =
 /// role-biased with shared KV. serde default = mixed for backward compat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum ReplicaRole {
     #[default]
     Mixed,
@@ -25,6 +26,7 @@ pub enum ReplicaRole {
 
 /// Deployment topology (pool.md §pd_split v1.1). Default = replicated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum DeploymentTopology {
     #[default]
     Replicated,
@@ -392,6 +394,42 @@ mod tests {
         // valid JSON
         serde_json::from_str::<serde_json::Value>(&pf).expect("valid json");
         serde_json::from_str::<serde_json::Value>(&dec).expect("valid json");
+    }
+
+    /// Wire format is the documented contract (pool.md): lowercase
+    /// `prefill`/`decode`/`mixed` and `pd_split` — the rig controller
+    /// rejected the deployment when this mismatched (serde default is
+    /// PascalCase), silently creating no pods.
+    #[test]
+    fn role_and_topology_wire_format_is_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ReplicaRole::Prefill).unwrap(),
+            "\"prefill\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReplicaRole::Decode).unwrap(),
+            "\"decode\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReplicaRole::Mixed).unwrap(),
+            "\"mixed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&DeploymentTopology::PdSplit).unwrap(),
+            "\"pd_split\""
+        );
+        let d: ModelDeployment = serde_json::from_str(
+            r#"{"model_uid":"m","desired_state":"running","replicas":2,
+                "replica_specs":[{"role":"prefill"},{"role":"decode"}],
+                "topology":"pd_split",
+                "kv_sharing":{"remote_url":"lm://h:1"}}"#,
+        )
+        .unwrap();
+        assert_eq!(d.topology, Some(DeploymentTopology::PdSplit));
+        assert_eq!(
+            d.replica_specs.as_ref().unwrap()[1].role,
+            Some(ReplicaRole::Decode)
+        );
     }
 
     #[test]
