@@ -716,6 +716,23 @@ impl Router {
             candidates_data = non_overloaded;
         }
 
+        let prefix_owner = prefix_hashes.and_then(|hs| {
+            if hs.is_empty() {
+                return None;
+            }
+            let entry = self
+                .prefix_lookup
+                .entry(model_uid.to_string())
+                .or_insert_with(|| (AtomicU64::new(0), AtomicU64::new(0)));
+            let (l, h) = entry.value();
+            l.fetch_add(1, Ordering::Relaxed);
+            let owner = self.prefix_index.lookup(model_uid, hs);
+            if owner.is_some() {
+                h.fetch_add(1, Ordering::Relaxed);
+            }
+            owner
+        });
+
         // pd_split stage routing (pool.md §pd_split v1.1): when any candidate
         // declares a role, cold traffic goes to the prefill pool (which writes
         // KV into the shared store) and session-continued traffic to the
@@ -726,6 +743,15 @@ impl Router {
             .iter()
             .any(|(ep, _)| ep.role != ReplicaRole::Mixed)
         {
+            // "Warm" = the shared KV store already holds this prefix, which
+            // the prefix index tells us (any replica's BlockStored event means
+            // the prefix is retrievable from the store). Warm traffic goes to
+            // the decode pool (cheap retrieve); cold traffic to the prefill
+            // pool so the KV gets written. A session already anchored on a
+            // decode replica is warm by definition.
+            //
+            // Review #5 applies to a different question — which decode replica
+            // holds it *locally* — that needs the multi-owner index (v1.1).
             let affinity_on_decode = ctx
                 .session_id
                 .as_ref()
@@ -736,7 +762,8 @@ impl Router {
                     })
                 })
                 .unwrap_or(false);
-            let want = if affinity_on_decode {
+            let warm = prefix_owner.is_some() || affinity_on_decode;
+            let want = if warm {
                 ReplicaRole::Decode
             } else {
                 ReplicaRole::Prefill
@@ -771,22 +798,6 @@ impl Router {
             })
             .collect();
 
-        let prefix_owner = prefix_hashes.and_then(|hs| {
-            if hs.is_empty() {
-                return None;
-            }
-            let entry = self
-                .prefix_lookup
-                .entry(model_uid.to_string())
-                .or_insert_with(|| (AtomicU64::new(0), AtomicU64::new(0)));
-            let (l, h) = entry.value();
-            l.fetch_add(1, Ordering::Relaxed);
-            let owner = self.prefix_index.lookup(model_uid, hs);
-            if owner.is_some() {
-                h.fetch_add(1, Ordering::Relaxed);
-            }
-            owner
-        });
         let sel_ctx = SelectionCtx {
             prefix_owner,
             _marker: std::marker::PhantomData,
@@ -1015,18 +1026,38 @@ mod plan_version_tests {
     }
 
     /// pd_split stage routing: cold traffic → prefill pool; session-continued
-    /// traffic (anchored on a decode replica) → decode pool.
+    /// traffic (anchored on a decode replica) -> decode pool.
     #[test]
-    fn pd_split_routes_cold_to_prefill_and_session_to_decode() {
+    fn pd_split_stage_routing() {
         let router = Router::new();
         router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
         router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
 
-        // Cold (no session) → prefill pool.
+        // Cold → prefill pool (writes KV into the shared store).
         let ep = router.route(&ctx_with_session(None), "m1", None).unwrap();
         assert_eq!(ep.replica_id, 0);
 
-        // Anchor the session on the decode replica; repeated traffic → decode.
+        // Prefix already in the shared store → decode pool (retrieves).
+        let h: [u8; 32] = [9; 32];
+        router.prefix_index().apply(
+            "m1",
+            0,
+            &[kv_events::KvEvent::Stored {
+                block_hashes: vec![h.to_vec()],
+                medium: None,
+            }],
+            1,
+        );
+        let ep = router
+            .route(
+                &ctx_with_session(None),
+                "m1",
+                Some(std::slice::from_ref(&h)),
+            )
+            .unwrap();
+        assert_eq!(ep.replica_id, 1, "warm prefix should go to the decode pool");
+
+        // Session anchored on the decode replica → decode.
         router
             .session_affinity
             .insert("s1".into(), ("m1".into(), 1));

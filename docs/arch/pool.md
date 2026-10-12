@@ -153,11 +153,15 @@ Deployment(topology, kv_sharing, replica_specs[].role)
 ### 路由语义（Router v1，评审 #1/#5 修正）
 
 ```
-stage = session_affinity 命中（仅限 decode-role 副本）→ decode
-        否则 → prefill（冷流量先入 prefill 池，保证 KV 进共享存储）
+warm  = 前缀索引命中（共享存储已持有该前缀，任意副本的 Stored 即证明可检索）
+        或 session_affinity 锚定在 decode 副本
+stage = warm → decode 池（便宜地 retrieve）
+        否则 → prefill 池（先把 KV 写进共享存储）
 候选 = endpoints[model] 按 stage 过滤 role；空池 → 回落全体（stage_fallback_total 计数）
 池内选择 v1 = least_pending
 ```
+
+**实现修正（2026-10-12，rig 验证时发现）**：初版实现只看 session affinity，导致冷流量进 prefill 后被锚定、**decode 池永不可达**。正确信号是前缀索引命中——它回答的是"共享存储里有没有这个前缀"（store-level 事实），而不是"哪个 decode 副本本地持有"（review #5 的问题，仍需多 owner 索引，v1.1）。索引与共享 KV 共用同一 block-hash 键空间，故可直接复用（P1c 与 pd_split 的协同点）。
 
 - session affinity 的锚定域限制在 decode 池内（首次命中 prefill 不锚定 prefill）。
 - **P1c 在 v1 不承担 decode 池内本地命中优先**：现索引每 hash 单 owner，prefill 的 Stored 会覆盖 decode 的 owner，角色过滤后必回落（评审 #5 指出）。多 owner 索引（`(model,hash) → {replica: ts}`，查询限定候选集；区分 GPU 本地持有 vs 远端已写入两个信号）为 **v1.1 项**，届时 `prefix_affinity` 才在 decode 池内恢复本地优先语义；replicated 拓扑下 P1c 行为不变。
