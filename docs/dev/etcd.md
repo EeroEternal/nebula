@@ -60,4 +60,6 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 
 | Key 前缀 | 预期写者 | 说明 |
 |----------|----------|------|
-| `/pools/{pool_id}` | BFF | L2 HardwarePool；设计见 [`../arch/pool.md`](../arch/pool.md)；落地前勿先写生产 |
+| （无） | | |
+
+> `/pools/{pool_id}`（L2 HardwarePool，BFF 写、Scheduler 读）**已实现 CRUD**（`nebula-control/src/pool.rs`，v1.8.0 L2 池化）；放置侧硬过滤按 [`../arch/pool.md`](../arch/pool.md) P2a 推进。

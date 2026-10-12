@@ -1,6 +1,6 @@
 # nebula
 
-Nebula 是本地 / 专有化推理环境的跨引擎控制面（Gateway / Router / Scheduler / Node / BFF）：默认 **Engine-Passthrough**（Gateway → Router → vLLM / SGLang 原生 HTTP），权威状态在 etcd。当前发布 **v1.8.0**。
+Nebula 是本地 / 专有化推理环境的跨引擎控制面（Gateway / Router / Scheduler / Node / BFF）：默认 **Engine-Passthrough**（Gateway → Router → vLLM / SGLang 原生 HTTP），权威状态在 etcd。当前发布 **v1.10.0**。
 
 ## 快速开始
 

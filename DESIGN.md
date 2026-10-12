@@ -1,3 +1,16 @@
+# Nebula 视觉设计（已归档）
+
+> **本文件已归档（2026-10-12）。** 唯一的 UI 设计入口是 [`docs/design.md`](docs/design.md)
+>（章节在 [`docs/design/`](docs/design/)，经 skill `admin-ui-change` 按需加载）。
+>
+> 归档原因：本文件与 `docs/design.md` 存在冲突（本文件定义 OKLch/电青色/发光边框的
+> "Tech Utility" 风格；实际前端使用 HSL 蓝色系、遵循 docs/design.md 的克制规范）。
+> 保留此文件仅供历史参考，**不作为实现依据**；任何 UI 改动以 `docs/design.md` 为准。
+
+---
+
+以下为归档原文。
+
 # Nebula Visual Design System
 
 This document solidifies the design language for **Nebula**, the Universal Model Plane and LLM Service Mesh. It follows the "Tech Utility" aesthetic, prioritizing high information density, technical precision, and architectural transparency.
