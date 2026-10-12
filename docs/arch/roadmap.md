@@ -268,7 +268,7 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 | # | 任务 | 状态 |
 |---|------|------|
 | A1 | **嵌入式路由接线修复**：KV-event 运行时（ingest/sink/TTL）抽成 `start_kv_runtime` 共享函数，独立 Router 与 Gateway 嵌入式模式共用；端到端一致性测试（合成事件流 → 索引进索引） | ✅ 2026-10-12 |
-| A2 | 控制台真实化：Endpoints 页固定值（协议数/健康度）改按实际状态计算；前缀亲和卡定时刷新；区分健康/降级/未知/过期 | ⏳ |
+| A2 | 控制台真实化：Endpoints 页固定值（协议数/健康度）改按实际状态计算；前缀亲和卡定时刷新；区分健康/降级/未知/过期 | ✅ 2026-10-12 |
 | A3 | 配额语义边界：queue-admission.md 明确"进程级保护 ≠ 集群配额"；双 Gateway + 热点租户 + 长流式测试佐证边界 | ⏳ |
 | A4 | 文档收敛：README/positioning 版本对齐 workspace、etcd.md 池条目更新、根 DESIGN.md 与 docs/design.md 归一 | ⏳ |
 
