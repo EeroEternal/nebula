@@ -384,6 +384,8 @@ export interface GatewayPrefixAffinity {
   index_entries: number
   models: GatewayPrefixAffinityModel[]
   fallback: Record<string, number>
+  /** pd_split stage-pool fallbacks (prefill/decode). */
+  stage_fallback?: Record<string, number>
 }
 
 export interface AuthUser {

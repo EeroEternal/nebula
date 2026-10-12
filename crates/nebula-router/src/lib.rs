@@ -5,6 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use nebula_common::{
     EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext, InferenceHint, ModelSpec,
+    ReplicaRole,
 };
 
 pub mod kv_events;
@@ -97,6 +98,9 @@ pub struct Router {
     prefix_hasher: prompt_hash::PromptHasher,
     /// P1c affinity observability: model → (lookups, hits).
     prefix_lookup: DashMap<String, (AtomicU64, AtomicU64)>,
+    /// pd_split stage-pool fallbacks (empty role pool → all candidates).
+    stage_prefill_fallback_total: AtomicU64,
+    stage_decode_fallback_total: AtomicU64,
     stats_max_age_ms: u64,
     circuit_failure_threshold: u32,
     circuit_open_ms: u64,
@@ -159,6 +163,8 @@ impl Router {
             prefix_index: kv_events::PrefixIndex::new(),
             prefix_hasher: prompt_hash::PromptHasher::from_env(),
             prefix_lookup: DashMap::new(),
+            stage_prefill_fallback_total: AtomicU64::new(0),
+            stage_decode_fallback_total: AtomicU64::new(0),
             stats_max_age_ms,
             circuit_failure_threshold,
             circuit_open_ms,
@@ -278,6 +284,13 @@ impl Router {
                 )
             })
             .collect()
+    }
+
+    pub fn stage_fallback_total(&self, stage: &'static str) -> u64 {
+        match stage {
+            "decode" => self.stage_decode_fallback_total.load(Ordering::Relaxed),
+            _ => self.stage_prefill_fallback_total.load(Ordering::Relaxed),
+        }
     }
 
     /// Live index entries per model (metrics scrapes only, O(n)).
@@ -703,6 +716,53 @@ impl Router {
             candidates_data = non_overloaded;
         }
 
+        // pd_split stage routing (pool.md §pd_split v1.1): when any candidate
+        // declares a role, cold traffic goes to the prefill pool (which writes
+        // KV into the shared store) and session-continued traffic to the
+        // decode pool (which retrieves). An empty pool falls back to all
+        // candidates behind a visible counter. Replicated deployments never
+        // enter this branch (all roles Mixed).
+        if candidates_data
+            .iter()
+            .any(|(ep, _)| ep.role != ReplicaRole::Mixed)
+        {
+            let affinity_on_decode = ctx
+                .session_id
+                .as_ref()
+                .and_then(|sid| self.session_affinity.get(sid).map(|e| e.value().clone()))
+                .map(|(m, r)| {
+                    candidates_data.iter().any(|(ep, _)| {
+                        ep.model_uid == m && ep.replica_id == r && ep.role == ReplicaRole::Decode
+                    })
+                })
+                .unwrap_or(false);
+            let want = if affinity_on_decode {
+                ReplicaRole::Decode
+            } else {
+                ReplicaRole::Prefill
+            };
+            let pool: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
+                .iter()
+                .filter(|(ep, _)| ep.role == want)
+                .cloned()
+                .collect();
+            if pool.is_empty() {
+                let counter = if want == ReplicaRole::Decode {
+                    &self.stage_decode_fallback_total
+                } else {
+                    &self.stage_prefill_fallback_total
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    model_uid = %model_uid,
+                    stage = ?want,
+                    "pd_split role pool empty; falling back to all candidates"
+                );
+            } else {
+                candidates_data = pool;
+            }
+        }
+
         let candidates: Vec<Candidate> = candidates_data
             .iter()
             .map(|(ep, s)| Candidate {
@@ -932,6 +992,69 @@ mod plan_version_tests {
             router.strategy_fallback_total("least_kv_cache", "below_threshold"),
             0
         );
+    }
+
+    fn ep_with_role(model: &str, replica: u32, role: ReplicaRole) -> EndpointInfo {
+        let mut ep = ready_ep(model, replica, 1);
+        ep.role = role;
+        ep
+    }
+
+    fn ctx_with_session(session: Option<&str>) -> ExecutionContext {
+        ExecutionContext {
+            request_id: "r".into(),
+            session_id: session.map(|s| s.to_string()),
+            tenant_id: None,
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+            pinned_replica_id: None,
+            inference_hint: None,
+            hint_trusted: false,
+        }
+    }
+
+    /// pd_split stage routing: cold traffic → prefill pool; session-continued
+    /// traffic (anchored on a decode replica) → decode pool.
+    #[test]
+    fn pd_split_routes_cold_to_prefill_and_session_to_decode() {
+        let router = Router::new();
+        router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
+        router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
+
+        // Cold (no session) → prefill pool.
+        let ep = router.route(&ctx_with_session(None), "m1", None).unwrap();
+        assert_eq!(ep.replica_id, 0);
+
+        // Anchor the session on the decode replica; repeated traffic → decode.
+        router
+            .session_affinity
+            .insert("s1".into(), ("m1".into(), 1));
+        let ep = router
+            .route(&ctx_with_session(Some("s1")), "m1", None)
+            .unwrap();
+        assert_eq!(ep.replica_id, 1);
+    }
+
+    #[test]
+    fn pd_split_empty_pool_falls_back_with_counter() {
+        let router = Router::new();
+        // Only a decode replica exists → cold traffic (wants prefill) falls back.
+        router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Decode));
+        let ep = router.route(&ctx_with_session(None), "m1", None).unwrap();
+        assert_eq!(ep.replica_id, 0);
+        assert_eq!(router.stage_fallback_total("prefill"), 1);
+        assert_eq!(router.stage_fallback_total("decode"), 0);
+    }
+
+    #[test]
+    fn replicated_ignores_stage_filtering() {
+        let router = Router::new();
+        router.upsert_endpoint(ready_ep("m1", 0, 1));
+        router.upsert_endpoint(ready_ep("m1", 1, 1));
+        let ep = router.route(&ctx_with_session(None), "m1", None).unwrap();
+        assert!(ep.replica_id <= 1);
+        assert_eq!(router.stage_fallback_total("prefill"), 0);
     }
 
     #[test]

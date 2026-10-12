@@ -1839,7 +1839,8 @@ nebula_route_ttft_seconds_bucket{model_uid="b",le="+Inf"} 2
             + "nebula_router_prefix_lookup_total{model_uid=\"m2\"} 10\n"
             + "nebula_router_prefix_hit_total{model_uid=\"m2\"} 0\n"
             + "nebula_router_strategy_fallback_total{strategy=\"prefix_affinity\",reason=\"no_signal\"} 8\n"
-            + "nebula_router_strategy_fallback_total{strategy=\"prefix_affinity\",reason=\"owner_unavailable\"} 2\n";
+            + "nebula_router_strategy_fallback_total{strategy=\"prefix_affinity\",reason=\"owner_unavailable\"} 2\n"
+            + "nebula_router_stage_fallback_total{stage=\"prefill\"} 3\n";
         let r = prefix_affinity_from_metrics(&text).unwrap();
         assert_eq!(r.index_entries, 42);
         assert_eq!(r.models.len(), 2);
@@ -1849,6 +1850,7 @@ nebula_route_ttft_seconds_bucket{model_uid="b",le="+Inf"} 2
         assert_eq!(r.models[1].hit_rate, 0.0);
         assert_eq!(r.fallback.get("no_signal"), Some(&8));
         assert_eq!(r.fallback.get("owner_unavailable"), Some(&2));
+        assert_eq!(r.stage_fallback.get("prefill"), Some(&3));
     }
 
     #[test]
@@ -1975,6 +1977,9 @@ pub struct PrefixAffinityResponse {
     /// strategy fallback counts by reason (no_signal / below_threshold /
     /// owner_unavailable) — visible degradation, not failures.
     pub fallback: std::collections::BTreeMap<String, u64>,
+    /// pd_split stage-pool fallbacks (prefill/decode) — empty role pool
+    /// routed to all candidates instead.
+    pub stage_fallback: std::collections::BTreeMap<String, u64>,
 }
 
 pub fn prefix_affinity_from_metrics(text: &str) -> Result<PrefixAffinityResponse, ServiceError> {
@@ -1983,6 +1988,7 @@ pub fn prefix_affinity_from_metrics(text: &str) -> Result<PrefixAffinityResponse
     // model → (lookups, hits, index_entries)
     let mut models: std::collections::BTreeMap<String, (u64, u64, u64)> = Default::default();
     let mut fallback: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut stage_fallback: std::collections::BTreeMap<String, u64> = Default::default();
 
     for line in text.lines() {
         if line.starts_with('#') {
@@ -2023,6 +2029,10 @@ pub fn prefix_affinity_from_metrics(text: &str) -> Result<PrefixAffinityResponse
             if let Some(reason) = extract_label_value(line, "reason") {
                 *fallback.entry(reason).or_insert(0) += value;
             }
+        } else if line.starts_with("nebula_router_stage_fallback_total{") {
+            if let Some(stage) = extract_label_value(line, "stage") {
+                *stage_fallback.entry(stage).or_insert(0) += value;
+            }
         }
     }
 
@@ -2048,5 +2058,6 @@ pub fn prefix_affinity_from_metrics(text: &str) -> Result<PrefixAffinityResponse
         index_entries,
         models,
         fallback,
+        stage_fallback,
     })
 }

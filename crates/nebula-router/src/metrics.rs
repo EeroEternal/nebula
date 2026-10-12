@@ -315,6 +315,16 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         "# HELP nebula_router_strategy_fallback_total Strategy selections that fell back to least_pending, by reason.\n\
          # TYPE nebula_router_strategy_fallback_total counter\n",
     );
+    body.push_str(
+        "# HELP nebula_router_stage_fallback_total pd_split stage-pool fallbacks (empty role pool -> all candidates).\n\
+         # TYPE nebula_router_stage_fallback_total counter\n",
+    );
+    for stage in ["prefill", "decode"] {
+        body.push_str(&format!(
+            "nebula_router_stage_fallback_total{{stage=\"{stage}\"}} {}\n",
+            st.router.stage_fallback_total(stage),
+        ));
+    }
     let strategy = st.router.strategy_name();
     for reason in ["no_signal", "below_threshold", "owner_unavailable"] {
         body.push_str(&format!(

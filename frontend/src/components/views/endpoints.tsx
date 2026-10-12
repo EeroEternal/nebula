@@ -143,7 +143,12 @@ export function EndpointsView() {
                                             <TableCell className="text-right text-sm">{m.hit_rate}%</TableCell>
                                             <TableCell className="text-right text-sm">{m.index_entries}</TableCell>
                                             <TableCell className="pr-5 text-right text-meta-sm text-muted-foreground">
-                                                {Object.entries(affinity.fallback)
+                                                {[
+                                                    ...Object.entries(affinity.fallback),
+                                                    ...Object.entries(affinity.stage_fallback ?? {}).map(
+                                                        ([k, v]) => [`stage:${k}`, v] as [string, number],
+                                                    ),
+                                                ]
                                                     .filter(([, v]) => v > 0)
                                                     .map(([k, v]) => `${k} ${v}`)
                                                     .join(' · ') || '—'}
