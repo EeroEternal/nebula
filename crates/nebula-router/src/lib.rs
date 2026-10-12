@@ -293,6 +293,15 @@ impl Router {
         }
     }
 
+    /// True when any endpoint of this model declares a pd_split role.
+    /// Cheap enough for the request path (a handful of replicas per model),
+    /// and only consulted when the strategy is not prefix_affinity.
+    pub fn model_has_role_pools(&self, model_uid: &str) -> bool {
+        self.endpoints
+            .iter()
+            .any(|e| e.key().0 == model_uid && e.value().role != ReplicaRole::Mixed)
+    }
+
     /// Live index entries per model (metrics scrapes only, O(n)).
     pub fn prefix_index_entries_by_model(&self) -> std::collections::HashMap<String, usize> {
         self.prefix_index.entries_by_model()
@@ -315,7 +324,12 @@ impl Router {
     /// token-exact against the engine on the rig). Only paid when the
     /// prefix_affinity strategy is active.
     pub fn body_prompt_hashes(&self, model_uid: &str, body: &[u8]) -> Option<Vec<[u8; 32]>> {
-        if self.strategy_name() != "prefix_affinity" {
+        // Needed for the prefix_affinity strategy AND for pd_split stage
+        // routing (the warm signal is a prefix-index hit). Rig finding
+        // 2026-10-12: gating this on the strategy alone left pd_split
+        // deployments with no warm signal, so every request went cold to the
+        // prefill pool and the decode pool was never used.
+        if self.strategy_name() != "prefix_affinity" && !self.model_has_role_pools(model_uid) {
             return None;
         }
         let v: serde_json::Value = serde_json::from_slice(body).ok()?;
@@ -1065,6 +1079,20 @@ mod plan_version_tests {
             .route(&ctx_with_session(Some("s1")), "m1", None)
             .unwrap();
         assert_eq!(ep.replica_id, 1);
+    }
+
+    /// Rig finding: pd_split stage routing needs prefix hashes even when the
+    /// strategy is not prefix_affinity — otherwise the warm signal is always
+    /// absent and the decode pool is never used.
+    #[test]
+    fn pd_split_model_computes_hashes_under_any_strategy() {
+        let router = Router::with_strategy(Box::new(strategy::LeastPending));
+        assert!(!router.model_has_role_pools("m1"));
+        router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
+        assert!(router.model_has_role_pools("m1"));
+        // Replicated model → hashing stays off for non-affinity strategies.
+        router.upsert_endpoint(ready_ep("m2", 0, 1));
+        assert!(!router.model_has_role_pools("m2"));
     }
 
     #[test]
