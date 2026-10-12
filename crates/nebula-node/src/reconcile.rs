@@ -384,6 +384,8 @@ async fn launch_replica_engine(
         engine_config_path: assignment.engine_config_path.clone(),
         extra_args: assignment.extra_args.clone(),
         ready_timeout: Duration::from_secs(args.ready_timeout_secs),
+        role: assignment.role,
+        kv_sharing: assignment.kv_sharing.clone(),
     };
 
     let handle = if let Some(h) = engine.try_reuse(&ctx).await {

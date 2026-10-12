@@ -25,6 +25,10 @@ pub struct EngineStartContext {
     pub engine_config_path: String,
     pub extra_args: Option<Vec<String>>,
     pub ready_timeout: Duration,
+    /// pd_split replica role (Mixed = replicated/today's behavior).
+    pub role: nebula_common::ReplicaRole,
+    /// pd_split shared-KV config (None for replicated).
+    pub kv_sharing: Option<nebula_common::KvSharingSpec>,
 }
 
 /// Handle to a running engine instance.

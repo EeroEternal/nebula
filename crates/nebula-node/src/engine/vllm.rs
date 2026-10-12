@@ -246,6 +246,29 @@ impl Engine for VllmEngine {
             seed
         });
 
+        // pd_split needs the same pinned seed even without kv-events, or the
+        // two roles' chunk keys diverge and the shared KV never matches.
+        let kv_hash_seed = kv_hash_seed.or_else(|| {
+            ctx.kv_sharing
+                .as_ref()
+                .map(|_| std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string()))
+        });
+
+        // pd_split (pool.md §pd_split v1.1): role-based LMCache injection.
+        // Same helpers as the k8s-controller — one source of truth. The seed
+        // must match the router's (NEBULA_KV_HASH_SEED) even when kv-events
+        // is not configured, so the two sides share one block-hash domain.
+        let mut kv_envs: Vec<(&'static str, String)> = Vec::new();
+        if let Some(kv) = ctx.kv_sharing.as_ref() {
+            if let Some(cfg) = nebula_common::kv_transfer_config(ctx.role) {
+                vllm_args.push("--kv-transfer-config".into());
+                vllm_args.push(cfg);
+                vllm_args.push("--prefix-caching-hash-algo".into());
+                vllm_args.push("sha256_cbor".into());
+            }
+            kv_envs = nebula_common::kv_sharing_env(ctx.role, kv);
+        }
+
         let mut cmd;
         let process_kind;
 
@@ -305,6 +328,9 @@ impl Engine for VllmEngine {
             if let Some(seed) = kv_hash_seed.as_deref() {
                 cmd.arg("-e").arg(format!("PYTHONHASHSEED={seed}"));
             }
+            for (k, v) in &kv_envs {
+                cmd.arg("-e").arg(format!("{k}={v}"));
+            }
 
             if use_wrapper {
                 cmd.arg("-e").arg("FLASHINFER_DISABLE_VERSION_CHECK=1");
@@ -362,6 +388,9 @@ impl Engine for VllmEngine {
             cmd.env("HF_HUB_DISABLE_XET", "1");
             if let Some(seed) = kv_hash_seed.as_deref() {
                 cmd.env("PYTHONHASHSEED", seed);
+            }
+            for (k, v) in &kv_envs {
+                cmd.env(k, v);
             }
             if let Some(ref indices) = ctx.gpu_indices {
                 let devs: Vec<String> = indices.iter().map(|i| i.to_string()).collect();

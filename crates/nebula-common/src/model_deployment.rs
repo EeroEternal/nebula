@@ -169,6 +169,53 @@ pub fn validate_replica_specs(replicas: u32, specs: &[ReplicaPlacementSpec]) -> 
     Ok(())
 }
 
+/// LMCache environment variables for a pd_split replica role.
+///
+/// Single source of truth for BOTH execution planes (k8s-controller pod env
+/// and node engine launch env) — engines.md §7.4 rig-verified values.
+/// `Mixed` returns empty (replicated deployments unchanged).
+pub fn kv_sharing_env(role: ReplicaRole, kv: &KvSharingSpec) -> Vec<(&'static str, String)> {
+    let mut env = vec![
+        ("LMCACHE_USE_EXPERIMENTAL", "True".to_string()),
+        ("LMCACHE_LOCAL_CPU", "True".to_string()),
+        ("LMCACHE_MAX_LOCAL_CPU_SIZE", "5".to_string()),
+        ("LMCACHE_REMOTE_URL", kv.remote_url.clone()),
+        ("LMCACHE_REMOTE_SERDE", kv.serde.clone()),
+    ];
+    match role {
+        ReplicaRole::Prefill => env.push(("LMCACHE_SAVE_UNFULL_CHUNK", "True".to_string())),
+        ReplicaRole::Decode => {
+            env.push(("LMCACHE_RETRIEVE_LOCATIONS", "RemoteBackend".to_string()))
+        }
+        ReplicaRole::Mixed => return Vec::new(),
+    }
+    env
+}
+
+/// `--kv-transfer-config` JSON for a pd_split replica role.
+///
+/// prefill → `kv_producer` (prefills and stores to the shared KV);
+/// decode → `kv_both` (retrieves, self-prefills on miss — correctness
+/// fallback verified on the rig). `Mixed` returns None.
+pub fn kv_transfer_config(role: ReplicaRole) -> Option<String> {
+    let (kv_role, rpc_port) = match role {
+        ReplicaRole::Prefill => ("kv_producer", "producer1"),
+        ReplicaRole::Decode => ("kv_both", "consumer1"),
+        ReplicaRole::Mixed => return None,
+    };
+    Some(
+        serde_json::json!({
+            "kv_connector": "LMCacheConnectorV1",
+            "kv_role": kv_role,
+            "kv_connector_extra_config": {
+                "discard_partial_chunks": false,
+                "lmcache_rpc_port": rpc_port,
+            }
+        })
+        .to_string(),
+    )
+}
+
 /// Shared validation for pd_split deployments (pool.md §pd_split v1.1).
 /// Called from BFF create/update AND CLI deploy — not BFF-only (assessment #4).
 ///
@@ -301,6 +348,50 @@ mod tests {
             version: 1,
             updated_at_ms: 0,
         }
+    }
+
+    #[test]
+    fn kv_sharing_env_matches_rig_verified_values() {
+        let kv = KvSharingSpec {
+            remote_url: "lm://h:6800".into(),
+            serde: "naive".into(),
+        };
+        let prefill = kv_sharing_env(ReplicaRole::Prefill, &kv);
+        let get = |env: &Vec<(&str, String)>, k: &str| {
+            env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+        };
+        assert_eq!(
+            get(&prefill, "LMCACHE_REMOTE_URL"),
+            Some("lm://h:6800".into())
+        );
+        assert_eq!(
+            get(&prefill, "LMCACHE_SAVE_UNFULL_CHUNK"),
+            Some("True".into())
+        );
+        assert_eq!(get(&prefill, "LMCACHE_RETRIEVE_LOCATIONS"), None);
+
+        let decode = kv_sharing_env(ReplicaRole::Decode, &kv);
+        assert_eq!(
+            get(&decode, "LMCACHE_RETRIEVE_LOCATIONS"),
+            Some("RemoteBackend".into())
+        );
+        assert_eq!(get(&decode, "LMCACHE_SAVE_UNFULL_CHUNK"), None);
+
+        // Mixed → no injection (replicated deployments unchanged)
+        assert!(kv_sharing_env(ReplicaRole::Mixed, &kv).is_empty());
+    }
+
+    #[test]
+    fn kv_transfer_config_roles() {
+        let pf = kv_transfer_config(ReplicaRole::Prefill).unwrap();
+        assert!(pf.contains("\"kv_role\":\"kv_producer\""), "{pf}");
+        assert!(pf.contains("LMCacheConnectorV1"));
+        let dec = kv_transfer_config(ReplicaRole::Decode).unwrap();
+        assert!(dec.contains("\"kv_role\":\"kv_both\""), "{dec}");
+        assert!(kv_transfer_config(ReplicaRole::Mixed).is_none());
+        // valid JSON
+        serde_json::from_str::<serde_json::Value>(&pf).expect("valid json");
+        serde_json::from_str::<serde_json::Value>(&dec).expect("valid json");
     }
 
     #[test]

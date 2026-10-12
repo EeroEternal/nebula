@@ -231,6 +231,13 @@ async fn ensure_replica_running(
     }
 
     let is_running = phase == "Running";
+    // pd_split role for this replica (Mixed when replicated).
+    let role = dep
+        .replica_specs
+        .as_ref()
+        .and_then(|specs| specs.get(replica_id as usize))
+        .and_then(|s| s.role)
+        .unwrap_or(nebula_common::ReplicaRole::Mixed);
     // Recreate when the pod is gone or in a terminal phase; keep waiting while
     // Pending (it is still starting).
     let need_create = !matches!(phase.as_str(), "Running" | "Pending");
@@ -238,7 +245,7 @@ async fn ensure_replica_running(
     if need_create {
         let gpu_index = replica_gpu_index(dep, replica_id);
         tracing::info!(model_uid=%model_uid, pod=%pod_name, replica_id, gpu_index, "creating k8s pod for replica");
-        create_engine_pod(
+        create_engine_pod(EnginePodSpec {
             namespace,
             gpu_node,
             model_uid,
@@ -246,7 +253,9 @@ async fn ensure_replica_running(
             gpu_index,
             engine_type,
             spec,
-        )?;
+            role,
+            kv_sharing: dep.kv_sharing.as_ref(),
+        })?;
     }
 
     if is_running && !pod_ip.is_empty() {
@@ -278,7 +287,7 @@ async fn ensure_replica_running(
                 grpc_target: None,
                 base_url: Some(base_url.clone()),
                 engine_type: Some(engine_type.to_string()),
-                role: Default::default(),
+                role,
             };
             let val = serde_json::to_vec(&ep)?;
             store.put(&ep_key, val, Some(15000)).await?;
@@ -344,15 +353,32 @@ async fn ensure_model_stopped(
     Ok(())
 }
 
-fn create_engine_pod(
-    namespace: &str,
-    gpu_node: &str,
-    model_uid: &str,
+/// Engine-pod creation inputs (grouped — keeps the call site readable and
+/// carries the pd_split fields: role + kv_sharing).
+struct EnginePodSpec<'a> {
+    namespace: &'a str,
+    gpu_node: &'a str,
+    model_uid: &'a str,
     replica_id: u32,
     gpu_index: u32,
-    engine_type: &str,
-    spec: Option<&ModelSpec>,
-) -> anyhow::Result<()> {
+    engine_type: &'a str,
+    spec: Option<&'a ModelSpec>,
+    role: nebula_common::ReplicaRole,
+    kv_sharing: Option<&'a nebula_common::KvSharingSpec>,
+}
+
+fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
+    let EnginePodSpec {
+        namespace,
+        gpu_node,
+        model_uid,
+        replica_id,
+        gpu_index,
+        engine_type,
+        spec,
+        role,
+        kv_sharing,
+    } = p;
     let pod_name = replica_pod_name(model_uid, replica_id);
     let host_model_path = spec
         .and_then(|s| s.model_path.as_deref())
@@ -412,6 +438,28 @@ fn create_engine_pod(
             kv_hash_seed = Some(seed);
         }
     }
+    // pd_split needs the same pinned seed even without kv-events, otherwise
+    // prefill/decode chunk keys diverge and the shared KV never matches
+    // (pool.md §pd_split v1.1 seed contract).
+    if kv_sharing.is_some() && kv_hash_seed.is_none() {
+        kv_hash_seed =
+            Some(std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string()));
+    }
+
+    // pd_split (pool.md §pd_split v1.1): role-based LMCache injection via the
+    // shared helpers — identical to the node plane (one source of truth).
+    let mut kv_envs: Vec<(&'static str, String)> = Vec::new();
+    if let Some(kv) = kv_sharing {
+        if let Some(cfg) = nebula_common::kv_transfer_config(role) {
+            if let Some(arr) = args.as_array_mut() {
+                arr.push(json!("--kv-transfer-config"));
+                arr.push(json!(cfg));
+                arr.push(json!("--prefix-caching-hash-algo"));
+                arr.push(json!("sha256_cbor"));
+            }
+        }
+        kv_envs = nebula_common::kv_sharing_env(role, kv);
+    }
 
     let mut container = json!({
         "name": "engine",
@@ -432,6 +480,11 @@ fn create_engine_pod(
     if let Some(seed) = kv_hash_seed.as_deref() {
         if let Some(envs) = container["env"].as_array_mut() {
             envs.push(json!({ "name": "PYTHONHASHSEED", "value": seed }));
+        }
+    }
+    if let Some(envs) = container["env"].as_array_mut() {
+        for (k, v) in &kv_envs {
+            envs.push(json!({ "name": k, "value": v }));
         }
     }
 
