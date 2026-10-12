@@ -83,10 +83,12 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
   - ✅ **disagg 编排全链路走通**：proxy + producer(GPU0) + consumer(GPU1)，HTTP 200、输出正确、暖态 **0.68s** 完整响应（prefill TTFT 46.8ms）；0.4.6 的崩溃修复。
   - ❌ **KV 实际未跨传**：consumer 侧 `LMCache hit tokens: 0, need to load: 0` + producer 侧 `Controller message sender is not initialized`——decoder 在重算前缀（正确性无恙，传输未发生）。根因（源码级）：`lmcache_rpc_port` 构造的是 **IPC（unix socket）路径组件**（`{base}/engine_{id}_service_lookup_lmcache_rpc_port_{p}`），producer 的 **lookup server** 未被拉起/接线——属 LMCache disagg v1 的文档化配置项（其仓库 examples），非 nebula 或代码缺陷。
 - **版本钉死更新**：vLLM v0.23.x + **lmcache ≥ 0.5.5**（0.4.6 无 NIXL 路径崩溃）。
-- **下一步（按优先级）**：
-  1. 按 LMCache 仓库 disagg v1 示例接线 lookup server（LMCACHE 环境变量/服务进程），复测 hit tokens > 0；
-  2. 仍不通则带完整复现报上游；
-  3. 备选形态：LMCache 共享存储模式（producer 存 → 共享 fs → consumer 取）——同样硬件中立且贴 S3 路线。
+- **✅ 线已接通（同日，`lm://` 远端 KV 存储形态）**：完整拓扑 = `lmcache_server 0.0.0.0 6800 cpu`（LMCache 自带远端 KV 存储服务，纯 TCP）+ 两个引擎 `remote_url: lm://localhost:6800`。实测（681-token prompt）：
+  - prefiller(GPU0) `Stored 681/681, 0.0364 GB, 0.93 GB/s` → 远端；
+  - decoder(GPU1) `hit 512, Retrieved 512/512, 0.0273 GB, 139ms(0.197 GB/s)` ← 远端，只重算尾部；
+  - **纯 TCP、零 NIXL、跨引擎**。此前的 hit=0 根因：短 prompt（26 tok）不满一个 chunk（chunk_size=256），decoder 标准路径不计命中——测试须用 ≥chunk 的 prompt。
+- **形态结论**：无 NIXL 时 LMCache 的正确 PD 形态是"**共享 KV 存储**"（prefill 池写 `lm://`、decode 池读），而非官方 proxy+kv_consumer 流程（那条路的直传通道在 0.5.5 只有 nixl）。这恰好更贴 nebula：路由与角色编排由 nebula 自己做（P1c 索引 + 角色化放置），不依赖上游 proxy。
+- ** Nebula 编排参数（Batch 3 实现输入）**：prefill 副本 = `kv_role: kv_producer` + store 远端；decode 副本 = `kv_role: kv_both` + `retrieve_locations: [RemoteBackend]`；共享 `PYTHONHASHSEED`（chunk key 一致）；`lmcache_server` 为部署新增组件（TCP，硬件无关，昇腾可用）。
 - **Nebula 侧无需 Rust 重写**：LMCache 是引擎进程内的 KV 面，nebula 的边界仍是"控制面 + 路由"（启动参数/角色/放置 + P1c 索引），KV 字节永远不经过 nebula。重写 LMCache 于 Rust = 重写引擎侧组件，违反引擎零侵入原则，无路由收益。
 
 ### 7.3 待验证（PD 实现的前置）
