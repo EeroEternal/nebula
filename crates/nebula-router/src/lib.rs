@@ -880,6 +880,7 @@ mod plan_version_tests {
             grpc_target: None,
             base_url: Some(format!("http://127.0.0.1:{}", 8000 + replica_id)),
             engine_type: None,
+            role: Default::default(),
         }
     }
 

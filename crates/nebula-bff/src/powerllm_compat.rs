@@ -424,6 +424,8 @@ pub async fn launch_instance_compat(
         allowed_pools: None,
         image_override_reason: None,
         compat_rule_ids: Vec::new(),
+        topology: None,
+        kv_sharing: None,
         version: 1,
         updated_at_ms: now,
     };

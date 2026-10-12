@@ -406,6 +406,8 @@ pub fn draft_from_candidate(
         allowed_pools: None,
         image_override_reason: Some("selection_draft".into()),
         compat_rule_ids: Vec::new(),
+        topology: None,
+        kv_sharing: None,
         version: 1,
         updated_at_ms: now_ms,
     };

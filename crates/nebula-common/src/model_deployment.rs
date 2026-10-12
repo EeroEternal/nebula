@@ -12,6 +12,40 @@ pub enum DesiredState {
     Stopped,
 }
 
+/// Per-replica role for pd_split topology (pool.md §pd_split v1.1).
+/// `mixed` = full-request serving (today's behavior); `prefill`/`decode` =
+/// role-biased with shared KV. serde default = mixed for backward compat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ReplicaRole {
+    #[default]
+    Mixed,
+    Prefill,
+    Decode,
+}
+
+/// Deployment topology (pool.md §pd_split v1.1). Default = replicated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DeploymentTopology {
+    #[default]
+    Replicated,
+    PdSplit,
+}
+
+/// Shared-KV orchestration params for pd_split (pool.md §pd_split v1.1).
+/// All values are the rig-verified defaults from engines.md §7.4.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvSharingSpec {
+    /// lm:// address of the lmcache_server (TCP, hardware-neutral).
+    pub remote_url: String,
+    /// v1 fixed "naive" (other values rejected until verified).
+    #[serde(default = "default_kv_serde")]
+    pub serde: String,
+}
+
+fn default_kv_serde() -> String {
+    "naive".to_string()
+}
+
 /// Per-replica placement desired state (subset of runtime `PlacementAssignment`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReplicaPlacementSpec {
@@ -23,6 +57,9 @@ pub struct ReplicaPlacementSpec {
     pub config_overrides: Option<ModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_id: Option<String>,
+    /// Role for pd_split topology (ignored when replicated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<ReplicaRole>,
 }
 
 /// Declares how a model should run — similar to a K8s Deployment spec.
@@ -79,6 +116,15 @@ pub struct ModelDeployment {
     /// Compatibility rule ids applied when this deployment was last validated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compat_rule_ids: Vec<String>,
+
+    /// Deployment topology. `None` = replicated (today's behavior).
+    /// `pd_split` requires kv_sharing + role-complete replica_specs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<DeploymentTopology>,
+
+    /// Shared-KV orchestration for pd_split topology.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_sharing: Option<KvSharingSpec>,
 
     /// Monotonically increasing version; bumped on every change.
     /// Scheduler uses this to detect whether a re-plan is needed.

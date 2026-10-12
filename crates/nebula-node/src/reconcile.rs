@@ -467,6 +467,7 @@ async fn launch_replica_engine(
         grpc_target: None,
         base_url: Some(handle.base_url.clone()),
         engine_type: Some(engine.engine_type().to_string()),
+        role: Default::default(),
     };
 
     let rm = RunningModel {

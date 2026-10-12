@@ -1342,6 +1342,8 @@ pub async fn migrate_v1_to_v2(store: &dyn MetaStore) -> Result<MigrationResult, 
             allowed_pools: None,
             image_override_reason: None,
             compat_rule_ids: vec![],
+            topology: None,
+            kv_sharing: None,
             version: 1,
             updated_at_ms: now,
         };
@@ -1893,6 +1895,8 @@ nebula_router_upstream_error_total{kind="connect"} 1
             image_override_reason: None,
             config_overrides: None,
             compat_rule_ids: vec![],
+            topology: None,
+            kv_sharing: None,
             version: 1,
             updated_at_ms: 1_000,
         }
@@ -1924,6 +1928,7 @@ nebula_router_upstream_error_total{kind="connect"} 1
             grpc_target: None,
             base_url: Some("http://127.0.0.1:8000".into()),
             engine_type: None,
+            role: Default::default(),
         }
     }
 

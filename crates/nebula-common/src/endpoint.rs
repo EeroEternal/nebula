@@ -26,6 +26,8 @@ fn default_api_flavor() -> String {
     "openai".to_string()
 }
 
+use crate::model_deployment::ReplicaRole;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EndpointInfo {
     pub model_uid: String,
@@ -55,6 +57,11 @@ pub struct EndpointInfo {
     /// Underlying engine type if known (e.g. "vllm", "powerllm", "sglang").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_type: Option<String>,
+
+    /// Role for pd_split routing (pool.md §pd_split v1.1). Written by the
+    /// execution plane at registration from the replica_spec's role.
+    #[serde(default)]
+    pub role: ReplicaRole,
 }
 
 /// Real-time control-plane stats for a replica.

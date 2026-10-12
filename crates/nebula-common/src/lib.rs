@@ -61,7 +61,8 @@ pub use model_cache::{
     ModelCacheEntry, NodeDiskStatus,
 };
 pub use model_deployment::{
-    validate_replica_specs, DesiredState, ModelDeployment, ReplicaPlacementSpec,
+    validate_replica_specs, DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment,
+    ReplicaPlacementSpec, ReplicaRole,
 };
 pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};

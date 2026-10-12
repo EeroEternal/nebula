@@ -179,6 +179,8 @@ mod tests {
             allowed_pools: None,
             image_override_reason: None,
             compat_rule_ids: vec![],
+            topology: None,
+            kv_sharing: None,
             version: 1,
             updated_at_ms: 1,
         }
@@ -198,6 +200,7 @@ mod tests {
             grpc_target: None,
             base_url: Some("http://127.0.0.1:1".into()),
             engine_type: None,
+            role: Default::default(),
         }
     }
 

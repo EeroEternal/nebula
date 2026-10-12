@@ -278,6 +278,7 @@ async fn ensure_replica_running(
                 grpc_target: None,
                 base_url: Some(base_url.clone()),
                 engine_type: Some(engine_type.to_string()),
+                role: Default::default(),
             };
             let val = serde_json::to_vec(&ep)?;
             store.put(&ep_key, val, Some(15000)).await?;
