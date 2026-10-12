@@ -270,6 +270,73 @@ curl -N http://127.0.0.1:8081/v1/responses \
 | Gateway | 8081 | 对外 API 入口 |
 | xtrace | 8742 | 审计与观测后端 |
 
+## 7.5 版本固定与升级门禁（交付收敛，2026-10-12）
+
+**版本清单（单一事实源）**——升级前先过对应门禁：
+
+| 组件 | 钉死版本 | 升级门禁 |
+|------|----------|----------|
+| nebula 控制面 | workspace 版本（当前 1.10.0） | `./scripts/ci.sh`（本地全量） |
+| vLLM 引擎镜像 | `vllm/vllm-openai:v0.23.0` | `./scripts/check_lmcache_compat.sh`（quick） |
+| lmcache（镜像内 pip 升级） | ≥ 0.5.5（0.4.6 无 NIXL 路径崩溃） | 同上 + `--full`（改 pin/镜像时必跑） |
+| etcd | `quay.io/coreos/etcd:v3.5.17` | `etcdctl endpoint health` |
+| kv-events 线上格式 | v0.23 字节级校准（map-form/int-hash） | 换引擎版本 = 重跑 prefix-affinity §5 校准 |
+
+> **升级纪律**：先在测试环境过门禁 → 再改生产 pin。禁止跳门禁直接升。
+
+## 7.6 P1c 前缀亲和部署矩阵（真机验证过的配置）
+
+按角色查表；全部可选（不设 = 现状行为，亲和不生效但零影响）：
+
+| 变量 | 设在谁 | 作用 | 真机验证值 |
+|------|--------|------|------------|
+| `NEBULA_ROUTER_STRATEGY` 或 `--routing-strategy` | Router | `prefix_affinity` | ✅ +74% rps 实测 |
+| `NEBULA_ROUTER_KV_EVENTS_BIND` | Router / indexd | 引擎 PUB 连过来的 SUB 端点 | `tcp://0.0.0.0:5557` |
+| `NEBULA_ROUTER_TOKENIZER_DIR` | Router | tokenizer 目录（`<dir>/<model_name>/tokenizer.json` + `tokenizer_config.json`） | ✅ chat 哈希必需 |
+| `NEBULA_KV_HASH_SEED` | Router **和** 执行面（同值！） | block-hash 种子，进引擎 `PYTHONHASHSEED` | `42`（不一致=永不命中，可见回落） |
+| `NEBULA_KV_EVENTS_ENDPOINT` | k8s-controller / node | 引擎侧注入 `--kv-events-config` 等 | Router 的 SUB 地址 |
+| `NEBULA_ROUTER_PREFIX_TTL_MS` | Router / indexd | 索引 TTL | 300000 |
+| `NEBULA_INDEXD_BIND` | indexd | 引擎唯一稳定端点（Batch 2） | 同 5557 语义 |
+| `NEBULA_INDEXD_SINKS` | indexd | 逗号分隔 Router sink 列表 | `tcp://host:5583,...` |
+| `NEBULA_INDEXD_SNAPSHOT_SECS` | indexd | 快照周期（Router 重启自愈） | 60 |
+| `NEBULA_ROUTER_KV_EVENTS_SINK_BIND` | 副本 Router | 收 indexd/对端推送 | `tcp://0.0.0.0:5583` |
+| `NEBULA_ROUTER_KV_EVENTS_PUSH_TO` | 采集 Router | HA 扇出（不用 indexd 时） | 对端 sink 列表 |
+
+**运维三件套（缺一则亲和永不命中，但安全回落可见）**：引擎 `PYTHONHASHSEED` 固定 + `--prefix-caching-hash-algo sha256_cbor`（执行面设 `NEBULA_KV_EVENTS_ENDPOINT` 后自动注入）+ Router tokenizer 目录。
+
+**排障第一指标**：Router `/metrics` 的 `nebula_router_strategy_fallback_total{reason="no_signal"}`——持续增长 = 亲和没生效（查三件套）；`nebula_router_prefix_index_entries` = 索引规模。
+
+## 7.7 etcd 备份与恢复
+
+```bash
+# 备份（cron 建议每小时）
+docker exec nebula-etcd etcdctl --endpoints=127.0.0.1:12379 \
+  snapshot save /backup/etcd-$(date +%Y%m%d%H%M).db
+
+# 验证快照
+etcdctl snapshot status /backup/etcd-xxx.db
+
+# 恢复（新数据目录起空集群）
+etcdctl snapshot restore /backup/etcd-xxx.db --data-dir /var/lib/etcd-restore
+# 然后用该 data-dir 重启 etcd 容器
+```
+
+> 模型/部署期望态全在 etcd；Postgres（BFF 业务数据）用 `pg_dump` 常规备份。**KV 前缀索引不在备份范围**（可丢可重建缓存）。
+
+## 7.8 升级与回滚
+
+**升级（控制面二进制）**：
+1. 测试环境过 `./scripts/ci.sh`；
+2. 目标机 `git pull && cargo build --release`（注意 GLIBC：在目标机或同基镜像内构建）；
+3. `nebula-stack.sh stop` → `start`（滚动：先 Router 后 Gateway，引擎 pod 不动）；
+4. 验证：`probe_stack.sh` + 发一条推理请求 + Router `/metrics` 无 error 计数增长。
+
+**升级（引擎镜像/lmcache）**：
+1. 过 `check_lmcache_compat.sh`（改 pin 必跑 `--full`）；
+2. 更新 ModelSpec 的 `docker_image` → controller 感知 → pod 重建（声明式，无需手动删 pod）。
+
+**回滚** = 反向重跑上述步骤（版本回退 + 重启）；etcd 数据无需回滚（结构体 serde-default 向后兼容）。引擎回滚后**必须**抽查 `no_signal` 计数（线上格式校准风险点）。
+
 ## 8. 常见问题
 
 ### 8.1 `{"message":"Unauthorized"}`（Audit Logs）
