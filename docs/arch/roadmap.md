@@ -258,8 +258,8 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 ### Batch 3：引擎版本策略 + PD 编排（S2 前置）
 
 1. ✅ 2026-10-11 兼容矩阵与选型（[`engines.md`](../dev/engines.md) §7）：**PD 传输主路径 LMCache**（双硬件代码原生、torch 层传输不绑 GPU 厂商）、备选 Mooncake(TCP)；排除 NIXL（Dynamo 系）与 p2p_nccl（NVIDIA 专属）；**引擎版本钉死 vLLM v0.23.x**（kv-events 已字节级校准）。待验证：昇腾真机 lmcache PD e2e、CUDA 侧最小 PD、角色化放置设计。
-2. ⏳ `pool.md` 扩展：`replica_specs` 角色字段（prefill/decode/混合）+ connector 参数进 ModelSpec，先设计评审后实现。
-3. ⏳ 实现：角色化放置 + Gateway stage 路由 hint。
+2. ✅ 2026-10-12 `pool.md` §pd_split 设计稿：`ReplicaPlacementSpec.role` + `Deployment.topology/kv_sharing` + `EndpointInfo.role`（serde default 兼容旧数据）、注入映射、路由语义（stage 判定 + 角色过滤 + 回落计数）、失败语义、触点清单——全部锚定 engines.md §7 实证。
+3. ⏳ 实现：按 pool.md 触点清单（common 结构体 → controller/node 注入 → Router stage 过滤 → BFF/UI），估 2-3 会话。
 
 ### Batch 4：空闲容量吃批负载（独立，可插队）
 

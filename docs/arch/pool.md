@@ -90,13 +90,100 @@ Router 只读 endpoints；不知「池」也可选路
 | K8s/HAMi | 执行面正交：`k8s` runtime 由控制器写 `/endpoints/`；池约束仍经 Deployment→期望，不双写 |
 | 外部控制面 | 发现/鉴权适配器不得把 Dynamo·llm-d 类型带进热路径；见 [`control-plane-adapters.md`](./control-plane-adapters.md) |
 
+## `pd_split` 拓扑与角色化放置（P2c-pd 设计稿，Batch 3 第 2 步，2026-10-12）
+
+> 依据：[`../dev/engines.md`](../dev/engines.md) §7（无 NIXL 共享 KV 形态已在 8×5090 实证：producer Stored 681/681 → `lm://` TCP → decoder Retrieved 512/512）。本节把它变成 nebula 可部署能力的设计。**代码未实现**；字段名即实现契约。
+
+### 已实证基础（不是假设）
+
+- 传输：`lmcache_server`（纯 TCP KV 存储）+ 引擎 `remote_url`；零 NIXL、硬件无关（CUDA 实证，昇腾 connector 同构）。
+- 角色：prefill 副本 `kv_role=kv_producer`（prefill 后 store 远端）；decode 副本 `kv_role=kv_both`（先 retrieve 远端，miss 则自 prefill——**正确性自兜底**）。
+- 依赖注入路径已存在：k8s-controller 已按 `NEBULA_KV_EVENTS_ENDPOINT` 注入 `--kv-events-config`/`PYTHONHASHSEED`/`--prefix-caching-hash-algo`（`create_engine_pod`），本设计沿用同一注入点。
+- 失败语义已实证：远端存储不可达 → 引擎 recompute（LMCache `FallbackPolicy.RECOMPUTE`），只损 TTFT 不损可用性。
+
+### 数据模型增量（实现契约）
+
+**`ReplicaPlacementSpec` 增量**（`model_deployment.rs`，serde 全 default，旧数据兼容）：
+
+```rust
+pub role: Option<ReplicaRole>,            // prefill | decode | mixed（None=mixed）
+// topology=pd_split 时必填且不得为 mixed；replicated 时忽略并告警
+```
+
+**`ModelDeployment` 增量**：
+
+```rust
+pub topology: Option<DeploymentTopology>, // None=replicated（今日行为）| pd_split
+pub kv_sharing: Option<KvSharingSpec>,    // pd_split 时必填
+```
+
+**`KvSharingSpec`**（编排参数即 engines.md §7.4 实证值，引擎无关命名）：
+
+```rust
+pub remote_url: String,       // lm://host:port
+pub serde: String,            // 默认 "naive"
+pub hash_seed: String,        // 进 PYTHONHASHSEED，两端一致
+```
+
+**`EndpointInfo` 增量**（`endpoint.rs`，serde default=mixed）：
+
+```rust
+pub role: ReplicaRole,        // 注册时由 controller/node 按 spec 写入
+```
+
+Router 从 `/endpoints/` 既有对象读到角色——**热路径零新增 watch**，符合本文件 L1 边界。
+
+### 校验规则（BFF create/update，拒绝即显式报错）
+
+1. `topology=pd_split` ⇒ 必须 `kv_sharing` 存在、engine_type=vllm、镜像过 LMCache 门禁（`scripts/check_lmcache_compat.sh`）。
+2. `pd_split` ⇒ 每个 replica_spec 有非 mixed 角色，且 ≥1 prefill、≥1 decode。
+3. SGLang + pd_split ⇒ 拒绝（无 LMCacheConnector，兼容矩阵条目）。
+4. `replicated` + 显式角色 ⇒ 拒绝（防误解）。
+
+### 注入映射（controller/node 同一逻辑，两侧执行面）
+
+| 角色 | `--kv-transfer-config` | LMCACHE yaml | 备注 |
+|---|---|---|---|
+| prefill | `kv_role=kv_producer` | `local_cpu:5 + remote_url + save_unfull_chunk:true` | store 远端 |
+| decode | `kv_role=kv_both` | 同上 + `retrieve_locations:[RemoteBackend]` | miss 自 prefill |
+
+`lmcache_server` **v1 由运维拉起**（nebula-stack.sh 增一容器，同 etcd 模式；无状态缓存，重启丢 KV 可接受）；健康检查进 `scripts/probe_stack.sh`。
+
+### 路由语义（Router，v1 规则保持可解释）
+
+```
+stage = 若 session_affinity 命中 或 P1c 索引本地命中 → decode
+        否则 → prefill
+候选 = endpoints[model] 按 stage 过滤 role；对应角色池空 → 回落全体（计数器可见）
+```
+
+- 不引入 vLLM disagg proxy：分发由 nebula 完成（engines.md §7.4 形态结论）。
+- P1c 与本设计的关系：共享 KV 让"任意 decode 副本可取"，P1c 索引的价值收敛为**优先本地 GPU 命中**（省一次远端取回）与观测——`prefix_affinity` 策略在 decode 池内继续生效，语义不变。
+- 会话亲和既有机制（session_affinity map）继续锚定 decode 副本。
+
+### 失败语义
+
+| 故障 | 行为 | 可见性 |
+|---|---|---|
+| decode 池全灭 | 回落 prefill 池（kv_producer 可完整服务） | `stage_fallback_total`（新计数器） |
+| `lmcache_server` 挂 | 引擎 recompute，仅 TTFT 上升 | LMCache 日志 + probe |
+| 远端 KV miss | decode 副本自 prefill | LMCache `hit tokens` 日志 |
+
+### 触点清单（第 3 步实现，估 2-3 会话）
+
+1. common：3 个结构体增量 + 校验函数（含单测）。
+2. k8s-controller + node：注入映射表（复用 kv-events 注入点）+ EndpointInfo.role 注册。
+3. Router：stage 判定 + 角色过滤 + 回落计数器（metrics + BFF）。
+4. BFF：校验规则 + 控制台 deployment 编辑暴露 topology/role（admin-ui-change 流程）。
+5. scripts：nebula-stack.sh 增 lmcache_server；probe_stack.sh 增健康检查。
+
 ## 分阶段落地（有需求再开）
 
 | 步 | 内容 | 验收 |
 |----|------|------|
 | P2a | `HardwarePool` CRUD + Deployment `allowed_pools` + Scheduler 硬过滤 | 两池混部；未授权池放不进去 |
 | P2b | 池/节点不可调度 + Drain 规范 | 杀一池成员不拖垮他池副本 |
-| P2c | `multi_node_tp` / `pd_split`（按客户引擎） | 不支持拓扑被拒绝；支持则 Placement 可解释 |
+| P2c | `multi_node_tp` / `pd_split`（pd_split 设计见上节，2026-10-12） | 不支持拓扑被拒绝；支持则 Placement 可解释 |
 
 N3 D4/D5（跨节点 TP / EngineShim）挂在 P2c，无客户需求不提前实现。
 
