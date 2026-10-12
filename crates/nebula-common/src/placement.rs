@@ -1,3 +1,5 @@
+use crate::model_deployment::{KvSharingSpec, ReplicaRole};
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,6 +32,17 @@ pub struct PlacementAssignment {
     /// The HardwarePool this assignment was scheduled into.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_id: Option<String>,
+
+    /// Replica role for pd_split routing (pool.md §pd_split v1.1).
+    /// Projected from replica_spec by the Scheduler; consumed by the
+    /// execution plane for KV-connector injection and endpoint registration.
+    #[serde(default)]
+    pub role: ReplicaRole,
+
+    /// Shared-KV config for pd_split (remote_url, serde). Projected from
+    /// the deployment's kv_sharing; consumed by the execution plane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_sharing: Option<KvSharingSpec>,
 }
 
 impl PlacementAssignment {

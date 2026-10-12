@@ -445,6 +445,8 @@ async fn add_replacement_replicas_from_plan(
                 engine_type: stale.engine_type.clone().or(engine_type.clone()),
                 docker_image: stale.docker_image.clone().or(docker_image.clone()),
                 pool_id: stale.pool_id.clone(),
+                role: stale.role,
+                kv_sharing: stale.kv_sharing.clone(),
             });
             used_replica_ids.insert(stale.replica_id);
 
@@ -498,6 +500,8 @@ async fn add_replacement_replicas_from_plan(
                     engine_type: engine_type.clone(),
                     docker_image: docker_image.clone(),
                     pool_id: None,
+                    role: Default::default(),
+                    kv_sharing: None,
                 });
 
                 info!(

@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use nebula_common::{
     build_engine_extra_args_lenient, image_platforms_match, resolve_node_platform, EngineImage,
-    HardwarePool, ModelConfig, ModelDeployment, ModelRequest, ModelSpec, NodeStatus,
-    PlacementAssignment, PlacementPlan,
+    HardwarePool, KvSharingSpec, ModelConfig, ModelDeployment, ModelRequest, ModelSpec, NodeStatus,
+    PlacementAssignment, PlacementPlan, ReplicaRole,
 };
 use nebula_meta::{EtcdMetaStore, MetaStore};
 
@@ -251,6 +251,8 @@ fn make_assignment(
     extra_args: Option<Vec<String>>,
     engine_type: Option<String>,
     docker_image: Option<String>,
+    role: ReplicaRole,
+    kv_sharing: Option<KvSharingSpec>,
 ) -> PlacementAssignment {
     let gpu_index = if gpu_indices.len() == 1 {
         Some(gpu_indices[0])
@@ -273,6 +275,8 @@ fn make_assignment(
         engine_type,
         docker_image,
         pool_id: None,
+        role,
+        kv_sharing,
     }
 }
 
@@ -311,6 +315,8 @@ pub async fn build_plan_multi(
             extra_args.clone(),
             req.request.engine_type.clone(),
             req.request.docker_image.clone(),
+            ReplicaRole::Mixed,
+            None,
         ));
     }
 
@@ -423,6 +429,13 @@ pub async fn build_plan_from_deployment(
             }
         }
 
+        // Project pd_split role and kv_sharing from the deployment into
+        // the assignment (pool.md §pd_split lifecycle).
+        let role = replica_spec
+            .and_then(|s| s.role)
+            .unwrap_or(ReplicaRole::Mixed);
+        let kv_sharing = deployment.kv_sharing.clone();
+
         assignments.push(make_assignment(
             replica_id,
             &spec.model_uid,
@@ -435,6 +448,8 @@ pub async fn build_plan_from_deployment(
                 .and_then(|s| s.image_id.clone())
                 .or_else(|| deployment.image_id.clone())
                 .or_else(|| spec.docker_image.clone()),
+            role,
+            kv_sharing,
         ));
     }
 

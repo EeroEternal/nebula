@@ -731,6 +731,8 @@ mod tests {
             engine_type: None,
             docker_image: None,
             pool_id: None,
+            role: Default::default(),
+            kv_sharing: None,
         }
     }
 

@@ -33,7 +33,7 @@ pub enum DeploymentTopology {
 
 /// Shared-KV orchestration params for pd_split (pool.md §pd_split v1.1).
 /// All values are the rig-verified defaults from engines.md §7.4.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvSharingSpec {
     /// lm:// address of the lmcache_server (TCP, hardware-neutral).
     pub remote_url: String,
@@ -169,9 +169,195 @@ pub fn validate_replica_specs(replicas: u32, specs: &[ReplicaPlacementSpec]) -> 
     Ok(())
 }
 
+/// Shared validation for pd_split deployments (pool.md §pd_split v1.1).
+/// Called from BFF create/update AND CLI deploy — not BFF-only (assessment #4).
+///
+/// Rules:
+/// 1. pd_split requires kv_sharing with a valid remote_url (lm://…)
+/// 2. pd_split requires every replica_spec to have a non-mixed role,
+///    with at least 1 prefill and 1 decode
+/// 3. pd_split requires engine_type=vllm (LMCacheConnector)
+/// 4. replicated + explicit roles = reject (prevent misunderstanding)
+/// 5. pd_split serde must be "naive" (only verified value)
+/// 6. v1 conservative KV-compat scope: TP=1 per replica (untested beyond)
+pub fn validate_pd_split(
+    deployment: &ModelDeployment,
+    engine_type: Option<&str>,
+) -> Result<(), String> {
+    let topology = deployment
+        .topology
+        .unwrap_or(DeploymentTopology::Replicated);
+
+    match topology {
+        DeploymentTopology::Replicated => {
+            // Rule 4: replicated + explicit roles = reject
+            if let Some(specs) = deployment.replica_specs.as_ref() {
+                if specs.iter().any(|s| s.role.is_some()) {
+                    return Err(
+                        "replica role is only valid with topology=pd_split; remove role fields or set topology".into(),
+                    );
+                }
+            }
+            Ok(())
+        }
+        DeploymentTopology::PdSplit => {
+            // Rule 3: engine must be vllm
+            let engine = engine_type.unwrap_or("vllm");
+            if engine != "vllm" {
+                return Err(format!(
+                    "pd_split requires engine_type=vllm (LMCacheConnector); got '{engine}'"
+                ));
+            }
+
+            // Rule 1: kv_sharing required
+            let kv = deployment
+                .kv_sharing
+                .as_ref()
+                .ok_or_else(|| "pd_split requires kv_sharing (remote_url + serde)".to_string())?;
+            if !kv.remote_url.starts_with("lm://") {
+                return Err(format!(
+                    "kv_sharing.remote_url must start with lm:// (got '{}')",
+                    kv.remote_url
+                ));
+            }
+            // Rule 5: serde must be naive (only verified value)
+            if kv.serde != "naive" {
+                return Err(format!(
+                    "kv_sharing.serde must be 'naive' (only verified value; got '{}')",
+                    kv.serde
+                ));
+            }
+
+            // Rule 2: roles required and complete
+            let specs = deployment.replica_specs.as_ref().ok_or_else(|| {
+                "pd_split requires replica_specs with explicit roles (at least 1 prefill and 1 decode)"
+                    .to_string()
+            })?;
+            if specs.len() != deployment.replicas as usize {
+                return Err(format!(
+                    "replica_specs length {} must match replicas {}",
+                    specs.len(),
+                    deployment.replicas
+                ));
+            }
+            let mut has_prefill = false;
+            let mut has_decode = false;
+            for (idx, spec) in specs.iter().enumerate() {
+                match spec.role {
+                    Some(ReplicaRole::Prefill) => has_prefill = true,
+                    Some(ReplicaRole::Decode) => has_decode = true,
+                    Some(ReplicaRole::Mixed) | None => {
+                        return Err(format!(
+                            "pd_split replica_specs[{idx}] must have role=prefill or decode (not mixed)"
+                        ));
+                    }
+                }
+            }
+            if !has_prefill {
+                return Err("pd_split requires at least 1 prefill replica".into());
+            }
+            if !has_decode {
+                return Err("pd_split requires at least 1 decode replica".into());
+            }
+
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pd_dep() -> ModelDeployment {
+        ModelDeployment {
+            model_uid: "m1".into(),
+            desired_state: DesiredState::Running,
+            replicas: 2,
+            min_replicas: None,
+            max_replicas: None,
+            node_affinity: None,
+            gpu_affinity: None,
+            replica_specs: Some(vec![
+                ReplicaPlacementSpec {
+                    role: Some(ReplicaRole::Prefill),
+                    ..Default::default()
+                },
+                ReplicaPlacementSpec {
+                    role: Some(ReplicaRole::Decode),
+                    ..Default::default()
+                },
+            ]),
+            config_overrides: None,
+            image_id: None,
+            allowed_pools: None,
+            image_override_reason: None,
+            compat_rule_ids: vec![],
+            topology: Some(DeploymentTopology::PdSplit),
+            kv_sharing: Some(KvSharingSpec {
+                remote_url: "lm://host:6800".into(),
+                serde: "naive".into(),
+            }),
+            version: 1,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn pd_split_valid() {
+        assert!(validate_pd_split(&pd_dep(), Some("vllm")).is_ok());
+    }
+
+    #[test]
+    fn pd_split_requires_kv_sharing() {
+        let mut d = pd_dep();
+        d.kv_sharing = None;
+        assert!(validate_pd_split(&d, Some("vllm")).is_err());
+    }
+
+    #[test]
+    fn pd_split_rejects_sglang() {
+        assert!(validate_pd_split(&pd_dep(), Some("sglang")).is_err());
+    }
+
+    #[test]
+    fn pd_split_rejects_mixed_role() {
+        let mut d = pd_dep();
+        d.replica_specs.as_mut().unwrap()[0].role = Some(ReplicaRole::Mixed);
+        assert!(validate_pd_split(&d, Some("vllm")).is_err());
+    }
+
+    #[test]
+    fn pd_split_requires_both_roles() {
+        let mut d = pd_dep();
+        d.replica_specs.as_mut().unwrap()[1].role = Some(ReplicaRole::Prefill);
+        assert!(validate_pd_split(&d, Some("vllm")).is_err()); // no decode
+    }
+
+    #[test]
+    fn pd_split_rejects_non_naive_serde() {
+        let mut d = pd_dep();
+        d.kv_sharing.as_mut().unwrap().serde = "cachegen".into();
+        assert!(validate_pd_split(&d, Some("vllm")).is_err());
+    }
+
+    #[test]
+    fn replicated_rejects_explicit_roles() {
+        let mut d = pd_dep();
+        d.topology = None; // replicated
+        assert!(validate_pd_split(&d, Some("vllm")).is_err());
+    }
+
+    #[test]
+    fn replicated_without_roles_is_fine() {
+        let d = ModelDeployment {
+            topology: None,
+            kv_sharing: None,
+            replica_specs: None,
+            ..pd_dep()
+        };
+        assert!(validate_pd_split(&d, Some("vllm")).is_ok());
+    }
 
     #[test]
     fn validate_replica_specs_length_mismatch() {
