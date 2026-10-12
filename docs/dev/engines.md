@@ -79,10 +79,14 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
 
 - ✅ **引擎可启动**：`enable_nixl: False` 时 LMCache StorageManager 强制要求 `LocalCPUBackend` 分配器（官方示例默认 nixl 才关了 local_cpu）——**配置修正**：`local_cpu: True` + `max_local_cpu_size: 4`，两个角色均正常起服。LMCache 的 RPC/lookup 层本身是 **zmq**（`lmcache/v1/rpc_utils.py`），纯 TCP。
 - ❌ **首请求 consumer EngineCore 崩溃**：`request_finished → assert self.lmcache_engine is not None`（`lmcache/integration/vllm/vllm_v1_adapter.py:1783`）。init 无报错、但请求期引擎句柄为空——疑似 0.4.6 实验性 v1 disagg（需 `LMCACHE_USE_EXPERIMENTAL=True`）在无 NIXL 路径的 lifecycle bug，或缺少未在示例中说明的 lookup 辅助服务。
-- **结论**：LMCache 是唯一路径的决策不变，但 **v0.23.0+lmcache0.4.6 的无 NIXL PD 尚不可用**；下一步（按优先级）：
-  1. 升级 lmcache（0.4.7+/0.5）重试同配置；
-  2. 向 LMCache 上游报 issue（有完整复现：配置 + 断言栈）；
-  3. 备选形态：LMCache **共享存储模式**（producer 存 → 共享 fs/远端 → consumer 取，非进程间直传）——同样硬件中立，且更贴 S3 分层路线。
+- **升级 lmcache 0.5.5 后反转**（同配置仅 `pip install -U lmcache`）：
+  - ✅ **disagg 编排全链路走通**：proxy + producer(GPU0) + consumer(GPU1)，HTTP 200、输出正确、暖态 **0.68s** 完整响应（prefill TTFT 46.8ms）；0.4.6 的崩溃修复。
+  - ❌ **KV 实际未跨传**：consumer 侧 `LMCache hit tokens: 0, need to load: 0` + producer 侧 `Controller message sender is not initialized`——decoder 在重算前缀（正确性无恙，传输未发生）。根因（源码级）：`lmcache_rpc_port` 构造的是 **IPC（unix socket）路径组件**（`{base}/engine_{id}_service_lookup_lmcache_rpc_port_{p}`），producer 的 **lookup server** 未被拉起/接线——属 LMCache disagg v1 的文档化配置项（其仓库 examples），非 nebula 或代码缺陷。
+- **版本钉死更新**：vLLM v0.23.x + **lmcache ≥ 0.5.5**（0.4.6 无 NIXL 路径崩溃）。
+- **下一步（按优先级）**：
+  1. 按 LMCache 仓库 disagg v1 示例接线 lookup server（LMCACHE 环境变量/服务进程），复测 hit tokens > 0；
+  2. 仍不通则带完整复现报上游；
+  3. 备选形态：LMCache 共享存储模式（producer 存 → 共享 fs → consumer 取）——同样硬件中立且贴 S3 路线。
 - **Nebula 侧无需 Rust 重写**：LMCache 是引擎进程内的 KV 面，nebula 的边界仍是"控制面 + 路由"（启动参数/角色/放置 + P1c 索引），KV 字节永远不经过 nebula。重写 LMCache 于 Rust = 重写引擎侧组件，违反引擎零侵入原则，无路由收益。
 
 ### 7.3 待验证（PD 实现的前置）
