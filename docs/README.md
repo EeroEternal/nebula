@@ -69,6 +69,7 @@
 | [`dev/hw/vllm-serving-perf.md`](dev/hw/vllm-serving-perf.md) | vLLM 服务层（Rust 前端 vs Python）与 Nebula 数据面性能实验（RTX 5090） |
 | [`dev/landscape.md`](dev/landscape.md) | 推理编排框架对照（Dynamo / llm-d）与 Nebula 的能力缺口 |
 | [`dev/direction.md`](dev/direction.md) | **发展方向备忘**：定位、三条主线、优先级与明确不做 |
+| [`dev/assessment.md`](dev/assessment.md) | **范围与设计评估**（2026-10-12）：治理边界、路由一致性、PD 语义与交付建议 |
 | [`dev/queue-admission.md`](dev/queue-admission.md) | **P0-#2 设计**：引擎级有界公平队列准入（不做 AIMD） |
 | [`dev/prefix-affinity.md`](dev/prefix-affinity.md) | **P1 进展**：多副本 + 前缀亲和（启发式实测无效，需 KV events） |
 | [`dev/engines.md`](dev/engines.md) | 多引擎对齐（vLLM / SGLang）：两条执行面统一能力/指标/健康 |

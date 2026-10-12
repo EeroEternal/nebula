@@ -172,7 +172,7 @@ curl -s --max-time 180 -o /dev/null http://127.0.0.1:8200/v1/completions -H "Con
 sleep 3
 grep -a "Stored" /work/prefill.log | tail -1
 grep -aE "Retrieved" /work/decode.log | tail -1
-grep -aq "Retrieved" /work/decode.log && echo TRANSFER-OK || echo TRANSFER-FAIL
+grep -aqE "Retrieved [1-9][0-9]* out of" /work/decode.log && echo TRANSFER-OK || echo TRANSFER-FAIL
 EOS
   sed -i "s|PIN|$LMCACHE_PIN|; s|MODEL|$MODEL_PATH|" "$WORK/run.sh"
   docker rm -f lmcache-gate >/dev/null 2>&1 || true
