@@ -276,6 +276,8 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 **交付收敛进展**：✅ 2026-10-12 版本固定清单 + 升级门禁纪律、P1c 部署矩阵（11 个环境变量 + 运维三件套 + 排障指标）、etcd 备份/恢复、控制面与引擎的升级/回滚流程——均入 [`../manual/deployment.md`](../manual/deployment.md) §7.5–7.8。⏳ 生产 etcd 三节点切入（维护窗）；多 Gateway 部署形态的配额验收。
 
+**收益验证进展**：✅ 2026-10-12 客户端口径 A/B（4 轮交错，96 前缀 × 2048 tok，C=32 过载 + 队列 ON）——冷启动：affinity 12%→0% 拒绝、goodput 2.4×；暖态：goodput +23%、p99 −7%；结论：客户端 p99 改善 < 引擎 TTFT 改善（评估警告成立），建议先做 pd_split v1 再评估严格 PD。见 [`../dev/benefit-verification.md`](../dev/benefit-verification.md)。
+
 ### Batch 4：空闲容量吃批负载（独立，可插队）
 
 - benchmark/canary 调度到空闲副本（`/stats/` 忙闲信号 + 准入队列低优先级）；Phase 3 Selection 联动前置。
