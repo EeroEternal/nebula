@@ -316,6 +316,44 @@ mod tests {
         assert_eq!(r.unwrap_err(), QueueDeny::QueueFull);
     }
 
+    /// Delivery-boundary semantics (assessment A3): fairness = per-tenant
+    /// WAITER SHARE, not round-robin. A hot tenant can saturate its share
+    /// (tenant_queue_full beyond it) while other tenants still queue.
+    #[tokio::test]
+    async fn tenant_share_caps_hot_tenant_but_not_others() {
+        // concurrency 1, max_size 10, share 0.5 → per-tenant waiters ≤ 5.
+        let q = EngineQueue::new(cfg(QueueMode::Fair, 1, 10, 5000));
+        let _held = q.acquire(Some("hot")).await.expect("held");
+
+        let hot: Vec<_> = (0..5)
+            .map(|_| {
+                let q2 = q.clone();
+                tokio::spawn(async move { q2.acquire(Some("hot")).await })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // 6th hot waiter exceeds the 50% share of max_size=10.
+        let over = q.acquire(Some("hot")).await;
+        assert_eq!(over.unwrap_err(), QueueDeny::TenantQueueFull);
+
+        // Another tenant is NOT blocked by the hot tenant's share: it queues
+        // (not rejected) and is admitted once permits flow again.
+        let q3 = q.clone();
+        let other = tokio::spawn(async move { q3.acquire(Some("other")).await });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        // Still queued — the rejection path would have resolved it already.
+        assert!(!other.is_finished(), "other should be queued, not rejected");
+
+        drop(_held);
+        for h in hot {
+            let _ = h.await;
+        }
+        assert!(other.await.unwrap().is_ok());
+        let (_, denied_tenant, _) = q.denied_total();
+        assert_eq!(denied_tenant, 1);
+    }
+
     #[tokio::test]
     async fn fair_waits_then_admits() {
         let q = EngineQueue::new(cfg(QueueMode::Fair, 1, 10, 1000));
