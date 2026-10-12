@@ -161,7 +161,16 @@ stage = warm → decode 池（便宜地 retrieve）
 池内选择 v1 = least_pending
 ```
 
-**实现修正（2026-10-12，rig 验证时发现）**：初版实现只看 session affinity，导致冷流量进 prefill 后被锚定、**decode 池永不可达**。正确信号是前缀索引命中——它回答的是"共享存储里有没有这个前缀"（store-level 事实），而不是"哪个 decode 副本本地持有"（review #5 的问题，仍需多 owner 索引，v1.1）。索引与共享 KV 共用同一 block-hash 键空间，故可直接复用（P1c 与 pd_split 的协同点）。
+**实现修正（2026-10-12，rig 验证时发现）**：初版实现只看 session affinity，导致冷流量进 prefill 后被锚定、**decode 池永不可达**。正确信号是前缀索引命中——它回答的是"共享存储里有没有这个前缀"（store-level 事实），而不是"哪个 decode 副本本地持有"（review #5 的问题，仍需多 owner 索引，v1.1）。
+
+**⚠️ rig 阻断（2026-10-12，必须解决的 v1 前置）**：启用 `LMCacheConnectorV1` 后，引擎日志明确输出 **`LMCache INFO: KV events are disabled.`**（`cache_engine.py:188`）——**LMCache 接管 KV 路径后停用了 vLLM 的 kv-events 发布**。实测：569-token prompt 只产生 1 条索引条目、`prefix_hit_total=0`，两条请求都落 prefill（`prefix_lookup_total=2` 证明哈希/查表已在跑）。因此**P1c 索引在 pd_split 形态下不能充当 warm 信号**。
+
+可选解法（v1 前置，按优先级）：
+1. **改用 LMCache 自身的 lookup/controller API** 作为 warm 信号（store-level 事实，语义最正；需接 `lmcache_controller`/lookup 接口，v1.1 工作量）；
+2. 查 LMCache 是否有开关保留 vLLM kv-events（若配置可解，成本最低）；
+3. 退路：pd_split v1 不依赖 warm 信号——decode 副本 `kv_both` 天然"命中即取、miss 自 prefill"，把冷热都路由 decode 池，prefill 池仅用于预热/写入（需重写 v1 路由规则并重新验证收益）。
+
+**已实证的部分（不受此阻断影响）**：角色注入（prefill `kv_producer`+`SAVE_UNFULL_CHUNK` / decode `kv_both`+`RETRIEVE_LOCATIONS`，同 seed=42）、scheduler 投影、EndpointInfo.role 注册、共享存储写入与取回（prefill 副本二次请求 **Retrieved 569/569 tokens**）、stage 过滤逻辑与计数器（单测全绿）。
 
 - session affinity 的锚定域限制在 decode 池内（首次命中 prefill 不锚定 prefill）。
 - **P1c 在 v1 不承担 decode 池内本地命中优先**：现索引每 hash 单 owner，prefill 的 Stored 会覆盖 decode 的 owner，角色过滤后必回落（评审 #5 指出）。多 owner 索引（`(model,hash) → {replica: ts}`，查询限定候选集；区分 GPU 本地持有 vs 远端已写入两个信号）为 **v1.1 项**，届时 `prefix_affinity` 才在 decode 池内恢复本地优先语义；replicated 拓扑下 P1c 行为不变。

@@ -259,7 +259,7 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 1. ✅ 2026-10-11 兼容矩阵与选型（[`engines.md`](../dev/engines.md) §7）：**PD 传输主路径 LMCache**（双硬件代码原生、torch 层传输不绑 GPU 厂商）、备选 Mooncake(TCP)；排除 NIXL（Dynamo 系）与 p2p_nccl（NVIDIA 专属）；**引擎版本钉死 vLLM v0.23.x**（kv-events 已字节级校准）。待验证：昇腾真机 lmcache PD e2e、CUDA 侧最小 PD、角色化放置设计。
 2. ✅ 2026-10-12 `pool.md` §pd_split 设计稿 **v1.1**（独立评审 REWORK 后修订）：v1 重新定位为"角色化完整请求路由"（单请求 PD 为 v2 开放设计）；补 Placement 配置传播生命周期、扩缩容 v1 禁自动、全局单 seed 契约、镜像 digest 产物绑定 + 门禁正数断言、多 owner 索引（v1.1）与四场景故障注入计划。
-3. ⏳ 实现（触点 1-5 ✅ 2026-10-12：数据模型 / 校验 / Scheduler 投影 / 双面注入 / Router stage 过滤+计数器+BFF/UI；剩触点 6 scripts + rig 端到端）：
+3. ◐ 实现（触点 1-5 ✅ 2026-10-12：数据模型 / 校验 / Scheduler 投影 / 双面注入 / Router stage 过滤+计数器+BFF/UI；**rig 端到端发现阻断**：LMCacheConnector 停用 vLLM kv-events → P1c 索引不能当 warm 信号，需改用 LMCache lookup API 或改路由规则；见 [`../arch/pool.md`](../arch/pool.md) §pd_split）：
 
 ### 可信性收敛批次（assessment REWORK 后插队，2026-10-12；详见 [`../dev/assessment.md`](../dev/assessment.md)）
 
