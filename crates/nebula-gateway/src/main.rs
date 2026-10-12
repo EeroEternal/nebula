@@ -121,6 +121,10 @@ async fn main() {
                 tracing::error!(error=%e, "stats sync loop exited");
             }
         });
+        // Same KV-event runtime as the standalone router (ingest / sink / TTL),
+        // so prefix affinity is functionally equivalent in embedded mode
+        // (assessment P0-2: this used to be missing — index stayed empty).
+        nebula_router::kv_events::start_kv_runtime(router.prefix_index().clone());
         tracing::info!(strategy = %strategy_name, "gateway running with embedded router (no router hop)");
         Some(router)
     } else {

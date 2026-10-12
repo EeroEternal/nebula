@@ -261,6 +261,19 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 2. ✅ 2026-10-12 `pool.md` §pd_split 设计稿 **v1.1**（独立评审 REWORK 后修订）：v1 重新定位为"角色化完整请求路由"（单请求 PD 为 v2 开放设计）；补 Placement 配置传播生命周期、扩缩容 v1 禁自动、全局单 seed 契约、镜像 digest 产物绑定 + 门禁正数断言、多 owner 索引（v1.1）与四场景故障注入计划。
 3. ⏳ 实现：按 pool.md 触点清单（common 结构体 → controller/node 注入 → Router stage 过滤 → BFF/UI），估 2-3 会话。
 
+### 可信性收敛批次（assessment REWORK 后插队，2026-10-12；详见 [`../dev/assessment.md`](../dev/assessment.md)）
+
+> 评估结论：架构主轴保留，优先把已有能力变可信。pd_split 第 3 步实现顺延至本批次之后。
+
+| # | 任务 | 状态 |
+|---|------|------|
+| A1 | **嵌入式路由接线修复**：KV-event 运行时（ingest/sink/TTL）抽成 `start_kv_runtime` 共享函数，独立 Router 与 Gateway 嵌入式模式共用；端到端一致性测试（合成事件流 → 索引进索引） | ✅ 2026-10-12 |
+| A2 | 控制台真实化：Endpoints 页固定值（协议数/健康度）改按实际状态计算；前缀亲和卡定时刷新；区分健康/降级/未知/过期 | ⏳ |
+| A3 | 配额语义边界：queue-admission.md 明确"进程级保护 ≠ 集群配额"；双 Gateway + 热点租户 + 长流式测试佐证边界 | ⏳ |
+| A4 | 文档收敛：README/positioning 版本对齐 workspace、etcd.md 池条目更新、根 DESIGN.md 与 docs/design.md 归一 | ⏳ |
+
+之后顺序（对齐评估建议 2/3）：交付收敛（默认部署清单/版本固定/升级回滚/HA 验收）→ 收益验证（亲和+共享 KV 多副本 A/B，采纳米"客户端 P99/有效吞吐/拒绝率/部署与恢复时间"口径）→ 再决定严格 PD。
+
 ### Batch 4：空闲容量吃批负载（独立，可插队）
 
 - benchmark/canary 调度到空闲副本（`/stats/` 忙闲信号 + 准入队列低优先级）；Phase 3 Selection 联动前置。

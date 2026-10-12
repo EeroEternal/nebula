@@ -350,6 +350,59 @@ pub async fn kv_events_loop(
     }
 }
 
+/// Env-driven KV-event runtime: ingest loop (BIND + optional PUSH_TO fanout),
+/// peer sink (SINK_BIND), and the TTL sweep. **Shared by the standalone router
+/// and the gateway's embedded mode** so both feed the prefix index identically
+/// (assessment P0-2: embedded mode used to start only the etcd sync loops,
+/// leaving the index permanently empty there). Must be called inside a tokio
+/// runtime; no-op spawns nothing when no BIND/SINK is configured.
+pub fn start_kv_runtime(index: Arc<PrefixIndex>) {
+    let kv_bind = std::env::var("NEBULA_ROUTER_KV_EVENTS_BIND").ok();
+    let kv_push_to: Vec<String> = std::env::var("NEBULA_ROUTER_KV_EVENTS_PUSH_TO")
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(bind) = kv_bind {
+        let index = index.clone();
+        let push_to = kv_push_to.clone();
+        tokio::spawn(async move {
+            if let Err(e) = kv_events_loop(Some(bind), push_to, index).await {
+                tracing::error!(error = %e, "kv events loop exited");
+            }
+        });
+    }
+    if let Ok(sink) = std::env::var("NEBULA_ROUTER_KV_EVENTS_SINK_BIND") {
+        let index = index.clone();
+        tokio::spawn(async move {
+            if let Err(e) = kv_sink_loop(sink, index).await {
+                tracing::error!(error = %e, "kv sink loop exited");
+            }
+        });
+    }
+    let ttl_ms = std::env::var("NEBULA_ROUTER_PREFIX_TTL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(300_000);
+    let index = index.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let evicted = index.evict_expired(now, ttl_ms);
+            if evicted > 0 {
+                tracing::debug!(evicted, "prefix index ttl sweep");
+            }
+        }
+    });
+}
+
 /// Peer-sink ingestion (HA): bind a SUB socket that fanout peers push to
 /// (`NEBULA_ROUTER_KV_EVENTS_SINK_BIND` on the replica routers). Besides
 /// raw engine frames (`{model}/{replica}`), the control topics from the
@@ -693,6 +746,42 @@ mod tests {
         // Replace semantics: reset alone clears.
         apply_control("!reset/m", &[], &restored);
         assert_eq!(restored.len(), 0);
+    }
+
+    /// Assessment P0-2 consistency: the shared runtime (used by BOTH the
+    /// standalone router and the gateway's embedded mode) must ingest synthetic
+    /// engine events end-to-end — PUB connect → SUB bind → index populated.
+    #[tokio::test]
+    async fn kv_runtime_ingests_synthetic_events() {
+        use zeromq::{Socket, SocketSend};
+        let index = PrefixIndex::new();
+        std::env::set_var("NEBULA_ROUTER_KV_EVENTS_BIND", "tcp://127.0.0.1:35579");
+        start_kv_runtime(index.clone());
+        std::env::remove_var("NEBULA_ROUTER_KV_EVENTS_BIND");
+
+        let stored = unhex(
+            "93cb3ff8000000000000919cab426c6f636b53746f72656492c4203f9c7995b81c03a2ab8ad3046caf562b8e746d217638d4dc5c672504f0cb3b66c42045e3af14cac8deda96eeda45e3cea05b95ff309dc5c00e2073ecfc7a800e250cc0dc00206465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7fcc80cc81cc82cc8310c0a3475055c0c0c0c0c000",
+        );
+        let mut publisher = zeromq::PubSocket::with_options(zeromq::SocketOptions::default());
+        publisher.connect("tcp://127.0.0.1:35579").await.unwrap();
+
+        // PUB drops until the SUB's subscription propagates — retry-send.
+        let mut seq = 0_u64..;
+        for _ in 0..100 {
+            let seq = seq.next().unwrap_or(0);
+            let mut msg = zeromq::ZmqMessage::from("qwen25-7b/0");
+            msg.push_back(bytes::Bytes::from(seq.to_be_bytes().to_vec()));
+            msg.push_back(bytes::Bytes::from(stored.clone()));
+            publisher.send(msg).await.unwrap();
+            if index.entries() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            index.entries() > 0,
+            "shared kv runtime never ingested the synthetic event stream"
+        );
     }
 
     #[test]

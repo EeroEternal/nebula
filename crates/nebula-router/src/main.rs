@@ -101,57 +101,9 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = nebula_common::auth::parse_auth_from_env();
 
-    // P1c: KV-event ingestion (opt-in). Engines publish block store/remove
-    // events over zmq; the router maintains the prefix→replica index.
-    // HA fanout: PUSH_TO forwards raw frames to peer routers' sinks
-    // (SINK_BIND on the peers — Pub-connect→Sub-bind, the zeromq-0.4-safe
-    // pair). Forwarding is best-effort; reuse events self-heal drops.
-    let kv_bind = std::env::var("NEBULA_ROUTER_KV_EVENTS_BIND").ok();
-    let kv_push_to: Vec<String> = std::env::var("NEBULA_ROUTER_KV_EVENTS_PUSH_TO")
-        .map(|v| {
-            v.split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
-    if kv_bind.is_some() {
-        let idx = router.prefix_index().clone();
-        tokio::spawn(async move {
-            if let Err(e) = nebula_router::kv_events::kv_events_loop(kv_bind, kv_push_to, idx).await
-            {
-                tracing::error!(error = %e, "kv events loop exited");
-            }
-        });
-    }
-    if let Ok(sink) = std::env::var("NEBULA_ROUTER_KV_EVENTS_SINK_BIND") {
-        let idx = router.prefix_index().clone();
-        tokio::spawn(async move {
-            if let Err(e) = nebula_router::kv_events::kv_sink_loop(sink, idx).await {
-                tracing::error!(error = %e, "kv sink loop exited");
-            }
-        });
-    }
-    let ttl_ms = std::env::var("NEBULA_ROUTER_PREFIX_TTL_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(300_000);
-    {
-        let idx = router.prefix_index().clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let evicted = idx.evict_expired(now, ttl_ms);
-                if evicted > 0 {
-                    tracing::debug!(evicted, "prefix index ttl sweep");
-                }
-            }
-        });
-    }
+    // P1c: KV-event runtime (ingest / sink / TTL) — shared with the gateway's
+    // embedded mode so both modes feed the prefix index identically.
+    nebula_router::kv_events::start_kv_runtime(router.prefix_index().clone());
 
     let st = AppState {
         model_uid: args.model_uid,
