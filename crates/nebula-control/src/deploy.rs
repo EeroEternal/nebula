@@ -422,9 +422,9 @@ mod pd_split_tests {
     use nebula_meta::memory::MemoryMetaStore;
     use nebula_meta::MetaStore;
 
-    fn spec() -> nebula_common::ModelSpec {
+    fn spec_for(uid: &str) -> nebula_common::ModelSpec {
         serde_json::from_value(serde_json::json!({
-            "model_uid": "m1",
+            "model_uid": uid,
             "model_name": "Qwen2.5-7B-Instruct",
             "model_source": "local",
             "model_path": "/models/q",
@@ -477,14 +477,16 @@ mod pd_split_tests {
             "nebula/vllm:0.23.0-lmcache0.5.5",
         );
         let store = MemoryMetaStore::new();
-        store
-            .put(
-                "/models/m1/spec",
-                serde_json::to_vec(&spec()).unwrap(),
-                None,
-            )
-            .await
-            .unwrap();
+        for uid in ["m1", "m2"] {
+            store
+                .put(
+                    &format!("/models/{uid}/spec"),
+                    serde_json::to_vec(&spec_for(uid)).unwrap(),
+                    None,
+                )
+                .await
+                .unwrap();
+        }
 
         // pd_split without kv_sharing → rejected.
         let err = start_model(
@@ -550,8 +552,10 @@ mod pd_split_tests {
             "nebula/vllm:0.23.0-lmcache0.5.5",
         );
 
-        // Replicated (no topology) never hits pd_split rules.
-        match start_model(&store, "m1", req(None, false, false)).await {
+        // A fresh model started without topology is replicated and never hits
+        // pd_split rules (m1 above is already pd_split from the previous step —
+        // start_model is a partial update, so its topology is preserved).
+        match start_model(&store, "m2", req(None, false, false)).await {
             Ok(dep) => assert_eq!(dep.topology, None),
             Err(ServiceError::BadRequest(m)) => {
                 assert!(

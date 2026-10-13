@@ -170,11 +170,20 @@ fn rule_applies(rule: &CompatibilityRule, input: &CompatCheckInput<'_>) -> bool 
     }
     if !rule.platforms.is_empty() {
         if input.platforms.is_empty() {
-            if let Some(node) = input.node {
-                let p = resolve_node_platform(node);
-                if !image_platforms_match(&rule.platforms, &p) {
-                    return false;
+            match input.node {
+                // Node platform is the fallback evidence.
+                Some(node) => {
+                    let p = resolve_node_platform(node);
+                    if !image_platforms_match(&rule.platforms, &p) {
+                        return false;
+                    }
                 }
+                // No image platforms and no node: a PLATFORM-scoped rule
+                // cannot be shown to apply. Treating "unknown" as a match
+                // made the ascend deny rule reject every vllm deployment on
+                // environments without node inventory (API-path finding,
+                // 2026-10-13). Rules without platform scoping still apply.
+                None => return false,
             }
         } else if !input
             .platforms
@@ -326,6 +335,58 @@ pub fn default_compatibility_rules(now_ms: u64) -> Vec<CompatibilityRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_node() -> NodeStatus {
+        NodeStatus {
+            node_id: "n".into(),
+            last_heartbeat_ms: 0,
+            gpus: vec![],
+            api_addr: None,
+            platform: None,
+        }
+    }
+
+    /// Platform-scoped rules must not fire when neither the image's
+    /// platforms nor a node are known — "unknown" is not "matches ascend"
+    /// (API-path finding: the ascend deny rule rejected every vllm
+    /// deployment where no node inventory existed).
+    #[test]
+    fn platform_scoped_rule_does_not_apply_without_platform_evidence() {
+        let rules = default_compatibility_rules(0);
+        let deny = rules
+            .iter()
+            .find(|r| r.id == "deny-vllm-on-ascend-until-adapter")
+            .expect("ascend deny rule present");
+        assert!(!rule_applies(
+            deny,
+            &CompatCheckInput {
+                engine_type: "vllm",
+                engine_version: None,
+                platforms: &[],
+                node: None,
+                image_id: None,
+            }
+        ));
+
+        // With positive ascend evidence it does apply.
+        let ascend = NodeStatus {
+            node_id: "n-ascend".into(),
+            last_heartbeat_ms: 0,
+            platform: Some("ascend-cann8".into()),
+            ..make_node()
+        };
+        assert!(rule_applies(
+            deny,
+            &CompatCheckInput {
+                engine_type: "vllm",
+                engine_version: None,
+                platforms: &[],
+                node: Some(&ascend),
+                image_id: None,
+            }
+        ));
+    }
+
     use crate::node_status::GpuStatus;
 
     fn node(platform: &str, driver: &str, cuda: &str) -> NodeStatus {
