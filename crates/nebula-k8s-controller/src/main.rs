@@ -277,19 +277,17 @@ async fn ensure_replica_running(
         spec.and_then(|s| s.docker_image.as_deref()),
         spec.and_then(|s| s.model_path.as_deref()),
     );
-    let config_changed = !pod_config_hash.is_empty() && pod_config_hash != desired_hash;
+    // An unannotated pod predates this mechanism: recreate once so it adopts
+    // the fingerprint (otherwise future config changes go undetected for it).
+    let config_changed = pod_config_hash != desired_hash;
+    if config_changed && !pod_config_hash.is_empty() {
+        tracing::info!(pod = %pod_name, "launch config changed; recreating pod");
+    }
 
     let is_running = phase == "Running" && !config_changed;
-    // pd_split role for this replica (Mixed when replicated).
-    let role = dep
-        .replica_specs
-        .as_ref()
-        .and_then(|specs| specs.get(replica_id as usize))
-        .and_then(|s| s.role)
-        .unwrap_or(nebula_common::ReplicaRole::Mixed);
-    // Recreate when the pod is gone or in a terminal phase; keep waiting while
-    // Pending (it is still starting).
-    let need_create = !matches!(phase.as_str(), "Running" | "Pending");
+    // Recreate when the pod is gone, in a terminal phase, or when its launch
+    // config changed; keep waiting while Pending (it is still starting).
+    let need_create = !matches!(phase.as_str(), "Running" | "Pending") || config_changed;
 
     if need_create {
         let gpu_index = replica_gpu_index(dep, replica_id);
