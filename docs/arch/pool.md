@@ -206,10 +206,20 @@ stage = warm → decode 池（便宜地 retrieve）
 
 门禁在容器内 `pip install` 的环境 ≠ 生产镜像。**部署契约**：pd_split 部署引用的镜像必须是"过门禁的固化产物"——v1 流程 = `check_lmcache_compat.sh` 对 **baked digest** 跑 full 通过 → 该 digest 记入兼容矩阵（engines.md）→ Deployment 校验只认矩阵内 digest。full 门禁断言收紧为 **正数传输**（`Retrieved [1-9][0-9]* out of`），非仅文本出现。
 
-### lmcache_server 与故障注入计划（评审 #2 补齐）
+### lmcache_server 与故障注入（✅ 2026-10-13 实测，评审 #2 关闭）
 
-- v1 运维拉起（nebula-stack.sh 增容器，同 etcd 模式；无状态缓存重启可丢）；probe_stack.sh 增健康检查。
-- **故障注入验证（第 3 步实现后、宣称回退语义前必须完成）**：①启动前不可达 ②运行中断线 ③网络黑洞 ④传输中故障；记录各场景的引擎行为、超时上界、错误响应与恢复路径。在此之前，失败语义表述为"**预期回退，待故障注入验证**"。
+- v1 运维拉起：`scripts/nebula-stack.sh` 增 `lmcache_server` + `lmcache_controller`（均带共享 `PYTHONHASHSEED`；未设 `LMCACHE_IMAGE` 时静默跳过，replicated 部署不受影响）；`probe_stack.sh` 增 controller `/lookup` 与 server 存在性检查。
+- **故障注入实测（8×5090，pd_split 1+1）**：
+
+| 场景 | 结果 |
+|---|---|
+| 存储运行中被杀 | **0 拒绝**；吞吐 26.0 → 13.2 rps（−49%），TTFT p50 428 → 1084ms（+153%）；恢复后回升 |
+| 黑洞（`iptables DROP` 6800，无 RST） | **0 拒绝**，12.7 rps、p50 1132ms——**无挂起**（LMCache 客户端超时生效） |
+| 长请求传输中被杀 | 请求仍 **200 完成**（50.2s，回退重算） |
+| **存储启动前不可达** | 引擎可启动但**伴随 1–3 次重启**、就绪显著变慢（300s 时仅 1/2 endpoint）；起来后 0 拒绝（重算，15.98 rps）；存储恢复后 22.01 rps |
+| **controller 启动前不可达** | **引擎 crash-loop**（注册强校验失败）——部署顺序约束：controller 必须先于引擎可用 |
+
+结论：**存储/传输故障优雅降级（只损性能不损可用性）；启动期依赖（controller、store）不可达会有重启/慢就绪，controller 缺失直接不可用**。前者的回退语义已由实测支撑，后者转化为部署前置条件与告警项。
 
 ### 失败语义（修正后）
 
@@ -218,6 +228,19 @@ stage = warm → decode 池（便宜地 retrieve）
 | decode 池全灭 | 回落 prefill 池（完整请求能力） | 设计；实现+计数器后验证 |
 | `lmcache_server` 挂/断线/黑洞 | 引擎 recompute（可能抬升 GPU 负载、影响吞吐，非仅 TTFT） | **待故障注入验证** |
 | 远端 KV miss | decode 副本自 prefill | 已实证 |
+
+### 收益 A/B（✅ 2026-07-13，客户端口径，评估建议 3）
+
+同机同模型，2 副本；客户端经 Gateway 全栈测量：
+
+| 配置 | 有效吞吐 | TTFT p50 | TTFT p99 | e2e p99 |
+|---|---|---|---|---|
+| replicated（暖态，8 前缀） | **28.66 rps** | **401.6ms** | 720.9ms | 893.2ms |
+| pd_split（暖态，8 前缀） | 27.33 rps | 437.1ms | **572.1ms（−21%）** | **736.3ms（−18%）** |
+| replicated（96 前缀，冷启动主导） | **3.72 rps** | **644ms** | 47.7s | 48.1s |
+| pd_split（96 前缀，冷启动主导） | 3.15 rps | 1878ms | 54.0s | 55.1s |
+
+**结论**：暖态下 pd_split 吞吐持平（−5%）、**尾部延迟更优（p99 −21%）**——共享存储让 KV 只存一份、decode 侧取回替代重复 prefill；但**宽前缀/冷启动场景更差**（1:1 池配比把全部冷 prefill 压到单个 prefill 副本，且 TCP 取回慢于本地命中）。v1 定位为"角色化路由 + 共享 KV 的尾部优化"，**不是吞吐方案**；池配比（prefill:decode）是后续调优旋钮。
 
 ### 触点清单（第 3 步实现，评审后仍估 2-3 会话）
 

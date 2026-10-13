@@ -261,15 +261,15 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 2. ✅ 2026-10-12 `pool.md` §pd_split 设计稿 **v1.1**（独立评审 REWORK 后修订）：v1 重新定位为"角色化完整请求路由"（单请求 PD 为 v2 开放设计）；补 Placement 配置传播生命周期、扩缩容 v1 禁自动、全局单 seed 契约、镜像 digest 产物绑定 + 门禁正数断言、多 owner 索引（v1.1）与四场景故障注入计划。
 3. ✅ 2026-10-13 核心实现完成并真机验证（触点 1-6 + API 面 + 校验接线 + scripts 集成）。**rig 端到端**：冷→prefill（写共享 KV）、暖→decode（`Retrieved 512/512`）；路由分布 1/2；`pd_lookup_warm_total=2`。见 [`../arch/pool.md`](../arch/pool.md) §pd_split。
 
-   **⏳ 剩余（v1 收尾）**：
-   | 项 | 说明 |
+   **v1 收尾 5 项 ✅ 全部完成（2026-10-13）**：
+   | 项 | 结果 |
    |----|------|
-   | 收益量化 A/B | pd_split vs replicated 的客户端 P99/有效吞吐（评估要求口径） |
-   | 故障注入验证 | 评审 #2 的四场景：启动前不可达 / 运行中断线 / 黑洞 / 传输中故障（回退语义仍标注"待验证"） |
-   | digest 白名单 | 评审 #4：门禁已存在，但"部署只认过门禁 digest"尚未成为校验规则 |
-   | 控制台 UI | topology/role 编辑（admin-ui-change 流程）；当前仅 API/etcd 可配 |
-   | API 路径 e2e | rig 验证走的是直写 etcd；`start_model` 新增字段后的 API 路径未在真机走一遍 |
-   | 多 owner 索引 | v1.1（评审 #5）：decode 池内本地优先 |
+   | 收益量化 A/B | 暖态：吞吐持平（−5%）、p99 −21%；宽前缀/冷启动更差——v1 定位为尾部优化，非吞吐方案 |
+   | 故障注入验证 | 四场景实测：存储故障优雅降级（0 拒绝、无挂起）；启动期依赖不可达有重启/慢就绪，controller 缺失则 crash-loop（转为部署前置条件） |
+   | digest 白名单 | `validate_pd_split_image` + `NEBULA_APPROVED_PD_IMAGES`；空名单即禁用 pd_split |
+   | 控制台 UI | `deploy-dialog.tsx`（replicas/topology/角色/共享 KV），接入 models 与 model-detail；zh/en |
+   | API 路径 e2e | 真机走 BFF `/api/v2/models/{uid}/start`：拒绝原因精确、白名单生效、有效部署创建带角色 pod |
+   | 多 owner 索引 | v1.1（评审 #5）：decode 池内本地优先——**仍待办** |
 
 ### 可信性收敛批次（assessment REWORK 后插队，2026-10-12；详见 [`../dev/assessment.md`](../dev/assessment.md)）
 
