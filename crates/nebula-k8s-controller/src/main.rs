@@ -289,6 +289,16 @@ async fn ensure_replica_running(
     // config changed; keep waiting while Pending (it is still starting).
     let need_create = !matches!(phase.as_str(), "Running" | "Pending") || config_changed;
 
+    // Pod specs are immutable: a config change needs delete-then-create, not
+    // apply. Delete now; the next reconcile tick creates the fresh pod.
+    if config_changed && !phase.is_empty() {
+        tracing::info!(pod = %pod_name, "deleting pod for config adoption; will recreate next tick");
+        let _ = Command::new("kubectl")
+            .args(["-n", namespace, "delete", "pod", &pod_name, "--wait=false"])
+            .output();
+        return Ok(());
+    }
+
     if need_create {
         let gpu_index = replica_gpu_index(dep, replica_id);
         tracing::info!(model_uid=%model_uid, pod=%pod_name, replica_id, gpu_index, "creating k8s pod for replica");
