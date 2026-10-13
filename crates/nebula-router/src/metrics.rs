@@ -319,6 +319,15 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         "# HELP nebula_router_stage_fallback_total pd_split stage-pool fallbacks (empty role pool -> all candidates).\n\
          # TYPE nebula_router_stage_fallback_total counter\n",
     );
+    let (pd_lookup, pd_lookup_warm) = st.router.pd_lookup_stats();
+    body.push_str(
+        "# HELP nebula_router_pd_lookup_total pd_split LMCache controller warm lookups.\n\
+         # TYPE nebula_router_pd_lookup_total counter\n",
+    );
+    body.push_str(&format!("nebula_router_pd_lookup_total {pd_lookup}\n"));
+    body.push_str(&format!(
+        "nebula_router_pd_lookup_warm_total {pd_lookup_warm}\n"
+    ));
     for stage in ["prefill", "decode"] {
         body.push_str(&format!(
             "nebula_router_stage_fallback_total{{stage=\"{stage}\"}} {}\n",
