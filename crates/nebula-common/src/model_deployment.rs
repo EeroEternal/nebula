@@ -246,6 +246,42 @@ pub fn kv_transfer_config(role: ReplicaRole) -> Option<String> {
     )
 }
 
+/// Approved pd_split engine images (review #4: a deployment must reference an
+/// artifact that actually passed the LMCache gate — the gate's pip-install
+/// environment is not the shipped image, and `:latest`-style floating tags
+/// drift silently).
+///
+/// `NEBULA_APPROVED_PD_IMAGES` lists the gate-passed refs (comma-separated,
+/// e.g. `nebula/vllm:0.23.0-lmcache0.5.5` or a digest-pinned
+/// `registry/img@sha256:...`). pd_split is rejected unless the deployment's
+/// image is on the list, so unverified combinations stay out.
+pub fn validate_pd_split_image(
+    docker_image: Option<&str>,
+    approved: &[String],
+) -> Result<(), String> {
+    let Some(image) = docker_image else {
+        return Err(
+            "pd_split requires an explicit engine image (spec.docker_image) from the \
+             gate-passed allowlist"
+                .to_string(),
+        );
+    };
+    if approved.is_empty() {
+        return Err(
+            "pd_split is disabled: NEBULA_APPROVED_PD_IMAGES is empty (run \
+             scripts/check_lmcache_compat.sh --full on the artifact, then list it)"
+                .to_string(),
+        );
+    }
+    if !approved.iter().any(|a| a == image) {
+        return Err(format!(
+            "pd_split image '{image}' is not on the approved list (NEBULA_APPROVED_PD_IMAGES: {})",
+            approved.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Shared validation for pd_split deployments (pool.md §pd_split v1.1).
 /// Called from BFF create/update AND CLI deploy — not BFF-only (assessment #4).
 ///
@@ -472,6 +508,18 @@ mod tests {
             d.replica_specs.as_ref().unwrap()[1].role,
             Some(ReplicaRole::Decode)
         );
+    }
+
+    #[test]
+    fn approved_image_gate() {
+        let approved = vec!["nebula/vllm:0.23.0-lmcache0.5.5".to_string()];
+        assert!(
+            validate_pd_split_image(Some("nebula/vllm:0.23.0-lmcache0.5.5"), &approved).is_ok()
+        );
+        assert!(validate_pd_split_image(Some("vllm/vllm-openai:latest"), &approved).is_err());
+        assert!(validate_pd_split_image(None, &approved).is_err());
+        // Empty allowlist = pd_split disabled entirely.
+        assert!(validate_pd_split_image(Some("nebula/vllm:0.23.0-lmcache0.5.5"), &[]).is_err());
     }
 
     #[test]

@@ -10,6 +10,7 @@ import { PageShell } from "@/components/layout/page-shell"
 import { PageContainer } from "@/components/layout/page-container"
 import { PageHeader } from "@/components/layout/page-header"
 import { EntityListToolbar } from "@/components/entity-list/EntityListToolbar"
+import { DeployDialog } from "@/components/deploy-dialog"
 import { LoadModelDialog } from "@/components/LoadModelDialog"
 import type { AggregatedModelState } from "@/lib/types"
 import { v2 } from "@/lib/api"
@@ -30,6 +31,7 @@ const STATE_VARIANT: Record<AggregatedModelState, "success" | "secondary" | "war
 }
 
 export function ModelsView() {
+    const [deployUid, setDeployUid] = useState<string | null>(null)
     const { t } = useI18n()
     const { token } = useAuthStore()
     const { data: models = [], isLoading: initialLoading, refetch } = useModels()
@@ -173,7 +175,7 @@ export function ModelsView() {
                                             <TableCell className="text-right">
                                                 <div className="flex justify-end gap-1" onClick={(e) => e.stopPropagation()}>
                                                     {(model.state === "stopped" || model.state === "failed") && (
-                                                        <Button variant="ghost" size="icon" aria-label="start" onClick={() => act(model.model_uid, "START", () => v2.startModel(model.model_uid, {}, token || ''))} disabled={isActing}>
+                                                        <Button variant="ghost" size="icon" aria-label="start" onClick={() => setDeployUid(model.model_uid)} disabled={isActing}>
                                                             <Play className="h-4 w-4" />
                                                         </Button>
                                                     )}
@@ -195,6 +197,14 @@ export function ModelsView() {
                     </Table>
                 </Card>
                 <LoadModelDialog />
+                {deployUid && (
+                    <DeployDialog
+                        modelUid={deployUid}
+                        token={token || undefined}
+                        open={!!deployUid}
+                        onOpenChange={(o) => { if (!o) setDeployUid(null) }}
+                    />
+                )}
             </PageContainer>
         </PageShell>
     )

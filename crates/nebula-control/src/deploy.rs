@@ -292,6 +292,24 @@ pub async fn start_model(
     nebula_common::validate_pd_split(&deployment, spec.engine_type.as_deref())
         .map_err(ServiceError::BadRequest)?;
 
+    // Gate-passed artifact allowlist (review #4). Only enforced for pd_split.
+    if deployment.topology == Some(nebula_common::DeploymentTopology::PdSplit) {
+        let approved: Vec<String> = std::env::var("NEBULA_APPROVED_PD_IMAGES")
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let image = deployment
+            .image_id
+            .as_deref()
+            .or(spec.docker_image.as_deref());
+        nebula_common::validate_pd_split_image(image, &approved)
+            .map_err(ServiceError::BadRequest)?;
+    }
+
     let mut deployment = deployment;
     deployment.compat_rule_ids = validate_compat_for_replica_specs(
         store,
@@ -411,6 +429,7 @@ mod pd_split_tests {
             "model_source": "local",
             "model_path": "/models/q",
             "engine_type": "vllm",
+            "docker_image": "nebula/vllm:0.23.0-lmcache0.5.5",
             "config": { "served_model_name": "m1" }
         }))
         .unwrap()
@@ -451,6 +470,12 @@ mod pd_split_tests {
     /// persisting it and letting the controller create unusable pods.
     #[tokio::test]
     async fn start_model_rejects_invalid_pd_split() {
+        // Gate-passed artifact allowlist (review #4) — the valid case needs
+        // the spec's image on it.
+        std::env::set_var(
+            "NEBULA_APPROVED_PD_IMAGES",
+            "nebula/vllm:0.23.0-lmcache0.5.5",
+        );
         let store = MemoryMetaStore::new();
         store
             .put(
@@ -506,6 +531,24 @@ mod pd_split_tests {
             }
             Err(e) => panic!("unexpected error: {e:?}"),
         }
+
+        // An image off the allowlist is rejected even when structurally valid.
+        std::env::set_var("NEBULA_APPROVED_PD_IMAGES", "other/img:1");
+        let err = start_model(
+            &store,
+            "m1",
+            req(Some(DeploymentTopology::PdSplit), true, true),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::BadRequest(m) if m.contains("approved list")),
+            "{err:?}"
+        );
+        std::env::set_var(
+            "NEBULA_APPROVED_PD_IMAGES",
+            "nebula/vllm:0.23.0-lmcache0.5.5",
+        );
 
         // Replicated (no topology) never hits pd_split rules.
         match start_model(&store, "m1", req(None, false, false)).await {

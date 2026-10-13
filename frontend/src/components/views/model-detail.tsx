@@ -14,6 +14,7 @@ import { endpointStatusTone, formatNodeGpu } from "@/lib/endpoint-status"
 import { EngineAlertsBanner } from "@/components/engine-alerts-banner"
 import { v2 } from "@/lib/api"
 import type { ModelDetailView, AggregatedModelState } from "@/lib/types"
+import { DeployDialog } from "@/components/deploy-dialog"
 import { useI18n } from "@/lib/useI18n"
 import { PageShell } from "@/components/layout/page-shell"
 import { PageContainer } from "@/components/layout/page-container"
@@ -40,6 +41,7 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
     const [detail, setDetail] = useState<ModelDetailView | null>(null)
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [deployOpen, setDeployOpen] = useState(false)
     const [acting, setActing] = useState(false)
 
     const refresh = useCallback(async () => {
@@ -103,7 +105,7 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                         <RefreshCw className="h-4 w-4" />
                     </Button>
                     {(detail.state === "stopped" || detail.state === "failed") && (
-                        <Button size="sm" className="rounded-xl" onClick={() => act(() => v2.startModel(modelUid, {}, token))} disabled={acting}>
+                        <Button size="sm" className="rounded-xl" onClick={() => setDeployOpen(true)} disabled={acting}>
                             <Play className="h-4 w-4 mr-1" /> {t('models.start')}
                         </Button>
                     )}
@@ -276,6 +278,13 @@ export function ModelDetailView_Page({ modelUid, token, onBack }: ModelDetailPro
                 </Section>
             )}
         </PageContainer>
+            <DeployDialog
+                modelUid={modelUid}
+                token={token}
+                open={deployOpen}
+                onOpenChange={setDeployOpen}
+                onStarted={() => { void refresh() }}
+            />
         </PageShell>
     )
 }
