@@ -112,6 +112,27 @@ async fn ensure_model_running(
 
 /// Node a replica should run on: `replica_specs[i].node_id` when given, else the
 /// agent's own node.
+/// Stable fingerprint of the launch-affecting config for one replica.
+fn config_fingerprint(
+    engine_type: &str,
+    role: nebula_common::ReplicaRole,
+    kv_sharing: Option<&nebula_common::KvSharingSpec>,
+    docker_image: Option<&str>,
+    model_path: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(engine_type.as_bytes());
+    h.update(format!("{role:?}").as_bytes());
+    h.update(docker_image.unwrap_or("").as_bytes());
+    h.update(model_path.unwrap_or("").as_bytes());
+    if let Some(kv) = kv_sharing {
+        h.update(kv.remote_url.as_bytes());
+        h.update(kv.serde.as_bytes());
+    }
+    format!("{:x}", h.finalize())[..16].to_string()
+}
+
 fn replica_node(dep: &ModelDeployment, replica_id: u32, default_node: &str) -> String {
     dep.replica_specs
         .as_ref()
@@ -221,12 +242,13 @@ async fn ensure_replica_running(
             "pod",
             &pod_name,
             "-o",
-            "jsonpath={.status.phase}:{.status.podIP}",
+            "jsonpath={.status.phase}:{.status.podIP}:{.metadata.annotations.nebula\\.config\\.hash}",
         ])
         .output();
 
     let mut phase = String::new();
     let mut pod_ip = String::new();
+    let mut pod_config_hash = String::new();
 
     if let Ok(out) = status_output {
         if out.status.success() {
@@ -234,10 +256,30 @@ async fn ensure_replica_running(
             let mut parts = s.split(':');
             phase = parts.next().unwrap_or_default().to_string();
             pod_ip = parts.next().unwrap_or_default().to_string();
+            pod_config_hash = parts.next().unwrap_or_default().to_string();
         }
     }
 
-    let is_running = phase == "Running";
+    // Config fingerprint: role / kv_sharing / image / engine changes must
+    // recreate the pod, otherwise a running engine keeps stale launch config
+    // (pool.md §pd_split lifecycle). Rig finding 2026-10-13: switching
+    // topology back to replicated left the pd_split env in place.
+    let role = dep
+        .replica_specs
+        .as_ref()
+        .and_then(|specs| specs.get(replica_id as usize))
+        .and_then(|s| s.role)
+        .unwrap_or(nebula_common::ReplicaRole::Mixed);
+    let desired_hash = config_fingerprint(
+        engine_type,
+        role,
+        dep.kv_sharing.as_ref(),
+        spec.and_then(|s| s.docker_image.as_deref()),
+        spec.and_then(|s| s.model_path.as_deref()),
+    );
+    let config_changed = !pod_config_hash.is_empty() && pod_config_hash != desired_hash;
+
+    let is_running = phase == "Running" && !config_changed;
     // pd_split role for this replica (Mixed when replicated).
     let role = dep
         .replica_specs
@@ -262,6 +304,7 @@ async fn ensure_replica_running(
             spec,
             role,
             kv_sharing: dep.kv_sharing.as_ref(),
+            config_hash: desired_hash.clone(),
         })?;
     }
 
@@ -372,6 +415,9 @@ struct EnginePodSpec<'a> {
     spec: Option<&'a ModelSpec>,
     role: nebula_common::ReplicaRole,
     kv_sharing: Option<&'a nebula_common::KvSharingSpec>,
+    /// Launch-config fingerprint stamped as a pod annotation so a config
+    /// change forces recreation (pool.md §pd_split lifecycle).
+    config_hash: String,
 }
 
 fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
@@ -385,6 +431,7 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         spec,
         role,
         kv_sharing,
+        config_hash,
     } = p;
     let pod_name = replica_pod_name(model_uid, replica_id);
     let host_model_path = spec
@@ -529,6 +576,7 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         "metadata": {
             "name": pod_name,
             "namespace": namespace,
+            "annotations": { "nebula.config.hash": config_hash },
             "labels": {
                 "nebula.component": "engine",
                 "nebula.model_uid": model_uid
@@ -578,4 +626,86 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nebula_common::{KvSharingSpec, ReplicaRole};
+
+    /// Any launch-affecting change must move the fingerprint, otherwise a
+    /// running pod keeps stale config (rig finding: topology switch left the
+    /// pd_split env in place).
+    #[test]
+    fn config_fingerprint_tracks_launch_config() {
+        let kv = KvSharingSpec {
+            remote_url: "lm://a:1".into(),
+            serde: "naive".into(),
+        };
+        let base = config_fingerprint(
+            "vllm",
+            ReplicaRole::Prefill,
+            Some(&kv),
+            Some("img:1"),
+            Some("/m"),
+        );
+        assert_eq!(
+            base,
+            config_fingerprint(
+                "vllm",
+                ReplicaRole::Prefill,
+                Some(&kv),
+                Some("img:1"),
+                Some("/m")
+            )
+        );
+        // role change
+        assert_ne!(
+            base,
+            config_fingerprint(
+                "vllm",
+                ReplicaRole::Mixed,
+                Some(&kv),
+                Some("img:1"),
+                Some("/m")
+            )
+        );
+        // kv_sharing removed
+        assert_ne!(
+            base,
+            config_fingerprint(
+                "vllm",
+                ReplicaRole::Prefill,
+                None,
+                Some("img:1"),
+                Some("/m")
+            )
+        );
+        // store address change
+        let kv2 = KvSharingSpec {
+            remote_url: "lm://b:2".into(),
+            serde: "naive".into(),
+        };
+        assert_ne!(
+            base,
+            config_fingerprint(
+                "vllm",
+                ReplicaRole::Prefill,
+                Some(&kv2),
+                Some("img:1"),
+                Some("/m")
+            )
+        );
+        // image change
+        assert_ne!(
+            base,
+            config_fingerprint(
+                "vllm",
+                ReplicaRole::Prefill,
+                Some(&kv),
+                Some("img:2"),
+                Some("/m")
+            )
+        );
+    }
 }
