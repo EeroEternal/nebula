@@ -148,9 +148,10 @@ pub async fn proxy_chat_completions(
     // can route to the replica that already holds the KV. No-op unless the
     // strategy is active; chat bodies are not hashed (template gap — falls
     // back visibly via the strategy fallback counters).
-    let prefix_hashes = body_bytes
-        .as_deref()
-        .and_then(|b| st.router.body_prompt_hashes(&model_uid, b));
+    let (prefix_hashes, pd_warm) = match body_bytes.as_deref() {
+        Some(b) => st.router.body_route_hints(&model_uid, b).await,
+        None => (None, false),
+    };
     let prefix_hashes = prefix_hashes.as_deref();
 
     let mut attempt: u32 = 0;
@@ -166,19 +167,21 @@ pub async fn proxy_chat_completions(
                     pv,
                     (exclude_model_uid.as_str(), *exclude_replica_id),
                     prefix_hashes,
+                    pd_warm,
                 )
             }
             (Some(pv), None) => {
                 st.router
-                    .route_with_plan_version(&ctx, &model_uid, pv, prefix_hashes)
+                    .route_with_plan_version(&ctx, &model_uid, pv, prefix_hashes, pd_warm)
             }
             (None, Some((exclude_model_uid, exclude_replica_id))) => st.router.route_excluding(
                 &ctx,
                 &model_uid,
                 (exclude_model_uid.as_str(), *exclude_replica_id),
                 prefix_hashes,
+                pd_warm,
             ),
-            (None, None) => st.router.route(&ctx, &model_uid, prefix_hashes),
+            (None, None) => st.router.route(&ctx, &model_uid, prefix_hashes, pd_warm),
         };
 
         let ep = match ep {

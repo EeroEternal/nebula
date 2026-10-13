@@ -20,6 +20,12 @@ use strategy::{Candidate, LeastPending, RoutingStrategy, SelectionCtx};
 /// admission control kicks in and returns Overloaded.
 const KV_CACHE_OVERLOAD_THRESHOLD: f64 = 0.95;
 
+/// pd_split controller lookups are cached briefly (prefix warmth changes on
+/// the order of evictions, not requests) and time out fast so routing never
+/// stalls on the controller.
+const PD_WARM_CACHE_MS: u64 = 2_000;
+const PD_LOOKUP_TIMEOUT_MS: u64 = 200;
+
 #[derive(Debug, Clone, Default)]
 struct EndpointCircuitState {
     consecutive_failures: u32,
@@ -101,6 +107,11 @@ pub struct Router {
     /// pd_split stage-pool fallbacks (empty role pool → all candidates).
     stage_prefill_fallback_total: AtomicU64,
     stage_decode_fallback_total: AtomicU64,
+    /// pd_split controller warm-lookup cache: (model, first token) → (warm, ts).
+    pd_warm_cache: DashMap<(String, u32), (bool, u64)>,
+    pd_lookup_total: AtomicU64,
+    pd_lookup_warm_total: AtomicU64,
+    http_client: reqwest::Client,
     stats_max_age_ms: u64,
     circuit_failure_threshold: u32,
     circuit_open_ms: u64,
@@ -165,6 +176,13 @@ impl Router {
             prefix_lookup: DashMap::new(),
             stage_prefill_fallback_total: AtomicU64::new(0),
             stage_decode_fallback_total: AtomicU64::new(0),
+            pd_warm_cache: DashMap::new(),
+            pd_lookup_total: AtomicU64::new(0),
+            pd_lookup_warm_total: AtomicU64::new(0),
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(PD_LOOKUP_TIMEOUT_MS))
+                .build()
+                .unwrap_or_default(),
             stats_max_age_ms,
             circuit_failure_threshold,
             circuit_open_ms,
@@ -293,6 +311,88 @@ impl Router {
         }
     }
 
+    /// Ask the LMCache controller whether the shared store holds this
+    /// prompt's prefix ("warm" signal for pd_split stage routing).
+    ///
+    /// `NEBULA_PD_SPLIT_LOOKUP_URL` points at `lmcache_controller`'s
+    /// `/lookup` (e.g. http://127.0.0.1:9000/lookup). Results are cached per
+    /// (model, first-token-id) for a short TTL; any error degrades to "cold"
+    /// so routing never blocks on the controller.
+    pub async fn controller_warm(&self, model_uid: &str, token_ids: &[u32]) -> bool {
+        let Ok(url) = std::env::var("NEBULA_PD_SPLIT_LOOKUP_URL") else {
+            return false;
+        };
+        if token_ids.is_empty() {
+            return false;
+        }
+        let cache_key = (model_uid.to_string(), token_ids[0]);
+        {
+            let now = now_ms();
+            if let Some(entry) = self.pd_warm_cache.get(&cache_key) {
+                let (warm, ts) = *entry.value();
+                if now.saturating_sub(ts) < PD_WARM_CACHE_MS {
+                    return warm;
+                }
+            }
+        }
+        let body = serde_json::json!({
+            "tokens": token_ids,
+            "instance_id": std::env::var("NEBULA_PD_SPLIT_INSTANCE_ID")
+                .unwrap_or_else(|_| "lmcache_default_instance".to_string()),
+        });
+        let warm = match self
+            .http_client
+            .post(&url)
+            .json(&body)
+            .timeout(std::time::Duration::from_millis(PD_LOOKUP_TIMEOUT_MS))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    // {"event_id": "...", "<instance>": ["LocalCPUBackend", 512]}
+                    Ok(v) => v
+                        .as_object()
+                        .and_then(|m| {
+                            m.iter()
+                                .find(|(k, _)| k.as_str() != "event_id")
+                                .and_then(|(_, val)| val.as_array())
+                                .and_then(|a| a.get(1))
+                                .and_then(|n| n.as_u64())
+                        })
+                        .map(|matched| matched > 0)
+                        .unwrap_or(false),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "pd_split lookup response unparseable; treating as cold");
+                        false
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(status = %resp.status(), "pd_split lookup rejected; treating as cold");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "pd_split lookup unreachable; treating as cold");
+                false
+            }
+        };
+        self.pd_warm_cache.insert(cache_key, (warm, now_ms()));
+        self.pd_lookup_total.fetch_add(1, Ordering::Relaxed);
+        if warm {
+            self.pd_lookup_warm_total.fetch_add(1, Ordering::Relaxed);
+        }
+        warm
+    }
+
+    /// pd_split warm-signal observability (lookups, warm results).
+    pub fn pd_lookup_stats(&self) -> (u64, u64) {
+        (
+            self.pd_lookup_total.load(Ordering::Relaxed),
+            self.pd_lookup_warm_total.load(Ordering::Relaxed),
+        )
+    }
+
     /// True when any endpoint of this model declares a pd_split role.
     /// Cheap enough for the request path (a handful of replicas per model),
     /// and only consulted when the strategy is not prefix_affinity.
@@ -323,6 +423,35 @@ impl Router {
     /// `messages` (rendered with the model's chat_template — verified
     /// token-exact against the engine on the rig). Only paid when the
     /// prefix_affinity strategy is active.
+    /// Route hints for a request body: prefix hashes (prefix_affinity index /
+    /// pd_split warm decisions) plus the pd_split controller warm signal.
+    /// One call so the standalone router and the embedded gateway stay in sync.
+    pub async fn body_route_hints(
+        &self,
+        model_uid: &str,
+        body: &[u8],
+    ) -> (Option<Vec<[u8; 32]>>, bool) {
+        let hashes = self.body_prompt_hashes(model_uid, body);
+        if !self.model_has_role_pools(model_uid) {
+            return (hashes, false);
+        }
+        let Some(text) = extract_prompt_string(body) else {
+            return (hashes, false);
+        };
+        let name = self
+            .model_uids_to_names
+            .get(model_uid)
+            .map(|e| e.value().clone());
+        let warm = match self
+            .prefix_hasher
+            .prompt_ids(model_uid, name.as_deref(), &text)
+        {
+            Some(ids) => self.controller_warm(model_uid, &ids).await,
+            None => false,
+        };
+        (hashes, warm)
+    }
+
     pub fn body_prompt_hashes(&self, model_uid: &str, body: &[u8]) -> Option<Vec<[u8; 32]>> {
         // Needed for the prefix_affinity strategy AND for pd_split stage
         // routing (the warm signal is a prefix-index hit). Rig finding
@@ -563,6 +692,7 @@ impl Router {
         plan_version: Option<u64>,
         exclude: Option<(&str, u32)>,
         prefix_hashes: Option<&[[u8; 32]]>,
+        pd_warm: bool,
     ) -> Result<EndpointInfo, RouteError> {
         if ctx.inference_hint.is_some() {
             self.hint_received_total.fetch_add(1, Ordering::Relaxed);
@@ -776,7 +906,7 @@ impl Router {
                     })
                 })
                 .unwrap_or(false);
-            let warm = prefix_owner.is_some() || affinity_on_decode;
+            let warm = pd_warm || prefix_owner.is_some() || affinity_on_decode;
             let want = if warm {
                 ReplicaRole::Decode
             } else {
@@ -847,8 +977,16 @@ impl Router {
         model_uid: &str,
         plan_version: u64,
         prefix_hashes: Option<&[[u8; 32]]>,
+        pd_warm: bool,
     ) -> Result<EndpointInfo, RouteError> {
-        self.route_internal(ctx, model_uid, Some(plan_version), None, prefix_hashes)
+        self.route_internal(
+            ctx,
+            model_uid,
+            Some(plan_version),
+            None,
+            prefix_hashes,
+            pd_warm,
+        )
     }
 
     /// Run the configured strategy and count a fallback when the primary
@@ -916,6 +1054,7 @@ impl Router {
         plan_version: u64,
         exclude: (&str, u32),
         prefix_hashes: Option<&[[u8; 32]]>,
+        pd_warm: bool,
     ) -> Result<EndpointInfo, RouteError> {
         self.route_internal(
             ctx,
@@ -923,6 +1062,7 @@ impl Router {
             Some(plan_version),
             Some(exclude),
             prefix_hashes,
+            pd_warm,
         )
     }
 
@@ -931,8 +1071,9 @@ impl Router {
         ctx: &ExecutionContext,
         model_uid: &str,
         prefix_hashes: Option<&[[u8; 32]]>,
+        pd_warm: bool,
     ) -> Result<EndpointInfo, RouteError> {
-        self.route_internal(ctx, model_uid, None, None, prefix_hashes)
+        self.route_internal(ctx, model_uid, None, None, prefix_hashes, pd_warm)
     }
 
     pub fn route_excluding(
@@ -941,8 +1082,9 @@ impl Router {
         model_uid: &str,
         exclude: (&str, u32),
         prefix_hashes: Option<&[[u8; 32]]>,
+        pd_warm: bool,
     ) -> Result<EndpointInfo, RouteError> {
-        self.route_internal(ctx, model_uid, None, Some(exclude), prefix_hashes)
+        self.route_internal(ctx, model_uid, None, Some(exclude), prefix_hashes, pd_warm)
     }
 }
 
@@ -985,7 +1127,7 @@ mod plan_version_tests {
             inference_hint: None,
             hint_trusted: false,
         };
-        let ep = router.route(&ctx, "m1", None).unwrap();
+        let ep = router.route(&ctx, "m1", None, false).unwrap();
         assert_eq!(ep.replica_id, 1);
     }
 
@@ -1007,7 +1149,7 @@ mod plan_version_tests {
             inference_hint: None,
             hint_trusted: false,
         };
-        let ep = router.route(&ctx, "m1", None).unwrap();
+        let ep = router.route(&ctx, "m1", None, false).unwrap();
         assert!(ep.replica_id <= 1);
         assert_eq!(
             router.strategy_fallback_total("least_kv_cache", "no_signal"),
@@ -1048,7 +1190,9 @@ mod plan_version_tests {
         router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
 
         // Cold → prefill pool (writes KV into the shared store).
-        let ep = router.route(&ctx_with_session(None), "m1", None).unwrap();
+        let ep = router
+            .route(&ctx_with_session(None), "m1", None, false)
+            .unwrap();
         assert_eq!(ep.replica_id, 0);
 
         // Prefix already in the shared store → decode pool (retrieves).
@@ -1067,6 +1211,7 @@ mod plan_version_tests {
                 &ctx_with_session(None),
                 "m1",
                 Some(std::slice::from_ref(&h)),
+                false,
             )
             .unwrap();
         assert_eq!(ep.replica_id, 1, "warm prefix should go to the decode pool");
@@ -1076,7 +1221,7 @@ mod plan_version_tests {
             .session_affinity
             .insert("s1".into(), ("m1".into(), 1));
         let ep = router
-            .route(&ctx_with_session(Some("s1")), "m1", None)
+            .route(&ctx_with_session(Some("s1")), "m1", None, false)
             .unwrap();
         assert_eq!(ep.replica_id, 1);
     }
@@ -1100,7 +1245,9 @@ mod plan_version_tests {
         let router = Router::new();
         // Only a decode replica exists → cold traffic (wants prefill) falls back.
         router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Decode));
-        let ep = router.route(&ctx_with_session(None), "m1", None).unwrap();
+        let ep = router
+            .route(&ctx_with_session(None), "m1", None, false)
+            .unwrap();
         assert_eq!(ep.replica_id, 0);
         assert_eq!(router.stage_fallback_total("prefill"), 1);
         assert_eq!(router.stage_fallback_total("decode"), 0);
@@ -1111,7 +1258,9 @@ mod plan_version_tests {
         let router = Router::new();
         router.upsert_endpoint(ready_ep("m1", 0, 1));
         router.upsert_endpoint(ready_ep("m1", 1, 1));
-        let ep = router.route(&ctx_with_session(None), "m1", None).unwrap();
+        let ep = router
+            .route(&ctx_with_session(None), "m1", None, false)
+            .unwrap();
         assert!(ep.replica_id <= 1);
         assert_eq!(router.stage_fallback_total("prefill"), 0);
     }
@@ -1144,11 +1293,11 @@ mod plan_version_tests {
             hint_trusted: false,
         };
         let ep = router
-            .route(&ctx, "m1", Some(std::slice::from_ref(&h)))
+            .route(&ctx, "m1", Some(std::slice::from_ref(&h)), false)
             .unwrap();
         assert_eq!(ep.replica_id, 1);
         // Unknown prefix → least_pending fallback, counted as no_signal.
-        let ep2 = router.route(&ctx, "m1", None).unwrap();
+        let ep2 = router.route(&ctx, "m1", None, false).unwrap();
         assert!(ep2.replica_id <= 1);
         assert_eq!(
             router.strategy_fallback_total("prefix_affinity", "no_signal"),
@@ -1160,7 +1309,7 @@ mod plan_version_tests {
         drained.status = EndpointStatus::Draining;
         router.upsert_endpoint(drained);
         let ep3 = router
-            .route(&ctx, "m1", Some(std::slice::from_ref(&h)))
+            .route(&ctx, "m1", Some(std::slice::from_ref(&h)), false)
             .unwrap();
         assert_eq!(ep3.replica_id, 0);
         assert_eq!(
@@ -1186,12 +1335,14 @@ mod plan_version_tests {
             hint_trusted: false,
         };
 
-        let ep = router.route_with_plan_version(&ctx, "m1", 2, None).unwrap();
+        let ep = router
+            .route_with_plan_version(&ctx, "m1", 2, None, false)
+            .unwrap();
         assert_eq!(ep.replica_id, 1);
         assert_eq!(ep.plan_version, 2);
 
         let err = router
-            .route_with_plan_version(&ctx, "m1", 99, None)
+            .route_with_plan_version(&ctx, "m1", 99, None, false)
             .unwrap_err();
         assert!(matches!(err, RouteError::NoEndpoint));
     }
@@ -1220,7 +1371,9 @@ mod plan_version_tests {
             inference_hint: None,
             hint_trusted: false,
         };
-        let ep = router.route_with_plan_version(&ctx, "m2", 7, None).unwrap();
+        let ep = router
+            .route_with_plan_version(&ctx, "m2", 7, None, false)
+            .unwrap();
         assert_eq!(ep.replica_id, 0);
     }
 
@@ -1243,7 +1396,7 @@ mod plan_version_tests {
         };
         assert!(matches!(
             router
-                .route_with_plan_version(&ctx, "m1", 1, None)
+                .route_with_plan_version(&ctx, "m1", 1, None, false)
                 .unwrap_err(),
             RouteError::NoEndpoint
         ));
@@ -1310,7 +1463,7 @@ mod model_alias_tests {
         router.upsert_endpoint(ep);
 
         let ctx = ExecutionContext::default();
-        let selected = router.route(&ctx, "qwen2.5-7b", None).unwrap();
+        let selected = router.route(&ctx, "qwen2.5-7b", None, false).unwrap();
         assert_eq!(selected.model_uid, "qwen2.5-7b");
         assert_eq!(selected.replica_id, 0);
         assert_eq!(

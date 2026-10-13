@@ -438,7 +438,7 @@ pub async fn forward_embedded(
 
     // P1c: prompt prefix hashes for the prefix_affinity strategy (embedded
     // router mode shares the same implementation as the standalone router).
-    let prefix_hashes = router.body_prompt_hashes(&model_uid, body_bytes);
+    let (prefix_hashes, pd_warm) = router.body_route_hints(&model_uid, body_bytes).await;
     let prefix_hashes = prefix_hashes.as_deref();
 
     let max_attempts = st.retry_max.saturating_add(1).max(1);
@@ -453,14 +453,23 @@ pub async fn forward_embedded(
                 pv,
                 (m.as_str(), *r),
                 prefix_hashes,
+                pd_warm,
             ),
-            (Some(pv), None) => {
-                router.route_with_plan_version(&prepared.ctx, &model_uid, pv, prefix_hashes)
-            }
-            (None, Some((m, r))) => {
-                router.route_excluding(&prepared.ctx, &model_uid, (m.as_str(), *r), prefix_hashes)
-            }
-            (None, None) => router.route(&prepared.ctx, &model_uid, prefix_hashes),
+            (Some(pv), None) => router.route_with_plan_version(
+                &prepared.ctx,
+                &model_uid,
+                pv,
+                prefix_hashes,
+                pd_warm,
+            ),
+            (None, Some((m, r))) => router.route_excluding(
+                &prepared.ctx,
+                &model_uid,
+                (m.as_str(), *r),
+                prefix_hashes,
+                pd_warm,
+            ),
+            (None, None) => router.route(&prepared.ctx, &model_uid, prefix_hashes, pd_warm),
         };
         let ep = match routed {
             Ok(ep) => ep,

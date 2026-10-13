@@ -194,6 +194,29 @@ pub fn kv_sharing_env(role: ReplicaRole, kv: &KvSharingSpec) -> Vec<(&'static st
     env
 }
 
+/// LMCache controller registration env for a pd_split replica.
+///
+/// The controller (`lmcache_controller`, ports 9000/9001) answers the
+/// authoritative "is this prefix in the shared store" question via
+/// `POST /lookup {"tokens": [...]}` — the warm signal for pd_split stage
+/// routing (LMCache disables vLLM's kv-events once its connector is active,
+/// so the P1c event index cannot serve that role; rig finding 2026-10-12).
+///
+/// `controller_url` is the monitor endpoint the engine reports to
+/// (host:9001); `instance_id` must be unique per replica.
+pub fn lmcache_controller_env(
+    controller_url: &str,
+    worker_port: u16,
+    instance_id: &str,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("LMCACHE_ENABLE_CONTROLLER", "True".to_string()),
+        ("LMCACHE_CONTROLLER_PULL_URL", controller_url.to_string()),
+        ("LMCACHE_LMCACHE_WORKER_PORTS", worker_port.to_string()),
+        ("LMCACHE_LMCACHE_INSTANCE_ID", instance_id.to_string()),
+    ]
+}
+
 /// `--kv-transfer-config` JSON for a pd_split replica role.
 ///
 /// prefill → `kv_producer` (prefills and stores to the shared KV);
@@ -381,6 +404,16 @@ mod tests {
 
         // Mixed → no injection (replicated deployments unchanged)
         assert!(kv_sharing_env(ReplicaRole::Mixed, &kv).is_empty());
+    }
+
+    #[test]
+    fn controller_env_matches_lmcache_config_keys() {
+        let env = lmcache_controller_env("host:9001", 8001, "m-0");
+        let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("LMCACHE_ENABLE_CONTROLLER"), Some("True".into()));
+        assert_eq!(get("LMCACHE_CONTROLLER_PULL_URL"), Some("host:9001".into()));
+        assert_eq!(get("LMCACHE_LMCACHE_WORKER_PORTS"), Some("8001".into()));
+        assert_eq!(get("LMCACHE_LMCACHE_INSTANCE_ID"), Some("m-0".into()));
     }
 
     #[test]

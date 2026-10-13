@@ -61,9 +61,9 @@ pub use model_cache::{
     ModelCacheEntry, NodeDiskStatus,
 };
 pub use model_deployment::{
-    kv_sharing_env, kv_transfer_config, validate_pd_split, validate_replica_specs,
-    DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment, ReplicaPlacementSpec,
-    ReplicaRole,
+    kv_sharing_env, kv_transfer_config, lmcache_controller_env, validate_pd_split,
+    validate_replica_specs, DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment,
+    ReplicaPlacementSpec, ReplicaRole,
 };
 pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};

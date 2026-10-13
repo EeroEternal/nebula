@@ -112,6 +112,18 @@ impl PromptHasher {
         Some(compute_block_hashes(enc.get_ids(), self.block_size))
     }
 
+    /// Token ids for the raw prompt (used by the LMCache controller lookup).
+    pub fn prompt_ids(
+        &self,
+        model_uid: &str,
+        model_name: Option<&str>,
+        prompt: &str,
+    ) -> Option<Vec<u32>> {
+        let tk = self.tokenizer_for(model_uid, model_name)?;
+        let enc = tk.encode(prompt, true).ok()?;
+        Some(enc.get_ids().to_vec())
+    }
+
     /// Render a chat body (transformers-compatible subset) and chain its
     /// block hashes. The context mirrors `apply_chat_template`:
     /// `messages`, `add_generation_prompt`, `tools` when present.

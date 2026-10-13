@@ -267,6 +267,20 @@ impl Engine for VllmEngine {
                 vllm_args.push("sha256_cbor".into());
             }
             kv_envs = nebula_common::kv_sharing_env(ctx.role, kv);
+            // Controller registration: makes the shared store's contents queryable
+            // (POST /lookup) — the pd_split warm signal source.
+            if let Ok(ctrl) = std::env::var("NEBULA_LMCACHE_CONTROLLER_URL") {
+                let worker_port: u16 = std::env::var("NEBULA_LMCACHE_WORKER_PORT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(8001);
+                let instance_id = format!("{}-{}", ctx.model_uid, ctx.replica_id);
+                kv_envs.extend(nebula_common::lmcache_controller_env(
+                    &ctrl,
+                    worker_port,
+                    &instance_id,
+                ));
+            }
         }
 
         let mut cmd;
