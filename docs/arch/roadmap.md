@@ -259,7 +259,17 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 1. ✅ 2026-10-11 兼容矩阵与选型（[`engines.md`](../dev/engines.md) §7）：**PD 传输主路径 LMCache**（双硬件代码原生、torch 层传输不绑 GPU 厂商）、备选 Mooncake(TCP)；排除 NIXL（Dynamo 系）与 p2p_nccl（NVIDIA 专属）；**引擎版本钉死 vLLM v0.23.x**（kv-events 已字节级校准）。待验证：昇腾真机 lmcache PD e2e、CUDA 侧最小 PD、角色化放置设计。
 2. ✅ 2026-10-12 `pool.md` §pd_split 设计稿 **v1.1**（独立评审 REWORK 后修订）：v1 重新定位为"角色化完整请求路由"（单请求 PD 为 v2 开放设计）；补 Placement 配置传播生命周期、扩缩容 v1 禁自动、全局单 seed 契约、镜像 digest 产物绑定 + 门禁正数断言、多 owner 索引（v1.1）与四场景故障注入计划。
-3. ✅ 2026-10-13 实现完成并真机验证（触点 1-6：数据模型 / 校验 / Scheduler 投影 / 双面注入 / Router stage 过滤 / controller lookup warm 信号）。**rig 端到端**：冷→prefill（写共享 KV）、暖→decode（`Retrieved 512/512`）；路由分布 1/2；`pd_lookup_warm_total=2`。见 [`../arch/pool.md`](../arch/pool.md) §pd_split。⏳ 剩余：scripts 集成（nebula-stack/probe 增 lmcache_server + controller）、收益量化 A/B。
+3. ✅ 2026-10-13 核心实现完成并真机验证（触点 1-6 + API 面 + 校验接线 + scripts 集成）。**rig 端到端**：冷→prefill（写共享 KV）、暖→decode（`Retrieved 512/512`）；路由分布 1/2；`pd_lookup_warm_total=2`。见 [`../arch/pool.md`](../arch/pool.md) §pd_split。
+
+   **⏳ 剩余（v1 收尾）**：
+   | 项 | 说明 |
+   |----|------|
+   | 收益量化 A/B | pd_split vs replicated 的客户端 P99/有效吞吐（评估要求口径） |
+   | 故障注入验证 | 评审 #2 的四场景：启动前不可达 / 运行中断线 / 黑洞 / 传输中故障（回退语义仍标注"待验证"） |
+   | digest 白名单 | 评审 #4：门禁已存在，但"部署只认过门禁 digest"尚未成为校验规则 |
+   | 控制台 UI | topology/role 编辑（admin-ui-change 流程）；当前仅 API/etcd 可配 |
+   | API 路径 e2e | rig 验证走的是直写 etcd；`start_model` 新增字段后的 API 路径未在真机走一遍 |
+   | 多 owner 索引 | v1.1（评审 #5）：decode 池内本地优先 |
 
 ### 可信性收敛批次（assessment REWORK 后插队，2026-10-12；详见 [`../dev/assessment.md`](../dev/assessment.md)）
 
