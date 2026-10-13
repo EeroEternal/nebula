@@ -205,13 +205,18 @@ pub fn kv_sharing_env(role: ReplicaRole, kv: &KvSharingSpec) -> Vec<(&'static st
 /// `controller_url` is the monitor endpoint the engine reports to
 /// (host:9001); `instance_id` must be unique per replica.
 pub fn lmcache_controller_env(
-    controller_url: &str,
+    pull_url: &str,
+    reply_url: &str,
     worker_port: u16,
     instance_id: &str,
 ) -> Vec<(&'static str, String)> {
+    // LMCache validates all four when enable_controller=True
+    // (config.py::_validate_config); a missing reply URL crash-loops the
+    // engine at startup (rig, 2026-10-13).
     vec![
         ("LMCACHE_ENABLE_CONTROLLER", "True".to_string()),
-        ("LMCACHE_CONTROLLER_PULL_URL", controller_url.to_string()),
+        ("LMCACHE_CONTROLLER_PULL_URL", pull_url.to_string()),
+        ("LMCACHE_CONTROLLER_REPLY_URL", reply_url.to_string()),
         ("LMCACHE_LMCACHE_WORKER_PORTS", worker_port.to_string()),
         ("LMCACHE_LMCACHE_INSTANCE_ID", instance_id.to_string()),
     ]
@@ -408,10 +413,14 @@ mod tests {
 
     #[test]
     fn controller_env_matches_lmcache_config_keys() {
-        let env = lmcache_controller_env("host:9001", 8001, "m-0");
+        let env = lmcache_controller_env("host:8300", "host:8400", 8001, "m-0");
         let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
         assert_eq!(get("LMCACHE_ENABLE_CONTROLLER"), Some("True".into()));
-        assert_eq!(get("LMCACHE_CONTROLLER_PULL_URL"), Some("host:9001".into()));
+        assert_eq!(get("LMCACHE_CONTROLLER_PULL_URL"), Some("host:8300".into()));
+        assert_eq!(
+            get("LMCACHE_CONTROLLER_REPLY_URL"),
+            Some("host:8400".into())
+        );
         assert_eq!(get("LMCACHE_LMCACHE_WORKER_PORTS"), Some("8001".into()));
         assert_eq!(get("LMCACHE_LMCACHE_INSTANCE_ID"), Some("m-0".into()));
     }

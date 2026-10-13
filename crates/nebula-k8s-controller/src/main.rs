@@ -475,6 +475,8 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         // Controller registration: makes the shared store's contents queryable
         // (POST /lookup) — the pd_split warm signal source.
         if let Ok(ctrl) = std::env::var("NEBULA_LMCACHE_CONTROLLER_URL") {
+            let ctrl_reply = std::env::var("NEBULA_LMCACHE_CONTROLLER_REPLY_URL")
+                .unwrap_or_else(|_| ctrl.clone());
             let worker_port: u16 = std::env::var("NEBULA_LMCACHE_WORKER_PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -482,6 +484,7 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
             let instance_id = format!("{model_uid}-{replica_id}");
             kv_envs.extend(nebula_common::lmcache_controller_env(
                 &ctrl,
+                &ctrl_reply,
                 worker_port,
                 &instance_id,
             ));
