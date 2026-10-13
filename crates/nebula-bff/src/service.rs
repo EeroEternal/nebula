@@ -529,6 +529,8 @@ pub async fn create_model(
             store,
             &uid,
             StartModelRequest {
+                topology: None,
+                kv_sharing: None,
                 replicas: req.replicas,
                 min_replicas: None,
                 max_replicas: None,
@@ -1080,6 +1082,8 @@ pub async fn deploy_template(
         store,
         &uid,
         StartModelRequest {
+            topology: None,
+            kv_sharing: None,
             replicas: Some(req.replicas.unwrap_or(tpl.default_replicas)),
             min_replicas: None,
             max_replicas: None,

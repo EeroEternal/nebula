@@ -17,6 +17,13 @@ set -euo pipefail
 BIN_DIR="${BIN_DIR:-$HOME/nebula-src/target/release}"
 LOG_DIR="${LOG_DIR:-$HOME/nebula-stack-logs}"
 ETCD_CONTAINER="${ETCD_CONTAINER:-nebula-etcd}"
+# pd_split shared-KV components (optional; only needed for topology=pd_split)
+LMCACHE_IMAGE="${LMCACHE_IMAGE:-}"            # e.g. nebula/vllm:0.23.0-lmcache0.5.5
+LMCACHE_SERVER_CONTAINER="${LMCACHE_SERVER_CONTAINER:-nebula-lmcache}"
+LMCACHE_CTRL_CONTAINER="${LMCACHE_CTRL_CONTAINER:-nebula-lmcache-ctrl}"
+LMCACHE_REMOTE_PORT="${LMCACHE_REMOTE_PORT:-6800}"
+LMCACHE_CTRL_PORT="${LMCACHE_CTRL_PORT:-9000}"
+KV_HASH_SEED="${NEBULA_KV_HASH_SEED:-42}"
 ETCD_ENDPOINT="${ETCD_ENDPOINT:-http://127.0.0.1:12379}"   # host -> etcd (docker -p 12379:2379)
 ETCDCTL_ENDPOINT="${ETCDCTL_ENDPOINT:-127.0.0.1:2379}"     # inside the etcd container
 GATEWAY_PORT="${GATEWAY_PORT:-8081}"
@@ -89,6 +96,9 @@ start_procs() {
 cmd_status() {
   echo "--- etcd container ---"
   docker ps -a --filter "name=^/${ETCD_CONTAINER}$" --format '{{.Names}}  {{.Status}}' 2>/dev/null || true
+  echo "--- lmcache (pd_split) ---"
+  docker ps -a --filter "name=^/${LMCACHE_SERVER_CONTAINER}$" --filter "name=^/${LMCACHE_CTRL_CONTAINER}$" \
+    --format '{{.Names}}  {{.Status}}' 2>/dev/null || true
   echo "--- control plane ---"
   pgrep -af "$BIN_DIR/nebula-" || echo "(none)"
   echo "--- pods ($K8S_NAMESPACE) ---"
@@ -105,8 +115,38 @@ cmd_status() {
   fi
 }
 
+# pd_split shared-KV components. Neither is required for replicated
+# deployments: skip silently unless LMCACHE_IMAGE is set.
+ensure_lmcache_up() {
+  if [ -z "$LMCACHE_IMAGE" ]; then
+    log "LMCACHE_IMAGE unset — skipping lmcache_server / lmcache_controller (replicated topologies only)"
+    return 0
+  fi
+  for spec in "$LMCACHE_SERVER_CONTAINER:lmcache_server:$LMCACHE_REMOTE_PORT" \
+              "$LMCACHE_CTRL_CONTAINER:lmcache_controller:$LMCACHE_CTRL_PORT"; do
+    name="${spec%%:*}"; rest="${spec#*:}"; cmd="${rest%%:*}"; port="${rest##*:}"
+    if docker ps --format '{{.Names}}' | grep -qx "$name"; then
+      log "$name already running"
+      continue
+    fi
+    log "starting $name ($cmd, port $port)"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    if [ "$cmd" = "lmcache_server" ]; then
+      docker run -d --name "$name" --network host -e PYTHONHASHSEED="$KV_HASH_SEED" \
+        --entrypoint lmcache_server "$LMCACHE_IMAGE" 0.0.0.0 "$port" cpu >/dev/null
+    else
+      # The controller must share the engines' hash seed (block-hash domain).
+      docker run -d --name "$name" --network host -e PYTHONHASHSEED="$KV_HASH_SEED" \
+        --entrypoint lmcache_controller "$LMCACHE_IMAGE" \
+        --host 0.0.0.0 --port "$port" --monitor-port "$((port + 1))" >/dev/null
+    fi
+  done
+  return 0
+}
+
 cmd_start() {
   ensure_etcd_up
+  ensure_lmcache_up
   start_procs
   log "restoring deployment expectation /deployments/$MODEL_UID"
   etcdctl_ put "/deployments/$MODEL_UID" "$DEPLOYMENT_JSON" >/dev/null
@@ -126,6 +166,14 @@ cmd_stop() {
     kubectl delete pod -n "$K8S_NAMESPACE" "$MODEL_POD" --ignore-not-found --wait=false >/dev/null 2>&1 || true
     kubectl delete pod -n "$K8S_NAMESPACE" -l "nebula.model_uid=$MODEL_UID" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   fi
+  # 2b) stop pd_split shared-KV components (KV is a cache; loss is expected)
+  for name in "$LMCACHE_CTRL_CONTAINER" "$LMCACHE_SERVER_CONTAINER"; do
+    if docker ps --format '{{.Names}}' | grep -qx "$name"; then
+      log "stopping $name"
+      docker rm -f "$name" >/dev/null 2>&1 || true
+    fi
+  done
+
   # 3) stop the control plane
   local p
   for p in nebula-k8s-controller nebula-bff nebula-gateway nebula-router; do

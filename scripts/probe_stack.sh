@@ -39,3 +39,17 @@ fi
 echo ""
 echo "=== GPU (nvidia-smi) ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu --format=csv,noheader 2>/dev/null || echo "(no GPU)"
+
+# --- pd_split shared-KV components (optional) ---------------------------------
+LMCACHE_HTTP="${LMCACHE_HTTP:-http://127.0.0.1:9000}"
+if curl -sf -X POST "$LMCACHE_HTTP/lookup" -H 'Content-Type: application/json' \
+     -d '{"tokens": [1]}' >/dev/null 2>&1; then
+  echo "lmcache_controller: reachable ($LMCACHE_HTTP/lookup)"
+else
+  echo "lmcache_controller: not reachable (expected for replicated-only deployments)"
+fi
+if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx nebula-lmcache; then
+  echo "lmcache_server: running (shared KV store)"
+else
+  echo "lmcache_server: not running (expected for replicated-only deployments)"
+fi
