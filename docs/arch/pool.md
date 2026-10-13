@@ -165,10 +165,28 @@ stage = warm → decode 池（便宜地 retrieve）
 
 **⚠️ rig 阻断（2026-10-12，必须解决的 v1 前置）**：启用 `LMCacheConnectorV1` 后，引擎日志明确输出 **`LMCache INFO: KV events are disabled.`**（`cache_engine.py:188`）——**LMCache 接管 KV 路径后停用了 vLLM 的 kv-events 发布**。实测：569-token prompt 只产生 1 条索引条目、`prefix_hit_total=0`，两条请求都落 prefill（`prefix_lookup_total=2` 证明哈希/查表已在跑）。因此**P1c 索引在 pd_split 形态下不能充当 warm 信号**。
 
-可选解法（v1 前置，按优先级）：
-1. **改用 LMCache 自身的 lookup/controller API** 作为 warm 信号（store-level 事实，语义最正；需接 `lmcache_controller`/lookup 接口，v1.1 工作量）；
-2. 查 LMCache 是否有开关保留 vLLM kv-events（若配置可解，成本最低）；
-3. 退路：pd_split v1 不依赖 warm 信号——decode 副本 `kv_both` 天然"命中即取、miss 自 prefill"，把冷热都路由 decode 池，prefill 池仅用于预热/写入（需重写 v1 路由规则并重新验证收益）。
+**✅ 解法 1 已落地并真机验证（2026-10-13）**：warm 信号改用 **LMCache controller** 的 `POST /lookup`（store-level 权威事实）。
+
+```
+请求 → Router 对 prompt 分词 → POST <controller>:9000/lookup {"tokens":[...]}
+     → {"layout_info":{"<instance>":["LocalCPUBackend", 569]}}   # 命中 token 数
+     hit > 0 → warm → decode 池；否则 cold → prefill 池
+     响应按 (model, 首 token) 缓存 2s；任何错误/200ms 超时 → 降级为 cold（可见计数）
+```
+
+- 引擎侧注册：`lmcache_controller_env`（四项必填：`ENABLE_CONTROLLER` / `CONTROLLER_PULL_URL`(8300) / `CONTROLLER_REPLY_URL`(8400) / `WORKER_PORTS` + `INSTANCE_ID`）——缺 reply URL 会 crash-loop（rig 教训）。
+- 脚本：`lmcache_controller --host 0.0.0.0 --port 9000 --monitor-port 9001`（**必须带 `PYTHONHASHSEED`**，与引擎同值）。
+- 新计数：`nebula_router_pd_lookup_total` / `pd_lookup_warm_total`。
+
+**真机验证（2026-10-13，8×5090）**：
+| 检查 | 结果 |
+|---|---|
+| controller 命中 | `{"qwen25-7b-1":["LocalCPUBackend",512],"qwen25-7b-0":["LocalCPUBackend",569]}` |
+| Router 计数 | `pd_lookup_total=2, pd_lookup_warm_total=2` |
+| 路由分布 | **prefill=1 / decode=2**（冷→prefill，暖→decode） |
+| KV 取回 | decode 副本 `Retrieved 512/512 tokens (0.0273 GB)` + `hit tokens: 512` |
+
+
 
 **已实证的部分（不受此阻断影响）**：角色注入（prefill `kv_producer`+`SAVE_UNFULL_CHUNK` / decode `kv_both`+`RETRIEVE_LOCATIONS`，同 seed=42）、scheduler 投影、EndpointInfo.role 注册、共享存储写入与取回（prefill 副本二次请求 **Retrieved 569/569 tokens**）、stage 过滤逻辑与计数器（单测全绿）。
 
