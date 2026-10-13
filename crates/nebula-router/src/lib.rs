@@ -20,6 +20,26 @@ use strategy::{Candidate, LeastPending, RoutingStrategy, SelectionCtx};
 /// admission control kicks in and returns Overloaded.
 const KV_CACHE_OVERLOAD_THRESHOLD: f64 = 0.95;
 
+/// Extract the largest matched-prefix length from an LMCache controller
+/// `/lookup` response. Shapes seen in the wild (both mean "n tokens cached"):
+///   {"event_id": "...", "lmcache_default_instance": ["LocalCPUBackend", 512]}
+///   {"event_id": "...", "layout_info": {"<instance>": ["LocalCPUBackend", 569]}}
+fn max_matched_tokens(v: &serde_json::Value) -> Option<u64> {
+    fn scan(m: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+        m.iter()
+            .filter(|(k, _)| k.as_str() != "event_id")
+            .filter_map(|(_, val)| match val {
+                // instance -> ["LocalCPUBackend", n]
+                serde_json::Value::Array(a) => a.get(1).and_then(|n| n.as_u64()),
+                // layout_info -> {instance -> ["LocalCPUBackend", n]}
+                serde_json::Value::Object(inner) => scan(inner),
+                _ => None,
+            })
+            .max()
+    }
+    v.as_object().and_then(scan)
+}
+
 /// pd_split controller lookups are cached briefly (prefix warmth changes on
 /// the order of evictions, not requests) and time out fast so routing never
 /// stalls on the controller.
@@ -350,18 +370,10 @@ impl Router {
         {
             Ok(resp) if resp.status().is_success() => {
                 match resp.json::<serde_json::Value>().await {
-                    // {"event_id": "...", "<instance>": ["LocalCPUBackend", 512]}
-                    Ok(v) => v
-                        .as_object()
-                        .and_then(|m| {
-                            m.iter()
-                                .find(|(k, _)| k.as_str() != "event_id")
-                                .and_then(|(_, val)| val.as_array())
-                                .and_then(|a| a.get(1))
-                                .and_then(|n| n.as_u64())
-                        })
-                        .map(|matched| matched > 0)
-                        .unwrap_or(false),
+                    Ok(v) => {
+                        let matched = max_matched_tokens(&v);
+                        matched.map(|n| n > 0).unwrap_or(false)
+                    }
                     Err(e) => {
                         tracing::warn!(error = %e, "pd_split lookup response unparseable; treating as cold");
                         false
@@ -1238,6 +1250,34 @@ mod plan_version_tests {
         // Replicated model → hashing stays off for non-affinity strategies.
         router.upsert_endpoint(ready_ep("m2", 0, 1));
         assert!(!router.model_has_role_pools("m2"));
+    }
+
+    /// Both controller response shapes must yield the matched-token count
+    /// (rig: the live controller nests it under `layout_info`; the docs show
+    /// the flat form).
+    #[test]
+    fn controller_lookup_response_shapes() {
+        let nested: serde_json::Value = serde_json::json!({
+            "event_id": "Lookupff0e",
+            "layout_info": { "qwen25-7b-0": ["LocalCPUBackend", 569] }
+        });
+        assert_eq!(max_matched_tokens(&nested), Some(569));
+        let flat: serde_json::Value = serde_json::json!({
+            "event_id": "x",
+            "lmcache_default_instance": ["LocalCPUBackend", 512]
+        });
+        assert_eq!(max_matched_tokens(&flat), Some(512));
+        // No match → 0 / absent → None
+        let empty: serde_json::Value = serde_json::json!({
+            "event_id": "x", "layout_info": {}
+        });
+        assert_eq!(max_matched_tokens(&empty), None);
+        // Multiple instances → the deepest match wins
+        let multi: serde_json::Value = serde_json::json!({
+            "event_id": "x",
+            "layout_info": { "a": ["LocalCPUBackend", 256], "b": ["LocalCPUBackend", 569] }
+        });
+        assert_eq!(max_matched_tokens(&multi), Some(569));
     }
 
     #[test]
