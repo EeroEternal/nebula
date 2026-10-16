@@ -235,6 +235,16 @@ export interface ModelDeployment {
   node_affinity?: string | null
   gpu_affinity?: number[] | null
   config_overrides?: ModelConfig | null
+  topology?: 'replicated' | 'pd_split'
+  kv_sharing?: {
+    remote_url: string
+    serde?: string
+  } | null
+  replica_specs?: Array<{
+    role?: 'mixed' | 'prefill' | 'decode'
+    image_id?: string | null
+    node_id?: string | null
+  }>
   version: number
   updated_at_ms: number
 }
