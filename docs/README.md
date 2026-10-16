@@ -48,7 +48,7 @@
 | [`arch/vision.md`](arch/vision.md) | 统一模型服务平台总纲：定位、能力分层（L0–L4）、原则与演进 |
 | [`arch/architecture.md`](arch/architecture.md) | 系统架构（L0 组件级实现） |
 | [`arch/selection.md`](arch/selection.md) | L3 智能选择层：画像、打分、草稿与半自动落地 |
-| [`arch/pool.md`](arch/pool.md) | L2 资源池：HardwarePool、池约束、拓扑与故障隔离（设计） |
+| [`arch/pool.md`](arch/pool.md) | L2 资源池与 `pd_split`：HardwarePool、池约束、共享 KV 角色化放置/路由与故障注入实测 |
 | [`arch/roadmap.md`](arch/roadmap.md) | 排期（与 vision Phase 0–3 对齐） |
 | [`arch/data-plane-perf-optimization.md`](arch/data-plane-perf-optimization.md) | 极速数据面优化：嵌入式路由、零拷贝流式代理与引擎感知分流 |
 | [`arch/control-plane-adapters.md`](arch/control-plane-adapters.md) | 控制面无关数据面适配契约（草案）：Auth / EndpointDirectory / Policy；`CONTROL_PLANE=none` 默认可单独跑 |
@@ -68,8 +68,9 @@
 | [`dev/hw/phase0-pro6000.md`](dev/hw/phase0-pro6000.md) | Phase 0 真机（pro6000 / RTX PRO 6000）验证摘要 |
 | [`dev/hw/vllm-serving-perf.md`](dev/hw/vllm-serving-perf.md) | vLLM 服务层（Rust 前端 vs Python）与 Nebula 数据面性能实验（RTX 5090） |
 | [`dev/landscape.md`](dev/landscape.md) | 推理编排框架对照（Dynamo / llm-d）与 Nebula 的能力缺口 |
-| [`dev/direction.md`](dev/direction.md) | **发展方向备忘**：定位、三条主线、优先级与明确不做 |
+| [`dev/direction.md`](dev/direction.md) | **发展方向与编排边界备忘**：State- & Stage-Aware 定位、MapReduce 五原则、Zone A–C / S1–S3 边界与“用约束替代强耦合” |
 | [`dev/assessment.md`](dev/assessment.md) | **范围与设计评估**（2026-10-12）：治理边界、路由一致性、PD 语义与交付建议 |
+| [`dev/benefit-verification.md`](dev/benefit-verification.md) | **收益验证报告（客户端口径）**：前缀亲和在冷启动与暖态过载下的 Goodput / P99 / 拒绝率实测 |
 | [`dev/queue-admission.md`](dev/queue-admission.md) | **P0-#2 设计**：引擎级有界公平队列准入（不做 AIMD） |
-| [`dev/prefix-affinity.md`](dev/prefix-affinity.md) | **P1 进展**：多副本 + 前缀亲和（启发式实测无效，需 KV events） |
-| [`dev/engines.md`](dev/engines.md) | 多引擎对齐（vLLM / SGLang）：两条执行面统一能力/指标/健康 |
+| [`dev/prefix-affinity.md`](dev/prefix-affinity.md) | **P1 多副本与前缀亲和**：ZMQ KV events、`sha256_cbor` 链式哈希、`chat_template` 对齐与 `nebula-indexd` 全局索引 |
+| [`dev/engines.md`](dev/engines.md) | 多引擎对齐（vLLM / SGLang）与 LMCache 共享 KV 选型实测 |

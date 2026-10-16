@@ -44,13 +44,14 @@
 
 | 谁 | 做什么 |
 |----|--------|
-| **推理引擎** | 单机或引擎原生分布式上的推理、细粒度 batch、KV、原生优化 |
-| **Nebula** | 模型放哪、起几份、对外统一入口、鉴权审计、兼容与选型、SLO/成本/多租户、故障隔离与发布 |
+| **推理引擎（Zone A/B · S1）** | 单机或引擎原生分布式上的推理、细粒度 batch、KV 内核与进程内 Stage、原生优化 |
+| **共享 KV 中间层（S3）** | 远端 KV 存储（如 `lmcache_server`）；KV 字节流只在引擎与存储间传输，永远旁路 Nebula |
+| **Nebula（Zone C · S2）** | **围绕 KV 中间状态的数据亲和与阶段化解耦调度（State- & Stage-Aware Orchestration）**：模型放哪、角色（prefill/decode）怎么分池、按前缀/冷暖信号选路、统一入口、鉴权审计、兼容与选型、SLO/成本/多租户、故障隔离与发布（详见 [`../dev/direction.md`](../dev/direction.md) §8–§10） |
 
 请求主路径：
 
 ```text
-业务系统 → Gateway（一致性接入）→ Router（按 Placement 选路）→ 引擎进程
+业务系统 → Gateway（一致性接入）→ Router（按 Placement + KV/Stage 信号选路）→ 引擎进程
 控制与治理：控制台 / CLI → BFF → etcd 声明式期望 → Scheduler / Node
 ```
 
@@ -276,6 +277,7 @@
 7. **异构只做放置与健康**，不接管引擎内部 PD/worker。外部控制面（PowerLLM / Dynamo / llm-d）不得叉进 Gateway/Router 热路径，见 [`control-plane-adapters.md`](./control-plane-adapters.md)。控制台边缘（BFF）可为外部控制台提供协议兼容层（如 v1.9.0 的 PowerLLM 控制台兼容），那不属于热路径，也不得反向侵入 Gateway/Router。
 8. **观测失败不影响 token 流**；高基数信息不进 Prometheus label。
 9. **不训练、不聚合公有云 API、不 Actor 回潮**。
+10. **用声明式约束与共享不变量替代运行时强耦合**：死守 Zone C（引擎黑盒之上），在 S2（跨副本角色与路由）发力——不碰引擎内部 Stage（S1）、不经 Nebula 搬运 KV 字节（S3）、不做单请求跨节点硬绑交接；通过**部署期准入/Digest 白名单硬约束 + 全栈统一哈希不变量（`NEBULA_KV_HASH_SEED`）+ 可丢可重算（Recompute on Failure）的 Hint 信号**实现跨副本 KV 亲和与 PD 阶段解耦（见 [`../dev/direction.md`](../dev/direction.md) §9–§10）。
 
 ---
 
