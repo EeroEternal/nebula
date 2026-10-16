@@ -114,18 +114,137 @@ pub fn parse_topic(topic: &[u8]) -> Option<(String, u32)> {
     Some((model.to_string(), replica))
 }
 
-/// Rebuildable map of `(model_uid, block_hash) → (replica_id, last_seen_ms)`.
+/// Per-replica canonical keys for a model snapshot.
+pub type ReplicaSnapshot = Vec<(u32, Vec<Vec<u8>>)>;
+
+/// Per-replica `(last_seen_ms, epoch, generation)` ownership map for a block hash.
+type OwnerMap = std::collections::BTreeMap<u32, (u64, u64, u64)>;
+
+static NEXT_LOCAL_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_publisher_epoch() -> u64 {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(1);
+    let seq = NEXT_LOCAL_EPOCH.fetch_add(1, Ordering::Relaxed);
+    ts.wrapping_shl(12).wrapping_add(seq).max(1)
+}
+
+#[inline]
+fn is_older_watermark(
+    inc_epoch: u64,
+    inc_gen: u64,
+    inc_ts: u64,
+    ref_epoch: u64,
+    ref_gen: u64,
+    ref_ts: u64,
+) -> bool {
+    if inc_epoch == ref_epoch {
+        inc_gen < ref_gen
+    } else {
+        inc_ts < ref_ts
+    }
+}
+
+/// Encode `(epoch, generation)` into a 16-byte sequence frame.
+pub fn encode_watermark(epoch: u64, gen: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16);
+    out.extend_from_slice(&epoch.to_be_bytes());
+    out.extend_from_slice(&gen.to_be_bytes());
+    out
+}
+
+/// Parse a sequence frame into `(epoch, generation)`. Supports 16-byte
+/// `(epoch, gen)` frames as well as legacy 8-byte `gen`-only frames (`epoch = 0`).
+pub fn parse_watermark(seq_frame: &[u8]) -> (u64, u64) {
+    if seq_frame.len() == 16 {
+        let mut e_buf = [0u8; 8];
+        let mut g_buf = [0u8; 8];
+        e_buf.copy_from_slice(&seq_frame[..8]);
+        g_buf.copy_from_slice(&seq_frame[8..16]);
+        (u64::from_be_bytes(e_buf), u64::from_be_bytes(g_buf))
+    } else if seq_frame.len() == 8 {
+        let mut g_buf = [0u8; 8];
+        g_buf.copy_from_slice(seq_frame);
+        (0, u64::from_be_bytes(g_buf))
+    } else {
+        (0, 0)
+    }
+}
+
+/// Rebuildable multi-owner map of `(model_uid, block_hash) → {replica_id: (last_seen_ms, epoch, generation)}`.
+///
+/// Tracks per-replica ownership so `pd_split` deployments (where both `Prefill`
+/// and one or more `Decode` replicas emit `BlockStored` for the same block)
+/// retain every holder instead of letting the last writer overwrite earlier
+/// holders. Also tracks a publisher `(epoch, generation)` watermark plus
+/// per-replica removal tombstones `(model_uid, block_hash, replica_id) → (epoch, removed_gen, ts_ms)`:
+/// - Within the same publisher `epoch` (`indexd` or a single router), `generation`
+///   strictly orders interleaved snapshots (`!reset` / `!snapshot`) and live deltas.
+/// - When `indexd` restarts with a new `epoch`, its fresh `generation` counter is
+///   never blocked by the previous incarnation's `model_reset_watermark`.
+/// - Across different HA peer routers (`epoch_a != epoch_b`), independent counters
+///   are never compared directly; recency falls back to `last_seen_ms`.
+type TombstoneKey = (String, Vec<u8>, u32);
+type TombstoneVal = (u64, u64, u64);
+type Watermark = (u64, u64);
+
 pub struct PrefixIndex {
-    map: DashMap<(String, Vec<u8>), (u32, u64)>,
+    map: DashMap<(String, Vec<u8>), OwnerMap>,
+    tombstones: DashMap<TombstoneKey, TombstoneVal>,
+    model_reset_watermark: DashMap<String, Watermark>,
+    epoch: u64,
+    generation: AtomicU64,
     inserts_total: AtomicU64,
+    stale_dropped_total: AtomicU64,
 }
 
 impl PrefixIndex {
     pub fn new() -> Arc<Self> {
+        Self::with_epoch(allocate_publisher_epoch())
+    }
+
+    pub fn with_epoch(epoch: u64) -> Arc<Self> {
         Arc::new(Self {
             map: DashMap::new(),
+            tombstones: DashMap::new(),
+            model_reset_watermark: DashMap::new(),
+            epoch,
+            generation: AtomicU64::new(0),
             inserts_total: AtomicU64::new(0),
+            stale_dropped_total: AtomicU64::new(0),
         })
+    }
+
+    /// Publisher epoch identifier for this index instance.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Allocate the next monotonic generation number within this instance's epoch.
+    pub fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Current generation watermark (used by `indexd` when taking a snapshot).
+    pub fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    fn observe_local_generation(&self, gen: u64) {
+        let mut cur = self.generation.load(Ordering::Relaxed);
+        while gen > cur {
+            match self.generation.compare_exchange_weak(
+                cur,
+                gen,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -140,7 +259,12 @@ impl PrefixIndex {
         self.inserts_total.load(Ordering::Relaxed)
     }
 
-    /// Gauge for /metrics: live index entries (routing hints).
+    /// Number of events/snapshots ignored because a newer watermark was already present.
+    pub fn stale_dropped_total(&self) -> u64 {
+        self.stale_dropped_total.load(Ordering::Relaxed)
+    }
+
+    /// Gauge for /metrics: live index entries (distinct `(model_uid, block_hash)` keys).
     pub fn entries(&self) -> usize {
         self.map.len()
     }
@@ -149,7 +273,9 @@ impl PrefixIndex {
     pub fn entries_by_model(&self) -> std::collections::HashMap<String, usize> {
         let mut out = std::collections::HashMap::new();
         for e in self.map.iter() {
-            *out.entry(e.key().0.clone()).or_insert(0) += 1;
+            if !e.value().is_empty() {
+                *out.entry(e.key().0.clone()).or_insert(0) += 1;
+            }
         }
         out
     }
@@ -158,24 +284,90 @@ impl PrefixIndex {
     pub fn models(&self) -> Vec<String> {
         let mut seen = std::collections::BTreeSet::new();
         for e in self.map.iter() {
-            seen.insert(e.key().0.clone());
+            if !e.value().is_empty() {
+                seen.insert(e.key().0.clone());
+            }
         }
         seen.into_iter().collect()
     }
 
     /// Per-replica canonical keys for one model (snapshot payload).
-    pub fn snapshot_for(&self, model_uid: &str) -> Vec<(u32, Vec<Vec<u8>>)> {
+    pub fn snapshot_for(&self, model_uid: &str) -> ReplicaSnapshot {
         let mut per: std::collections::BTreeMap<u32, Vec<Vec<u8>>> = Default::default();
         for e in self.map.iter() {
             if e.key().0 == model_uid {
-                per.entry(e.value().0).or_default().push(e.key().1.clone());
+                for &replica_id in e.value().keys() {
+                    per.entry(replica_id).or_default().push(e.key().1.clone());
+                }
             }
         }
         per.into_iter().collect()
     }
 
-    /// Drop every entry of a model (snapshot replace semantics).
+    /// Snapshot the publisher `(epoch, generation)` watermark and per-replica keys for a model.
+    pub fn snapshot_for_with_gen(&self, model_uid: &str) -> (u64, ReplicaSnapshot) {
+        let gen = self.current_generation().max(1);
+        (gen, self.snapshot_for(model_uid))
+    }
+
+    /// Drop every entry of a model unconditionally (unversioned reset).
+    #[cfg(test)]
     pub fn clear_model(&self, model_uid: &str) {
+        self.clear_model_at_watermark(model_uid, 0, 0);
+    }
+
+    pub fn clear_model_at_gen(&self, model_uid: &str, reset_gen: u64) {
+        self.clear_model_at_watermark(model_uid, self.epoch, reset_gen);
+    }
+
+    /// Drop entries of `model_uid` for a snapshot reset at `(epoch, reset_gen)`.
+    ///
+    /// - Within the same `epoch`, preserves any newer delta (`e_gen > reset_gen`)
+    ///   that arrived before an in-flight snapshot reset, and ignores a stale
+    ///   `!reset` if a higher `reset_gen` for that `epoch` was already applied.
+    /// - When `indexd` restarts with a new `epoch` (`epoch != prev_epoch`),
+    ///   adopts the new `(epoch, reset_gen)` watermark instead of getting stuck
+    ///   on the previous incarnation's higher `reset_gen`.
+    pub fn clear_model_at_watermark(&self, model_uid: &str, epoch: u64, reset_gen: u64) {
+        if reset_gen == 0 {
+            self.model_reset_watermark.remove(model_uid);
+        } else {
+            if epoch == self.epoch {
+                self.observe_local_generation(reset_gen);
+            }
+            let mut prev_epoch_to_purge: Option<u64> = None;
+            if let Some(prev) = self.model_reset_watermark.get(model_uid) {
+                let (prev_epoch, prev_gen) = *prev.value();
+                if prev_epoch == epoch && reset_gen < prev_gen {
+                    self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        model_uid = %model_uid,
+                        epoch,
+                        reset_gen,
+                        prev_gen,
+                        "ignoring stale snapshot reset from same epoch"
+                    );
+                    return;
+                }
+                if prev_epoch != epoch {
+                    prev_epoch_to_purge = Some(prev_epoch);
+                }
+            }
+            self.model_reset_watermark
+                .insert(model_uid.to_string(), (epoch, reset_gen));
+            if let Some(old_epoch) = prev_epoch_to_purge {
+                let tkeys: Vec<(String, Vec<u8>, u32)> = self
+                    .tombstones
+                    .iter()
+                    .filter(|e| e.key().0 == model_uid && e.value().0 == old_epoch)
+                    .map(|e| e.key().clone())
+                    .collect();
+                for k in tkeys {
+                    self.tombstones.remove(&k);
+                }
+            }
+        }
+
         let keys: Vec<(String, Vec<u8>)> = self
             .map
             .iter()
@@ -183,11 +375,89 @@ impl PrefixIndex {
             .map(|e| e.key().clone())
             .collect();
         for k in keys {
-            self.map.remove(&k);
+            if reset_gen == 0 {
+                self.map.remove(&k);
+            } else {
+                let mut remove_key = false;
+                if let Some(mut entry) = self.map.get_mut(&k) {
+                    // Keep only entries from the same epoch that are strictly
+                    // newer than `reset_gen`; older entries (or entries from a
+                    // superseded indexd epoch) are replaced by the snapshot.
+                    entry.value_mut().retain(|_, &mut (_, e_epoch, e_gen)| {
+                        e_epoch == epoch && e_gen > reset_gen
+                    });
+                    remove_key = entry.value().is_empty();
+                }
+                if remove_key {
+                    self.map.remove(&k);
+                }
+            }
+        }
+        if reset_gen == 0 {
+            let tkeys: Vec<(String, Vec<u8>, u32)> = self
+                .tombstones
+                .iter()
+                .filter(|e| e.key().0 == model_uid)
+                .map(|e| e.key().clone())
+                .collect();
+            for k in tkeys {
+                self.tombstones.remove(&k);
+            }
         }
     }
 
     pub fn apply(&self, model_uid: &str, replica_id: u32, events: &[KvEvent], now_ms: u64) {
+        let gen = self.next_generation();
+        self.apply_with_watermark(model_uid, replica_id, events, now_ms, self.epoch, gen);
+    }
+
+    pub fn apply_with_gen(
+        &self,
+        model_uid: &str,
+        replica_id: u32,
+        events: &[KvEvent],
+        now_ms: u64,
+        gen: u64,
+    ) {
+        self.apply_with_watermark(model_uid, replica_id, events, now_ms, self.epoch, gen);
+    }
+
+    pub fn apply_with_watermark(
+        &self,
+        model_uid: &str,
+        replica_id: u32,
+        events: &[KvEvent],
+        now_ms: u64,
+        epoch: u64,
+        gen: u64,
+    ) {
+        let (epoch, gen) = if gen == 0 {
+            (self.epoch, self.next_generation())
+        } else {
+            let eff_epoch = if epoch == 0 { self.epoch } else { epoch };
+            if eff_epoch == self.epoch {
+                self.observe_local_generation(gen);
+            }
+            (eff_epoch, gen)
+        };
+        if let Some((reset_epoch, reset_gen)) = self
+            .model_reset_watermark
+            .get(model_uid)
+            .map(|g| *g.value())
+        {
+            if epoch == reset_epoch && gen < reset_gen {
+                self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    model_uid = %model_uid,
+                    replica_id,
+                    epoch,
+                    gen,
+                    reset_gen,
+                    "dropping kv event older than model reset watermark"
+                );
+                return;
+            }
+        }
         // Canonical 8-byte external keyspace (see hash_to_key).
         let canon = |h: &Vec<u8>| -> Vec<u8> {
             if h.len() >= 8 {
@@ -207,81 +477,208 @@ impl PrefixIndex {
                     if matches!(medium.as_deref(), Some("CPU") | Some("STORAGE")) {
                         continue;
                     }
+                    let mut inserted_any = false;
                     for h in block_hashes {
+                        let c = canon(h);
+                        let key = (model_uid.to_string(), c.clone());
+                        let tkey = (model_uid.to_string(), c, replica_id);
+                        if let Some(existing) = self.map.get(&key) {
+                            if let Some(&(ex_ts, ex_epoch, ex_gen)) =
+                                existing.value().get(&replica_id)
+                            {
+                                if is_older_watermark(epoch, gen, now_ms, ex_epoch, ex_gen, ex_ts) {
+                                    self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(tomb) = self.tombstones.get(&tkey) {
+                            let (t_epoch, t_gen, t_ts) = *tomb.value();
+                            if is_older_watermark(epoch, gen, now_ms, t_epoch, t_gen, t_ts) {
+                                self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                            drop(tomb);
+                            self.tombstones.remove(&tkey);
+                        }
                         self.map
-                            .insert((model_uid.to_string(), canon(h)), (replica_id, now_ms));
+                            .entry(key)
+                            .or_default()
+                            .insert(replica_id, (now_ms, epoch, gen));
+                        inserted_any = true;
                     }
-                    self.inserts_total.fetch_add(1, Ordering::Relaxed);
+                    if inserted_any {
+                        self.inserts_total.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 KvEvent::Removed { block_hashes } => {
                     for h in block_hashes {
-                        let key = (model_uid.to_string(), canon(h));
-                        if let Some(entry) = self.map.get(&key) {
-                            if entry.value().0 == replica_id {
-                                drop(entry);
-                                self.map.remove(&key);
+                        let c = canon(h);
+                        let key = (model_uid.to_string(), c.clone());
+                        let tkey = (model_uid.to_string(), c, replica_id);
+                        let mut skip = false;
+                        let mut remove_key = false;
+                        if let Some(mut existing) = self.map.get_mut(&key) {
+                            if let Some(&(ex_ts, ex_epoch, ex_gen)) =
+                                existing.value().get(&replica_id)
+                            {
+                                if is_older_watermark(epoch, gen, now_ms, ex_epoch, ex_gen, ex_ts) {
+                                    skip = true;
+                                } else {
+                                    existing.value_mut().remove(&replica_id);
+                                    remove_key = existing.value().is_empty();
+                                }
                             }
                         }
+                        if skip {
+                            self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
+                            continue;
+                        }
+                        if remove_key {
+                            self.map.remove(&key);
+                        }
+                        self.tombstones
+                            .entry(tkey)
+                            .and_modify(|(t_epoch, t_gen, t_ts)| {
+                                if !is_older_watermark(epoch, gen, now_ms, *t_epoch, *t_gen, *t_ts)
+                                {
+                                    *t_epoch = epoch;
+                                    *t_gen = gen;
+                                    *t_ts = now_ms;
+                                }
+                            })
+                            .or_insert((epoch, gen, now_ms));
                     }
                 }
                 KvEvent::Cleared => {
                     let keys: Vec<(String, Vec<u8>)> = self
                         .map
                         .iter()
-                        .filter(|e| e.key().0 == model_uid && e.value().0 == replica_id)
+                        .filter(|e| {
+                            e.key().0 == model_uid
+                                && e.value()
+                                    .get(&replica_id)
+                                    .map(|&(ex_ts, ex_epoch, ex_gen)| {
+                                        !is_older_watermark(
+                                            epoch, gen, now_ms, ex_epoch, ex_gen, ex_ts,
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                        })
                         .map(|e| e.key().clone())
                         .collect();
                     for k in keys {
-                        self.map.remove(&k);
+                        let mut remove_key = false;
+                        if let Some(mut entry) = self.map.get_mut(&k) {
+                            entry.value_mut().remove(&replica_id);
+                            remove_key = entry.value().is_empty();
+                        }
+                        if remove_key {
+                            self.map.remove(&k);
+                        }
+                        self.tombstones
+                            .insert((k.0, k.1, replica_id), (epoch, gen, now_ms));
                     }
                 }
             }
         }
     }
 
-    /// Pick the replica holding the longest matched prefix chain.
+    /// Pick the replica holding the longest matched prefix chain across all replicas.
+    pub fn lookup(&self, model_uid: &str, hashes: &[[u8; 32]]) -> Option<u32> {
+        self.lookup_in(model_uid, hashes, None)
+    }
+
+    /// Pick the replica (optionally restricted to `allowed_replicas`) holding
+    /// the longest matched prefix chain.
     ///
     /// Chaining makes any matched hash proof of exact token-level prefix
-    /// identity up to that block, so depth beats count; ties break to the
-    /// lowest replica_id for determinism.
-    pub fn lookup(&self, model_uid: &str, hashes: &[[u8; 32]]) -> Option<u32> {
-        let mut best: Option<(usize, usize, u32)> = None; // (depth, count, replica)
+    /// identity up to that block, so depth beats count; equal `(depth, count)`
+    /// breaks by generation when from the same publisher epoch (or `last_seen_ms`
+    /// across distinct publisher epochs), then lowest `replica_id` for determinism.
+    pub fn lookup_in(
+        &self,
+        model_uid: &str,
+        hashes: &[[u8; 32]],
+        allowed_replicas: Option<&[u32]>,
+    ) -> Option<u32> {
+        // replica_id -> (max_depth, matched_count, max_ts, epoch_of_max, max_gen)
+        let mut per_replica: std::collections::BTreeMap<u32, (usize, usize, u64, u64, u64)> =
+            std::collections::BTreeMap::new();
         for (depth, h) in hashes.iter().enumerate() {
             let key = crate::kv_hash::external(h).to_vec();
             if let Some(entry) = self.map.get(&(model_uid.to_string(), key)) {
-                let replica = entry.value().0;
-                let cur = best.unwrap_or((0, 0, u32::MAX));
-                let next = if cur.2 == replica {
-                    (depth.max(cur.0), cur.1 + 1, replica)
-                } else {
-                    let better = depth > cur.0 || (depth == cur.0 && 1 > cur.1);
-                    if cur.2 == u32::MAX || better {
-                        (depth, 1, replica)
-                    } else {
-                        cur
+                for (&replica, &(ts, epoch, gen)) in entry.value().iter() {
+                    if let Some(allowed) = allowed_replicas {
+                        if !allowed.contains(&replica) {
+                            continue;
+                        }
                     }
-                };
-                best = Some(next);
+                    let slot = per_replica.entry(replica).or_insert((0, 0, 0, epoch, 0));
+                    slot.0 = slot.0.max(depth);
+                    slot.1 += 1;
+                    if slot.3 == epoch {
+                        if gen >= slot.4 {
+                            slot.4 = gen;
+                            slot.2 = slot.2.max(ts);
+                        }
+                    } else if ts >= slot.2 {
+                        slot.2 = ts;
+                        slot.3 = epoch;
+                        slot.4 = gen;
+                    }
+                }
             }
         }
-        best.filter(|b| b.2 != u32::MAX).map(|b| b.2)
+        per_replica
+            .into_iter()
+            .max_by(
+                |(r_a, (depth_a, count_a, ts_a, epoch_a, gen_a)),
+                 (r_b, (depth_b, count_b, ts_b, epoch_b, gen_b))| {
+                    depth_a
+                        .cmp(depth_b)
+                        .then_with(|| count_a.cmp(count_b))
+                        .then_with(|| {
+                            if epoch_a == epoch_b {
+                                gen_a.cmp(gen_b).then_with(|| ts_a.cmp(ts_b))
+                            } else {
+                                ts_a.cmp(ts_b)
+                            }
+                        })
+                        .then_with(|| r_b.cmp(r_a))
+                },
+            )
+            .map(|(replica, _)| replica)
     }
 
-    /// Drop entries not refreshed within the TTL (KV blocks are LRU-evicted
+    /// Drop replica entries not refreshed within the TTL (KV blocks are LRU-evicted
     /// inside the engine; the index must not outlive them).
     pub fn evict_expired(&self, now_ms: u64, ttl_ms: u64) -> usize {
         let cutoff = now_ms.saturating_sub(ttl_ms);
-        let keys: Vec<(String, Vec<u8>)> = self
-            .map
+        let keys: Vec<(String, Vec<u8>)> = self.map.iter().map(|e| e.key().clone()).collect();
+        let mut evicted = 0usize;
+        for k in keys {
+            let mut remove_key = false;
+            if let Some(mut entry) = self.map.get_mut(&k) {
+                let before = entry.value().len();
+                entry.value_mut().retain(|_, &mut (ts, _, _)| ts >= cutoff);
+                evicted += before.saturating_sub(entry.value().len());
+                remove_key = entry.value().is_empty();
+            }
+            if remove_key {
+                self.map.remove(&k);
+            }
+        }
+        let tkeys: Vec<(String, Vec<u8>, u32)> = self
+            .tombstones
             .iter()
-            .filter(|e| e.value().1 < cutoff)
+            .filter(|e| e.value().2 < cutoff)
             .map(|e| e.key().clone())
             .collect();
-        let n = keys.len();
-        for k in keys {
-            self.map.remove(&k);
+        for k in tkeys {
+            self.tombstones.remove(&k);
         }
-        n
+        evicted
     }
 }
 
@@ -341,12 +738,15 @@ pub async fn kv_events_loop(
     socket.bind(&bind).await?;
     tracing::info!(bind = %bind, "kv events subscriber bound");
     loop {
-        let frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
+        let mut frames: Vec<bytes::Bytes> = socket.recv().await?.into_vec();
         if frames.len() < 3 {
             continue;
         }
+        let gen = index.next_generation();
+        let epoch = index.epoch();
+        frames[1] = bytes::Bytes::from(encode_watermark(epoch, gen));
         let _ = tx.send(frames.clone());
-        apply_frames(&frames, &index);
+        apply_frames_with_watermark(&frames, &index, epoch, gen);
     }
 }
 
@@ -407,7 +807,8 @@ pub fn start_kv_runtime(index: Arc<PrefixIndex>) {
 /// (`NEBULA_ROUTER_KV_EVENTS_SINK_BIND` on the replica routers). Besides
 /// raw engine frames (`{model}/{replica}`), the control topics from the
 /// index service are handled here: `!reset/{model}` clears a model's
-/// entries, `!snapshot/{model}/{replica}` applies a snapshot batch.
+/// entries up to the snapshot's `(epoch, generation)` watermark, and
+/// `!snapshot/{model}/{replica}` applies a snapshot batch at that watermark.
 pub async fn kv_sink_loop(sink_bind: String, index: Arc<PrefixIndex>) -> anyhow::Result<()> {
     use zeromq::{Socket, SocketRecv};
     let mut socket = zeromq::SubSocket::new();
@@ -420,25 +821,42 @@ pub async fn kv_sink_loop(sink_bind: String, index: Arc<PrefixIndex>) -> anyhow:
             continue;
         }
         let topic = String::from_utf8_lossy(&frames[0]).to_string();
+        let (epoch, gen) = parse_watermark(&frames[1]);
         if topic.starts_with('!') {
-            apply_control(&topic, &frames[2], &index);
+            apply_control_with_watermark(&topic, epoch, gen, &frames[2], &index);
         } else {
-            apply_frames(&frames, &index);
+            apply_frames_with_watermark(&frames, &index, epoch, gen);
         }
     }
 }
 
 /// Handle index-service control topics (see [`kv_sink_loop`]).
+#[cfg(test)]
 fn apply_control(topic: &str, payload: &[u8], index: &PrefixIndex) {
+    apply_control_with_watermark(topic, index.epoch(), 0, payload, index);
+}
+
+pub fn apply_control_with_gen(topic: &str, gen: u64, payload: &[u8], index: &PrefixIndex) {
+    apply_control_with_watermark(topic, index.epoch(), gen, payload, index);
+}
+
+pub fn apply_control_with_watermark(
+    topic: &str,
+    epoch: u64,
+    gen: u64,
+    payload: &[u8],
+    index: &PrefixIndex,
+) {
+    let eff_epoch = if epoch == 0 { index.epoch() } else { epoch };
     if let Some(model) = topic.strip_prefix("!reset/") {
-        index.clear_model(model);
+        index.clear_model_at_watermark(model, eff_epoch, gen);
         return;
     }
     if let Some(rest) = topic.strip_prefix("!snapshot/") {
         if let Some((model, replica)) = rest.rsplit_once('/') {
             if let Ok(replica) = replica.parse::<u32>() {
                 let events = parse_batch(payload);
-                index.apply(model, replica, &events, now_ms());
+                index.apply_with_watermark(model, replica, &events, now_ms(), eff_epoch, gen);
             }
         }
     }
@@ -490,7 +908,7 @@ pub async fn connect_pusher(push_to: &[String]) -> zeromq::PubSocket {
     pusher
 }
 
-fn apply_frames(frames: &[bytes::Bytes], index: &PrefixIndex) {
+fn apply_frames_with_watermark(frames: &[bytes::Bytes], index: &PrefixIndex, epoch: u64, gen: u64) {
     let Some((model_uid, replica_id)) = parse_topic(&frames[0]) else {
         tracing::warn!(
             topic = %String::from_utf8_lossy(&frames[0]),
@@ -500,7 +918,7 @@ fn apply_frames(frames: &[bytes::Bytes], index: &PrefixIndex) {
     };
     let events = parse_batch(&frames[2]);
     if !events.is_empty() {
-        index.apply(&model_uid, replica_id, &events, now_ms());
+        index.apply_with_watermark(&model_uid, replica_id, &events, now_ms(), epoch, gen);
     }
 }
 
@@ -748,6 +1166,185 @@ mod tests {
         assert_eq!(restored.len(), 0);
     }
 
+    #[test]
+    fn interleaved_snapshot_and_delta_respect_generation_watermark() {
+        let k = |b: u8| vec![b; 8];
+        let mut h_aa = [0u8; 32];
+        h_aa[24..].copy_from_slice(&[0xaa; 8]);
+        let mut h_bb = [0u8; 32];
+        h_bb[24..].copy_from_slice(&[0xbb; 8]);
+        let mut h_cc = [0u8; 32];
+        h_cc[24..].copy_from_slice(&[0xcc; 8]);
+
+        // Suppose indexd took a snapshot at gen=10 where replica 0 held [0xaa, 0xbb].
+        let snap_gen = 10;
+        let snap_payload = encode_stored_batch(&[k(0xaa), k(0xbb)]);
+
+        // Meanwhile on the router, newer deltas (gen=11, gen=12) arrive BEFORE the
+        // delayed snapshot (gen=10):
+        // - gen=11: replica 0 evicts 0xaa
+        // - gen=12: replica 1 stores 0xbb and 0xcc
+        let router_idx = PrefixIndex::new();
+        router_idx.apply_with_gen(
+            "m",
+            0,
+            &[KvEvent::Stored {
+                block_hashes: vec![k(0xaa), k(0xbb)],
+                medium: None,
+            }],
+            100,
+            snap_gen,
+        );
+        router_idx.apply_with_gen(
+            "m",
+            0,
+            &[KvEvent::Removed {
+                block_hashes: vec![k(0xaa)],
+            }],
+            110,
+            11,
+        );
+        router_idx.apply_with_gen(
+            "m",
+            1,
+            &[KvEvent::Stored {
+                block_hashes: vec![k(0xbb), k(0xcc)],
+                medium: None,
+            }],
+            120,
+            12,
+        );
+
+        // Delayed snapshot at gen=10 arrives now (!reset/m + !snapshot/m/0):
+        // It must NOT wipe gen=12 entries, must NOT resurrect 0xaa (evicted at gen=11),
+        // and must NOT overwrite 0xbb back to replica 0.
+        apply_control_with_gen("!reset/m", snap_gen, &[], &router_idx);
+        apply_control_with_gen("!snapshot/m/0", snap_gen, &snap_payload, &router_idx);
+
+        assert_eq!(
+            router_idx.lookup("m", &[h_aa]),
+            None,
+            "stale snapshot must not resurrect block evicted at newer generation"
+        );
+        assert_eq!(
+            router_idx.lookup("m", &[h_bb]),
+            Some(1),
+            "stale snapshot must not overwrite block moved to replica 1 at newer generation"
+        );
+        assert_eq!(
+            router_idx.lookup("m", &[h_cc]),
+            Some(1),
+            "stale snapshot reset must not wipe delta stored at newer generation"
+        );
+        assert!(router_idx.stale_dropped_total() > 0);
+    }
+
+    #[test]
+    fn restarted_indexd_with_newer_epoch_is_not_rejected_by_prior_high_generation() {
+        let k = |b: u8| vec![b; 8];
+        let mut h_aa = [0u8; 32];
+        h_aa[24..].copy_from_slice(&[0xaa; 8]);
+        let mut h_bb = [0u8; 32];
+        h_bb[24..].copy_from_slice(&[0xbb; 8]);
+
+        let router_idx = PrefixIndex::new();
+        let old_epoch = 1_000;
+        let restarted_epoch = 2_000;
+
+        // Before indexd restart, router received events at epoch=1000, gen=500.
+        router_idx.apply_with_watermark(
+            "m",
+            0,
+            &[KvEvent::Stored {
+                block_hashes: vec![k(0xaa)],
+                medium: None,
+            }],
+            100,
+            old_epoch,
+            500,
+        );
+        assert_eq!(router_idx.lookup("m", &[h_aa]), Some(0));
+
+        // indexd restarts with epoch=2000 and gen resets to 1.
+        // Its snapshot (!reset/m + !snapshot/m/1) and subsequent live events (gen=2)
+        // must be accepted and must replace the old epoch=1000 entries.
+        apply_control_with_watermark("!reset/m", restarted_epoch, 1, &[], &router_idx);
+        let snap_payload = encode_stored_batch(&[k(0xbb)]);
+        apply_control_with_watermark(
+            "!snapshot/m/1",
+            restarted_epoch,
+            1,
+            &snap_payload,
+            &router_idx,
+        );
+        assert_eq!(
+            router_idx.lookup("m", &[h_aa]),
+            None,
+            "restarted indexd reset at newer epoch must clear old epoch entries"
+        );
+        assert_eq!(
+            router_idx.lookup("m", &[h_bb]),
+            Some(1),
+            "restarted indexd snapshot at gen=1 with newer epoch must be accepted"
+        );
+
+        // A removal at restarted_epoch, gen=2 must also take effect even though 2 < 500.
+        router_idx.apply_with_watermark(
+            "m",
+            1,
+            &[KvEvent::Removed {
+                block_hashes: vec![k(0xbb)],
+            }],
+            200,
+            restarted_epoch,
+            2,
+        );
+        assert_eq!(router_idx.lookup("m", &[h_bb]), None);
+    }
+
+    #[test]
+    fn multi_router_independent_epochs_do_not_reject_each_other() {
+        let k = |b: u8| vec![b; 8];
+        let mut h_aa = [0u8; 32];
+        h_aa[24..].copy_from_slice(&[0xaa; 8]);
+
+        let indexd_idx = PrefixIndex::new();
+        let router_a_epoch = 1_700_000_001_000;
+        let router_b_epoch = 1_700_000_002_000;
+
+        // Router A has been running longer (gen=500) and forwards a Stored event at t=100.
+        indexd_idx.apply_with_watermark(
+            "m",
+            0,
+            &[KvEvent::Stored {
+                block_hashes: vec![k(0xaa)],
+                medium: None,
+            }],
+            100,
+            router_a_epoch,
+            500,
+        );
+        assert_eq!(indexd_idx.lookup("m", &[h_aa]), Some(0));
+
+        // Router B (different epoch, lower gen=2) forwards a newer Removed event at t=200.
+        // Because epochs differ, indexd must not reject Router B's gen=2 against Router A's gen=500.
+        indexd_idx.apply_with_watermark(
+            "m",
+            0,
+            &[KvEvent::Removed {
+                block_hashes: vec![k(0xaa)],
+            }],
+            200,
+            router_b_epoch,
+            2,
+        );
+        assert_eq!(
+            indexd_idx.lookup("m", &[h_aa]),
+            None,
+            "Router B's newer removal must not be dropped due to Router A's higher counter"
+        );
+    }
+
     /// Assessment P0-2 consistency: the shared runtime (used by BOTH the
     /// standalone router and the gateway's embedded mode) must ingest synthetic
     /// engine events end-to-end — PUB connect → SUB bind → index populated.
@@ -838,5 +1435,62 @@ mod tests {
                 )],
             }]
         );
+    }
+
+    #[test]
+    fn multi_owner_retains_prefill_and_decode_holders_and_scopes_lookup() {
+        let idx = PrefixIndex::new();
+        let h0: [u8; 32] = H0.try_into().unwrap();
+        let h1: [u8; 32] = H1.try_into().unwrap();
+
+        // Decode replica 1 stores [H0, H1]; later Prefill replica 0 re-stores [H0, H1].
+        // A single-owner index would overwrite replica 1 with replica 0; the multi-owner
+        // index retains both so candidate-scoped lookup in the Decode pool [1, 2] still
+        // finds replica 1.
+        idx.apply(
+            "m",
+            1,
+            &[KvEvent::Stored {
+                block_hashes: vec![H0.to_vec(), H1.to_vec()],
+                medium: None,
+            }],
+            100,
+        );
+        idx.apply(
+            "m",
+            0,
+            &[KvEvent::Stored {
+                block_hashes: vec![H0.to_vec(), H1.to_vec()],
+                medium: None,
+            }],
+            200,
+        );
+
+        assert_eq!(
+            idx.lookup_in("m", &[h0, h1], Some(&[1, 2])),
+            Some(1),
+            "candidate-scoped lookup in Decode pool [1, 2] must find Decode replica 1 even after Prefill replica 0 also stored the blocks"
+        );
+        assert_eq!(
+            idx.lookup_in("m", &[h0, h1], Some(&[0])),
+            Some(0),
+            "candidate-scoped lookup in Prefill pool [0] must still find Prefill replica 0"
+        );
+        assert_eq!(
+            idx.lookup_in("m", &[h0, h1], Some(&[2])),
+            None,
+            "replica 2 does not hold the blocks"
+        );
+
+        // Removing H0, H1 from Prefill replica 0 must NOT evict Decode replica 1's ownership.
+        idx.apply(
+            "m",
+            0,
+            &[KvEvent::Removed {
+                block_hashes: vec![H0.to_vec(), H1.to_vec()],
+            }],
+            300,
+        );
+        assert_eq!(idx.lookup("m", &[h0, h1]), Some(1));
     }
 }

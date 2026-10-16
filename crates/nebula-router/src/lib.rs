@@ -44,7 +44,18 @@ fn max_matched_tokens(v: &serde_json::Value) -> Option<u64> {
 /// the order of evictions, not requests) and time out fast so routing never
 /// stalls on the controller.
 const PD_WARM_CACHE_MS: u64 = 2_000;
+const PD_WARM_CACHE_MAX_ENTRIES: usize = 4_096;
 const PD_LOOKUP_TIMEOUT_MS: u64 = 200;
+
+fn warm_cache_key(model_uid: &str, token_ids: &[u32]) -> (String, [u8; 32]) {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for &id in token_ids {
+        hasher.update(id.to_le_bytes());
+    }
+    let digest: [u8; 32] = hasher.finalize().into();
+    (model_uid.to_string(), digest)
+}
 
 #[derive(Debug, Clone, Default)]
 struct EndpointCircuitState {
@@ -60,8 +71,7 @@ fn now_ms() -> u64 {
 }
 
 /// Extract the prompt text for prefix hashing: `/v1/completions`-style
-/// `prompt` (string, or first element of a string array). Chat/messages
-/// bodies return None — v1 does not hash those (chat template gap).
+/// `prompt` (string, or first element of a string array).
 pub fn extract_prompt_string(body: &[u8]) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(body).ok()?;
     match v.get("prompt")? {
@@ -127,8 +137,17 @@ pub struct Router {
     /// pd_split stage-pool fallbacks (empty role pool → all candidates).
     stage_prefill_fallback_total: AtomicU64,
     stage_decode_fallback_total: AtomicU64,
-    /// pd_split controller warm-lookup cache: (model, first token) → (warm, ts).
-    pd_warm_cache: DashMap<(String, u32), (bool, u64)>,
+    /// pd_split single-mapper bottleneck protection: cold requests spilled over
+    /// to idle/lighter Decode (kv_both) replicas when the Prefill pool is busy.
+    stage_prefill_spillover_total: AtomicU64,
+    /// pd_split Tier-1 locality: warm requests routed to a Decode replica that
+    /// already holds the prefix in local GPU VRAM (skipping TCP KV shuffle).
+    pd_decode_local_hit_total: AtomicU64,
+    /// Minimum pending_requests across Prefill replicas before cold requests
+    /// can spill over to idle Decode replicas (0 disables spillover).
+    pd_prefill_spillover_pending: u64,
+    /// pd_split controller warm-lookup cache: (model, sha256(token_ids)) → (warm, ts).
+    pd_warm_cache: DashMap<(String, [u8; 32]), (bool, u64)>,
     pd_lookup_total: AtomicU64,
     pd_lookup_warm_total: AtomicU64,
     http_client: reqwest::Client,
@@ -170,6 +189,10 @@ impl Router {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(30_000);
+        let pd_prefill_spillover_pending = std::env::var("NEBULA_PD_PREFILL_SPILLOVER_PENDING")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1);
         Arc::new(Self {
             endpoints: DashMap::new(),
             stats: DashMap::new(),
@@ -196,6 +219,9 @@ impl Router {
             prefix_lookup: DashMap::new(),
             stage_prefill_fallback_total: AtomicU64::new(0),
             stage_decode_fallback_total: AtomicU64::new(0),
+            stage_prefill_spillover_total: AtomicU64::new(0),
+            pd_decode_local_hit_total: AtomicU64::new(0),
+            pd_prefill_spillover_pending,
             pd_warm_cache: DashMap::new(),
             pd_lookup_total: AtomicU64::new(0),
             pd_lookup_warm_total: AtomicU64::new(0),
@@ -309,6 +335,11 @@ impl Router {
         self.prefix_index.entries()
     }
 
+    /// Stale snapshot/delta mutations dropped by prefix-index watermark protection.
+    pub fn prefix_index_stale_dropped_total(&self) -> u64 {
+        self.prefix_index.stale_dropped_total()
+    }
+
     /// Affinity lookup/hit counters per model, for /metrics and BFF.
     pub fn prefix_lookup_stats(&self) -> Vec<(String, u64, u64)> {
         self.prefix_lookup
@@ -331,13 +362,22 @@ impl Router {
         }
     }
 
+    pub fn stage_prefill_spillover_total(&self) -> u64 {
+        self.stage_prefill_spillover_total.load(Ordering::Relaxed)
+    }
+
+    pub fn pd_decode_local_hit_total(&self) -> u64 {
+        self.pd_decode_local_hit_total.load(Ordering::Relaxed)
+    }
+
     /// Ask the LMCache controller whether the shared store holds this
     /// prompt's prefix ("warm" signal for pd_split stage routing).
     ///
     /// `NEBULA_PD_SPLIT_LOOKUP_URL` points at `lmcache_controller`'s
     /// `/lookup` (e.g. http://127.0.0.1:9000/lookup). Results are cached per
-    /// (model, first-token-id) for a short TTL; any error degrades to "cold"
-    /// so routing never blocks on the controller.
+    /// (model, sha256(token_ids)) for a short TTL and bounded by
+    /// `PD_WARM_CACHE_MAX_ENTRIES`; any error degrades to "cold" so routing
+    /// never blocks on the controller.
     pub async fn controller_warm(&self, model_uid: &str, token_ids: &[u32]) -> bool {
         let Ok(url) = std::env::var("NEBULA_PD_SPLIT_LOOKUP_URL") else {
             return false;
@@ -345,14 +385,19 @@ impl Router {
         if token_ids.is_empty() {
             return false;
         }
-        let cache_key = (model_uid.to_string(), token_ids[0]);
+        let cache_key = warm_cache_key(model_uid, token_ids);
         {
             let now = now_ms();
+            let mut expired = false;
             if let Some(entry) = self.pd_warm_cache.get(&cache_key) {
                 let (warm, ts) = *entry.value();
                 if now.saturating_sub(ts) < PD_WARM_CACHE_MS {
                     return warm;
                 }
+                expired = true;
+            }
+            if expired {
+                self.pd_warm_cache.remove(&cache_key);
             }
         }
         let body = serde_json::json!({
@@ -389,12 +434,36 @@ impl Router {
                 false
             }
         };
-        self.pd_warm_cache.insert(cache_key, (warm, now_ms()));
+        self.insert_warm_cache_at(cache_key, warm, now_ms());
         self.pd_lookup_total.fetch_add(1, Ordering::Relaxed);
         if warm {
             self.pd_lookup_warm_total.fetch_add(1, Ordering::Relaxed);
         }
         warm
+    }
+
+    fn insert_warm_cache_at(&self, cache_key: (String, [u8; 32]), warm: bool, now: u64) {
+        if self.pd_warm_cache.len() >= PD_WARM_CACHE_MAX_ENTRIES {
+            // 1. Sweep all TTL-expired entries first.
+            self.pd_warm_cache
+                .retain(|_, (_, ts)| now.saturating_sub(*ts) < PD_WARM_CACHE_MS);
+            // 2. If still at capacity (e.g. burst of >4096 distinct prompts within 2s),
+            // evict the oldest entries so capacity never exceeds PD_WARM_CACHE_MAX_ENTRIES.
+            let len = self.pd_warm_cache.len();
+            if len >= PD_WARM_CACHE_MAX_ENTRIES {
+                let to_remove = (len + 1).saturating_sub(PD_WARM_CACHE_MAX_ENTRIES).max(1);
+                let mut entries: Vec<((String, [u8; 32]), u64)> = self
+                    .pd_warm_cache
+                    .iter()
+                    .map(|e| (e.key().clone(), e.value().1))
+                    .collect();
+                entries.sort_by_key(|(_, ts)| *ts);
+                for (k, _) in entries.into_iter().take(to_remove) {
+                    self.pd_warm_cache.remove(&k);
+                }
+            }
+        }
+        self.pd_warm_cache.insert(cache_key, (warm, now));
     }
 
     /// pd_split warm-signal observability (lookups, warm results).
@@ -430,49 +499,35 @@ impl Router {
             .prompt_hashes(model_uid, name.as_deref(), prompt)
     }
 
-    /// Hash the prompt prefix blocks of an OpenAI-style body. Covers
-    /// `/v1/completions` `prompt` (exact) and `/v1/chat/completions`
-    /// `messages` (rendered with the model's chat_template — verified
-    /// token-exact against the engine on the rig). Only paid when the
-    /// prefix_affinity strategy is active.
     /// Route hints for a request body: prefix hashes (prefix_affinity index /
     /// pd_split warm decisions) plus the pd_split controller warm signal.
-    /// One call so the standalone router and the embedded gateway stay in sync.
+    /// Tokenizes the body at most once so chat template rendering and BPE
+    /// encoding are never duplicated on the request path.
     pub async fn body_route_hints(
         &self,
         model_uid: &str,
         body: &[u8],
     ) -> (Option<Vec<[u8; 32]>>, bool) {
-        let hashes = self.body_prompt_hashes(model_uid, body);
-        if !self.model_has_role_pools(model_uid) {
-            return (hashes, false);
+        let has_roles = self.model_has_role_pools(model_uid);
+        if self.strategy_name() != "prefix_affinity" && !has_roles {
+            return (None, false);
         }
-        let Some(text) = extract_prompt_string(body) else {
-            return (hashes, false);
+        let Some(ids) = self.body_token_ids(model_uid, body) else {
+            return (None, false);
         };
-        let name = self
-            .model_uids_to_names
-            .get(model_uid)
-            .map(|e| e.value().clone());
-        let warm = match self
-            .prefix_hasher
-            .prompt_ids(model_uid, name.as_deref(), &text)
-        {
-            Some(ids) => self.controller_warm(model_uid, &ids).await,
-            None => false,
+        let hashes = Some(self.prefix_hasher.hashes_from_ids(&ids));
+        let warm = if has_roles {
+            self.controller_warm(model_uid, &ids).await
+        } else {
+            false
         };
         (hashes, warm)
     }
 
-    pub fn body_prompt_hashes(&self, model_uid: &str, body: &[u8]) -> Option<Vec<[u8; 32]>> {
-        // Needed for the prefix_affinity strategy AND for pd_split stage
-        // routing (the warm signal is a prefix-index hit). Rig finding
-        // 2026-10-12: gating this on the strategy alone left pd_split
-        // deployments with no warm signal, so every request went cold to the
-        // prefill pool and the decode pool was never used.
-        if self.strategy_name() != "prefix_affinity" && !self.model_has_role_pools(model_uid) {
-            return None;
-        }
+    /// Extract token IDs for an OpenAI-style body (`/v1/completions` `prompt`
+    /// or `/v1/chat/completions` `messages` rendered with the model's chat
+    /// template). Used by `body_route_hints` and `body_prompt_hashes`.
+    pub fn body_token_ids(&self, model_uid: &str, body: &[u8]) -> Option<Vec<u32>> {
         let v: serde_json::Value = serde_json::from_slice(body).ok()?;
         let name = self
             .model_uids_to_names
@@ -480,20 +535,25 @@ impl Router {
             .map(|e| e.value().clone());
         match v.get("prompt") {
             Some(serde_json::Value::String(s)) => {
-                self.prefix_hasher
-                    .prompt_hashes(model_uid, name.as_deref(), s)
+                self.prefix_hasher.prompt_ids(model_uid, name.as_deref(), s)
             }
-            // list-of-strings prompt: hash the first element's prefix
-            Some(serde_json::Value::Array(a)) => a.first().and_then(|x| x.as_str()).and_then(|s| {
-                self.prefix_hasher
-                    .prompt_hashes(model_uid, name.as_deref(), s)
-            }),
+            Some(serde_json::Value::Array(a)) => a
+                .first()
+                .and_then(|x| x.as_str())
+                .and_then(|s| self.prefix_hasher.prompt_ids(model_uid, name.as_deref(), s)),
             _ if v.get("messages").is_some() => {
-                self.prefix_hasher
-                    .chat_hashes(model_uid, name.as_deref(), &v)
+                self.prefix_hasher.chat_ids(model_uid, name.as_deref(), &v)
             }
             _ => None,
         }
+    }
+
+    pub fn body_prompt_hashes(&self, model_uid: &str, body: &[u8]) -> Option<Vec<[u8; 32]>> {
+        if self.strategy_name() != "prefix_affinity" && !self.model_has_role_pools(model_uid) {
+            return None;
+        }
+        let ids = self.body_token_ids(model_uid, body)?;
+        Some(self.prefix_hasher.hashes_from_ids(&ids))
     }
 
     pub fn record_endpoint_success(&self, model_uid: &str, replica_id: u32) {
@@ -751,7 +811,9 @@ impl Router {
             return Err(RouteError::NoEndpoint);
         }
 
-        // Session affinity check
+        // Session affinity check (never lock onto a Prefill role replica in pd_split:
+        // a cold first turn routes to Prefill to populate shared KV, while subsequent
+        // warm turns must evaluate stage routing to land on a Decode replica).
         if let Some(session_id) = ctx.session_id.as_deref() {
             if let Some(aff) = self.session_affinity.get(session_id) {
                 let (aff_model_uid, aff_replica_id) = aff.value();
@@ -767,7 +829,10 @@ impl Router {
                         .map(|v| v.value().clone())
                     {
                         let plan_ok = plan_version.map(|v| ep.plan_version == v).unwrap_or(true);
-                        if ep.status == EndpointStatus::Ready && plan_ok {
+                        if ep.status == EndpointStatus::Ready
+                            && plan_ok
+                            && ep.role != ReplicaRole::Prefill
+                        {
                             self.session_affinity_hit_total
                                 .fetch_add(1, Ordering::Relaxed);
                             return Ok(ep);
@@ -872,7 +937,7 @@ impl Router {
             candidates_data = non_overloaded;
         }
 
-        let prefix_owner = prefix_hashes.and_then(|hs| {
+        let any_prefix_owner = prefix_hashes.and_then(|hs| {
             if hs.is_empty() {
                 return None;
             }
@@ -889,25 +954,18 @@ impl Router {
             owner
         });
 
+        let is_pd_split = candidates_data
+            .iter()
+            .any(|(ep, _)| ep.role != ReplicaRole::Mixed);
+        let mut pd_warm_stage = false;
+
         // pd_split stage routing (pool.md §pd_split v1.1): when any candidate
         // declares a role, cold traffic goes to the prefill pool (which writes
-        // KV into the shared store) and session-continued traffic to the
-        // decode pool (which retrieves). An empty pool falls back to all
-        // candidates behind a visible counter. Replicated deployments never
-        // enter this branch (all roles Mixed).
-        if candidates_data
-            .iter()
-            .any(|(ep, _)| ep.role != ReplicaRole::Mixed)
-        {
-            // "Warm" = the shared KV store already holds this prefix, which
-            // the prefix index tells us (any replica's BlockStored event means
-            // the prefix is retrievable from the store). Warm traffic goes to
-            // the decode pool (cheap retrieve); cold traffic to the prefill
-            // pool so the KV gets written. A session already anchored on a
-            // decode replica is warm by definition.
-            //
-            // Review #5 applies to a different question — which decode replica
-            // holds it *locally* — that needs the multi-owner index (v1.1).
+        // KV into the shared store) and warm / session-continued traffic to the
+        // decode pool (which retrieves or hits local VRAM). An empty pool falls
+        // back to all candidates behind a visible counter. Replicated deployments
+        // never enter this branch (all roles Mixed).
+        if is_pd_split {
             let affinity_on_decode = ctx
                 .session_id
                 .as_ref()
@@ -918,7 +976,8 @@ impl Router {
                     })
                 })
                 .unwrap_or(false);
-            let warm = pd_warm || prefix_owner.is_some() || affinity_on_decode;
+            let warm = pd_warm || any_prefix_owner.is_some() || affinity_on_decode;
+            pd_warm_stage = warm;
             let want = if warm {
                 ReplicaRole::Decode
             } else {
@@ -941,10 +1000,65 @@ impl Router {
                     stage = ?want,
                     "pd_split role pool empty; falling back to all candidates"
                 );
+            } else if want == ReplicaRole::Prefill && self.pd_prefill_spillover_pending > 0 {
+                // Single-mapper bottleneck protection: when every Prefill replica has
+                // pending_requests >= pd_prefill_spillover_pending and at least one
+                // Decode (kv_both) replica has strictly lower pending load, spill cold
+                // traffic over to those idle/lighter Decode replicas instead of queuing
+                // behind a saturated Prefill mapper.
+                let min_prefill_pending = pool
+                    .iter()
+                    .map(|(_, s)| s.as_ref().map(|st| st.pending_requests).unwrap_or(0))
+                    .min()
+                    .unwrap_or(0);
+                if min_prefill_pending >= self.pd_prefill_spillover_pending {
+                    let spillover_decode: Vec<(EndpointInfo, Option<EndpointStats>)> =
+                        candidates_data
+                            .iter()
+                            .filter(|(ep, s)| {
+                                ep.role == ReplicaRole::Decode
+                                    && s.as_ref().map(|st| st.pending_requests).unwrap_or(0)
+                                        < min_prefill_pending
+                            })
+                            .cloned()
+                            .collect();
+                    if !spillover_decode.is_empty() {
+                        self.stage_prefill_spillover_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!(
+                            model_uid = %model_uid,
+                            min_prefill_pending,
+                            spillover_candidates = spillover_decode.len(),
+                            "pd_split prefill pool saturated; spilling cold request to idle decode pool"
+                        );
+                        candidates_data = spillover_decode;
+                    } else {
+                        candidates_data = pool;
+                    }
+                } else {
+                    candidates_data = pool;
+                }
             } else {
                 candidates_data = pool;
             }
         }
+
+        // Two-tier locality (v1.1 multi-owner index): resolve prefix_owner scoped
+        // to the post-stage-filter candidate pool first so a Decode replica holding
+        // the prefix in local GPU VRAM is preferred over remote TCP KV shuffle.
+        let allowed_ids: Vec<u32> = candidates_data
+            .iter()
+            .map(|(ep, _)| ep.replica_id)
+            .collect();
+        let scoped_prefix_owner = prefix_hashes.and_then(|hs| {
+            if hs.is_empty() {
+                None
+            } else {
+                self.prefix_index
+                    .lookup_in(model_uid, hs, Some(&allowed_ids))
+            }
+        });
+        let prefix_owner = scoped_prefix_owner.or(any_prefix_owner);
 
         let candidates: Vec<Candidate> = candidates_data
             .iter()
@@ -969,15 +1083,43 @@ impl Router {
             } else {
                 self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
             }
+        } else if is_pd_split && pd_warm_stage {
+            // Tier-1 vs Tier-2 locality inside the Decode pool: if a Decode
+            // replica in the pool already owns the prefix in local GPU VRAM
+            // (`scoped_prefix_owner`) and its pending load is no higher than the
+            // least-pending candidate in the pool, route to that local owner to
+            // avoid TCP KV shuffle even when the global strategy is LeastPending.
+            let min_pool_pending = candidates_data
+                .iter()
+                .map(|(_, s)| s.as_ref().map(|st| st.pending_requests).unwrap_or(0))
+                .min()
+                .unwrap_or(0);
+            if let Some(local_idx) = scoped_prefix_owner.and_then(|owner| {
+                candidates_data.iter().position(|(ep, s)| {
+                    ep.replica_id == owner
+                        && s.as_ref().map(|st| st.pending_requests).unwrap_or(0) <= min_pool_pending
+                })
+            }) {
+                candidates_data[local_idx].0.clone()
+            } else {
+                self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
+            }
         } else {
             self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
         };
 
-        if let Some(session_id) = ctx.session_id.clone() {
-            self.session_affinity.insert(
-                session_id,
-                (selected.model_uid.clone(), selected.replica_id),
-            );
+        if is_pd_split && pd_warm_stage && scoped_prefix_owner == Some(selected.replica_id) {
+            self.pd_decode_local_hit_total
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        if selected.role != ReplicaRole::Prefill {
+            if let Some(session_id) = ctx.session_id.clone() {
+                self.session_affinity.insert(
+                    session_id,
+                    (selected.model_uid.clone(), selected.replica_id),
+                );
+            }
         }
 
         Ok(selected)
@@ -1238,6 +1380,125 @@ mod plan_version_tests {
         assert_eq!(ep.replica_id, 1);
     }
 
+    #[test]
+    fn pd_split_session_affinity_does_not_lock_onto_prefill() {
+        let router = Router::new();
+        router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
+        router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
+
+        // First cold request with session_id selects Prefill (replica 0),
+        // but must NOT pin the session to Prefill.
+        let ep1 = router
+            .route(&ctx_with_session(Some("sess-1")), "m1", None, false)
+            .unwrap();
+        assert_eq!(ep1.replica_id, 0);
+        assert!(
+            router.session_affinity.get("sess-1").is_none(),
+            "cold prefill turn must not save session_affinity"
+        );
+
+        // Even if a prefill replica were somehow present in session_affinity,
+        // a subsequent warm turn (controller warm = true) must bypass it and
+        // select Decode (replica 1), then anchor the session on Decode.
+        router
+            .session_affinity
+            .insert("sess-1".into(), ("m1".into(), 0));
+        let ep2 = router
+            .route(&ctx_with_session(Some("sess-1")), "m1", None, true)
+            .unwrap();
+        assert_eq!(ep2.replica_id, 1, "warm turn must route to decode replica");
+        assert_eq!(
+            router
+                .session_affinity
+                .get("sess-1")
+                .map(|e| e.value().clone()),
+            Some(("m1".to_string(), 1))
+        );
+    }
+
+    #[test]
+    fn warm_cache_key_distinguishes_same_first_token_different_suffix() {
+        let k1 = warm_cache_key("m1", &[151644, 100, 200]);
+        let k2 = warm_cache_key("m1", &[151644, 300, 400]);
+        let k3 = warm_cache_key("m1", &[151644, 100, 200]);
+        assert_ne!(
+            k1, k2,
+            "requests sharing BOS / first token must not collide in pd_warm_cache"
+        );
+        assert_eq!(k1, k3);
+    }
+
+    #[test]
+    fn warm_cache_evicts_expired_and_caps_capacity() {
+        let router = Router::new();
+        // Fill to capacity with entries at t = 1_000.
+        for i in 0..(PD_WARM_CACHE_MAX_ENTRIES as u32) {
+            let key = warm_cache_key("m1", &[151644, i]);
+            router.insert_warm_cache_at(key, true, 1_000);
+        }
+        assert_eq!(router.pd_warm_cache.len(), PD_WARM_CACHE_MAX_ENTRIES);
+
+        // Inserting one more within TTL (t = 1_500) must evict the oldest entry
+        // so the cache never exceeds PD_WARM_CACHE_MAX_ENTRIES.
+        let fresh_key = warm_cache_key("m1", &[999_999]);
+        router.insert_warm_cache_at(fresh_key.clone(), true, 1_500);
+        assert_eq!(router.pd_warm_cache.len(), PD_WARM_CACHE_MAX_ENTRIES);
+        assert!(router.pd_warm_cache.contains_key(&fresh_key));
+
+        // Once the t=1_000 batch expires (t = 1_000 + PD_WARM_CACHE_MS + 100),
+        // inserting at capacity sweeps all expired entries first.
+        for i in 0..10u32 {
+            let key = warm_cache_key("m1", &[888_000, i]);
+            router.insert_warm_cache_at(key, false, 1_500);
+        }
+        assert_eq!(router.pd_warm_cache.len(), PD_WARM_CACHE_MAX_ENTRIES);
+        let after_ttl = 1_000 + PD_WARM_CACHE_MS + 100;
+        let post_ttl_key = warm_cache_key("m1", &[777_777]);
+        router.insert_warm_cache_at(post_ttl_key.clone(), true, after_ttl);
+        assert!(
+            router.pd_warm_cache.len() < 32,
+            "expired entries must be swept when inserting at capacity, got len={}",
+            router.pd_warm_cache.len()
+        );
+        assert!(router.pd_warm_cache.contains_key(&post_ttl_key));
+    }
+
+    #[test]
+    fn body_token_ids_supports_completions_and_chat_messages() {
+        let tk_json = br#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [],
+            "normalizer": null,
+            "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null,
+            "decoder": null,
+            "model": {
+                "type": "WordLevel",
+                "vocab": {"<unk>": 0, "user": 1, "hello": 2, "world": 3, "assistant": 4},
+                "unk_token": "<unk>"
+            }
+        }"#;
+        let tk = tokenizers::Tokenizer::from_bytes(tk_json).unwrap();
+
+        let router = Router::new();
+        router.prefix_hasher.seed_for_test(
+            "m1",
+            tk,
+            "{% for m in messages %}{{ m.role }} {{ m.content }} {% endfor %}assistant",
+        );
+
+        let comp_body = br#"{"model":"m1","prompt":"hello world"}"#;
+        assert_eq!(router.body_token_ids("m1", comp_body), Some(vec![2, 3]));
+
+        let chat_body = br#"{"model":"m1","messages":[{"role":"user","content":"hello world"}]}"#;
+        assert_eq!(
+            router.body_token_ids("m1", chat_body),
+            Some(vec![1, 2, 3, 4])
+        );
+    }
+
     /// Rig finding: pd_split stage routing needs prefix hashes even when the
     /// strategy is not prefix_affinity — otherwise the warm signal is always
     /// absent and the decode pool is never used.
@@ -1291,6 +1552,111 @@ mod plan_version_tests {
         assert_eq!(ep.replica_id, 0);
         assert_eq!(router.stage_fallback_total("prefill"), 1);
         assert_eq!(router.stage_fallback_total("decode"), 0);
+    }
+
+    #[test]
+    fn pd_split_two_tier_decode_locality_prefers_local_vram_owner() {
+        // 1 Prefill (r0) + 2 Decode (r1, r2).
+        // Both Prefill r0 and Decode r2 have stored prefix H (e.g. r2 served an
+        // earlier turn and r0 later stored H again). Under both LeastPending and
+        // PrefixAffinity, a warm request for H must prefer Decode r2 (Tier-1
+        // Node-local GPU hit, skipping TCP KV shuffle) over Decode r1 (which
+        // would have to pull KV over TCP from LMCacheServer), without counting
+        // an owner_unavailable fallback.
+        for strategy in [
+            Box::new(strategy::LeastPending) as Box<dyn RoutingStrategy>,
+            Box::new(strategy::PrefixAffinity) as Box<dyn RoutingStrategy>,
+        ] {
+            let router = Router::with_strategy(strategy);
+            router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
+            router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
+            router.upsert_endpoint(ep_with_role("m1", 2, ReplicaRole::Decode));
+
+            let h: [u8; 32] = [0x42; 32];
+            router.prefix_index().apply(
+                "m1",
+                2,
+                &[kv_events::KvEvent::Stored {
+                    block_hashes: vec![h.to_vec()],
+                    medium: None,
+                }],
+                100,
+            );
+            router.prefix_index().apply(
+                "m1",
+                0,
+                &[kv_events::KvEvent::Stored {
+                    block_hashes: vec![h.to_vec()],
+                    medium: None,
+                }],
+                200,
+            );
+
+            let ep = router
+                .route(
+                    &ctx_with_session(None),
+                    "m1",
+                    Some(std::slice::from_ref(&h)),
+                    false,
+                )
+                .unwrap();
+            assert_eq!(
+                ep.replica_id, 2,
+                "Decode replica 2 holds H in local VRAM and must be preferred over Decode replica 1"
+            );
+            assert_eq!(router.pd_decode_local_hit_total(), 1);
+            assert_eq!(
+                router.strategy_fallback_total("prefix_affinity", "owner_unavailable"),
+                0,
+                "multi-owner candidate-scoped lookup must not report owner_unavailable when a Decode replica holds the prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn pd_split_saturated_prefill_spills_cold_traffic_to_idle_decode() {
+        let router = Router::new();
+        router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
+        router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
+
+        let now = now_ms();
+        // Prefill replica 0 is busy (pending_requests = 2), while Decode replica 1
+        // (kv_both) is idle (pending_requests = 0).
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 0,
+            last_updated_ms: now,
+            pending_requests: 2,
+            prefix_cache_hit_rate: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.2),
+        });
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 0,
+            prefix_cache_hit_rate: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.1),
+        });
+
+        let ep = router
+            .route(&ctx_with_session(Some("cold-sess")), "m1", None, false)
+            .unwrap();
+        assert_eq!(
+            ep.replica_id, 1,
+            "cold request must spill over to idle Decode (kv_both) replica when Prefill replica is saturated"
+        );
+        assert_eq!(router.stage_prefill_spillover_total(), 1);
+        assert_eq!(
+            router
+                .session_affinity
+                .get("cold-sess")
+                .map(|e| e.value().clone()),
+            Some(("m1".to_string(), 1)),
+            "spilled request handled by Decode replica anchors session directly on that Decode replica"
+        );
     }
 
     #[test]

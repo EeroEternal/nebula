@@ -281,8 +281,12 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     body.push_str(&format!(
         "# HELP nebula_router_prefix_index_entries Live prefix-index entries (KV-event routing hints).\n\
          # TYPE nebula_router_prefix_index_entries gauge\n\
-         nebula_router_prefix_index_entries {}\n",
+         nebula_router_prefix_index_entries {}\n\
+         # HELP nebula_router_prefix_index_stale_dropped_total Stale snapshot or delta events dropped by watermark protection.\n\
+         # TYPE nebula_router_prefix_index_stale_dropped_total counter\n\
+         nebula_router_prefix_index_stale_dropped_total {}\n",
         st.router.prefix_index_entries(),
+        st.router.prefix_index_stale_dropped_total(),
     ));
     body.push_str(
         "# HELP nebula_router_prefix_lookup_total Prefix-index lookups by model.\n\
@@ -334,6 +338,18 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
             st.router.stage_fallback_total(stage),
         ));
     }
+    body.push_str(&format!(
+        "# HELP nebula_router_stage_prefill_spillover_total pd_split cold requests spilled over to idle Decode replicas when Prefill pool is saturated.\n\
+         # TYPE nebula_router_stage_prefill_spillover_total counter\n\
+         nebula_router_stage_prefill_spillover_total {}\n",
+        st.router.stage_prefill_spillover_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_pd_decode_local_hit_total pd_split warm requests routed to a Decode replica holding the prefix in local GPU VRAM.\n\
+         # TYPE nebula_router_pd_decode_local_hit_total counter\n\
+         nebula_router_pd_decode_local_hit_total {}\n",
+        st.router.pd_decode_local_hit_total(),
+    ));
     let strategy = st.router.strategy_name();
     for reason in ["no_signal", "below_threshold", "owner_unavailable"] {
         body.push_str(&format!(

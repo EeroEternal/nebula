@@ -58,6 +58,13 @@ impl PromptHasher {
     }
 
     fn tokenizer_for(&self, model_uid: &str, model_name: Option<&str>) -> Option<Arc<Tokenizer>> {
+        #[cfg(test)]
+        if let Some(hit) = self
+            .cache
+            .get(&format!("__test__/{model_uid}/tokenizer.json"))
+        {
+            return hit.value().clone();
+        }
         let paths = self.candidate_paths(model_uid, model_name, "tokenizer.json");
         let key = paths.first()?.clone();
         if let Some(hit) = self.cache.get(&key) {
@@ -74,6 +81,13 @@ impl PromptHasher {
     /// The model's chat template (`tokenizer_config.json`). A list of named
     /// templates resolves to the one named "default" (transformers rule).
     fn chat_template_for(&self, model_uid: &str, model_name: Option<&str>) -> Option<Arc<String>> {
+        #[cfg(test)]
+        if let Some(hit) = self
+            .templates
+            .get(&format!("__test__/{model_uid}/tokenizer_config.json"))
+        {
+            return hit.value().clone();
+        }
         let paths = self.candidate_paths(model_uid, model_name, "tokenizer_config.json");
         let key = paths.first()?.clone();
         if let Some(hit) = self.templates.get(&key) {
@@ -99,6 +113,11 @@ impl PromptHasher {
         loaded
     }
 
+    /// Chain vLLM-compatible block hashes from already-tokenized `ids`.
+    pub fn hashes_from_ids(&self, ids: &[u32]) -> Vec<[u8; 32]> {
+        compute_block_hashes(ids, self.block_size)
+    }
+
     /// Tokenize `prompt` and chain its block hashes. `None` when no tokenizer
     /// is available for the model (caller falls back visibly).
     pub fn prompt_hashes(
@@ -107,9 +126,8 @@ impl PromptHasher {
         model_name: Option<&str>,
         prompt: &str,
     ) -> Option<Vec<[u8; 32]>> {
-        let tk = self.tokenizer_for(model_uid, model_name)?;
-        let enc = tk.encode(prompt, true).ok()?;
-        Some(compute_block_hashes(enc.get_ids(), self.block_size))
+        let ids = self.prompt_ids(model_uid, model_name, prompt)?;
+        Some(self.hashes_from_ids(&ids))
     }
 
     /// Token ids for the raw prompt (used by the LMCache controller lookup).
@@ -124,15 +142,14 @@ impl PromptHasher {
         Some(enc.get_ids().to_vec())
     }
 
-    /// Render a chat body (transformers-compatible subset) and chain its
-    /// block hashes. The context mirrors `apply_chat_template`:
-    /// `messages`, `add_generation_prompt`, `tools` when present.
-    pub fn chat_hashes(
+    /// Render a chat body (transformers-compatible subset) and return its
+    /// token ids (used by both block hashing and LMCache controller lookup).
+    pub fn chat_ids(
         &self,
         model_uid: &str,
         model_name: Option<&str>,
         body: &serde_json::Value,
-    ) -> Option<Vec<[u8; 32]>> {
+    ) -> Option<Vec<u32>> {
         let messages = body.get("messages")?;
         let tk = self.tokenizer_for(model_uid, model_name)?;
         let tpl = self.chat_template_for(model_uid, model_name)?;
@@ -153,7 +170,33 @@ impl PromptHasher {
         // apply_chat_template tokenizes the rendered string with
         // add_special_tokens=false (special tokens come from the template).
         let enc = tk.encode(rendered.as_str(), false).ok()?;
-        Some(compute_block_hashes(enc.get_ids(), self.block_size))
+        Some(enc.get_ids().to_vec())
+    }
+
+    /// Render a chat body (transformers-compatible subset) and chain its
+    /// block hashes. The context mirrors `apply_chat_template`:
+    /// `messages`, `add_generation_prompt`, `tools` when present.
+    #[cfg(test)]
+    pub fn chat_hashes(
+        &self,
+        model_uid: &str,
+        model_name: Option<&str>,
+        body: &serde_json::Value,
+    ) -> Option<Vec<[u8; 32]>> {
+        let ids = self.chat_ids(model_uid, model_name, body)?;
+        Some(self.hashes_from_ids(&ids))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_for_test(&self, model_uid: &str, tk: Tokenizer, tpl: &str) {
+        self.cache.insert(
+            format!("__test__/{model_uid}/tokenizer.json"),
+            Some(Arc::new(tk)),
+        );
+        self.templates.insert(
+            format!("__test__/{model_uid}/tokenizer_config.json"),
+            Some(Arc::new(tpl.to_string())),
+        );
     }
 }
 

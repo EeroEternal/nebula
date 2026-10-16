@@ -168,10 +168,10 @@ stage = warm → decode 池（便宜地 retrieve）
 **✅ 解法 1 已落地并真机验证（2026-10-13）**：warm 信号改用 **LMCache controller** 的 `POST /lookup`（store-level 权威事实）。
 
 ```
-请求 → Router 对 prompt 分词 → POST <controller>:9000/lookup {"tokens":[...]}
+请求 → Router 对 prompt / chat messages 分词 → POST <controller>:9000/lookup {"tokens":[...]}
      → {"layout_info":{"<instance>":["LocalCPUBackend", 569]}}   # 命中 token 数
      hit > 0 → warm → decode 池；否则 cold → prefill 池
-     响应按 (model, 首 token) 缓存 2s；任何错误/200ms 超时 → 降级为 cold（可见计数）
+     响应按 (model, sha256(token_ids)) 缓存 2s；任何错误/200ms 超时 → 降级为 cold（可见计数）
 ```
 
 - 引擎侧注册：`lmcache_controller_env`（四项必填：`ENABLE_CONTROLLER` / `CONTROLLER_PULL_URL`(8300) / `CONTROLLER_REPLY_URL`(8400) / `WORKER_PORTS` + `INSTANCE_ID`）——缺 reply URL 会 crash-loop（rig 教训）。
@@ -191,8 +191,9 @@ stage = warm → decode 池（便宜地 retrieve）
 **已实证的部分（不受此阻断影响）**：角色注入（prefill `kv_producer`+`SAVE_UNFULL_CHUNK` / decode `kv_both`+`RETRIEVE_LOCATIONS`，同 seed=42）、scheduler 投影、EndpointInfo.role 注册、共享存储写入与取回（prefill 副本二次请求 **Retrieved 569/569 tokens**）、stage 过滤逻辑与计数器（单测全绿）。
 
 - session affinity 的锚定域限制在 decode 池内（首次命中 prefill 不锚定 prefill）。
-- **P1c 在 v1 不承担 decode 池内本地命中优先**：现索引每 hash 单 owner，prefill 的 Stored 会覆盖 decode 的 owner，角色过滤后必回落（评审 #5 指出）。多 owner 索引（`(model,hash) → {replica: ts}`，查询限定候选集；区分 GPU 本地持有 vs 远端已写入两个信号）为 **v1.1 项**，届时 `prefix_affinity` 才在 decode 池内恢复本地优先语义；replicated 拓扑下 P1c 行为不变。
-- 不引入 vLLM disagg proxy；分发协调由 nebula 承担（v1 即本节规则）。
+- **两级局部性（v1.1 多 owner 索引，MapReduce Locality 分级）**：`PrefixIndex` 存储 `(model_uid, block_hash) → {replica_id: (last_seen_ms, generation)}` 多持有者映射（带 per-replica 墓碑与代际水位），并提供限定候选集的 `lookup_in(model, hashes, allowed_replicas)`。路由判暖先看全局（Store-local 共享 KV 命中），阶段过滤缩小到 Decode 池后再做池内 `lookup_in`（Node-local 显存命中）：若某 Decode 副本本地 GPU 显存已持有该前缀且未过载（`pending <= min_pool_pending`），优先直连该 Decode 副本（省去 TCP `lm://` Shuffle，计数 `nebula_router_pd_decode_local_hit_total`），否则再退化为池内 `least_pending` 从 `LMCacheServer` 远端拉取。
+- **冷启动单 Mapper 瓶颈溢出保护（Prefill Spillover）**：当冷请求进入 Prefill 池且所有 Prefill 副本均处于忙碌（`min_prefill_pending >= NEBULA_PD_PREFILL_SPILLOVER_PENDING`，默认 `1`），而 Decode 池中存在负载更低的空闲副本（Decode 以 `kv_both` 运行，具备完整自 prefill + 写回共享存储能力）时，自动将冷请求溢出到空闲 Decode 副本（计数 `nebula_router_stage_prefill_spillover_total`），避免宽前缀冷启动并发被单 Prefill 副本串行卡死。
+- 不引入 vLLM disagg proxy；分发协调由 nebula 承担（v1/v1.1 即本节规则）。
 
 ### 校验规则（共享控制逻辑，BFF/CLI 共用；不只覆盖 BFF——评审 #4）
 
