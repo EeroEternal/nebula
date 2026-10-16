@@ -14,7 +14,8 @@ pub mod store;
 pub use compat::{list_compat_rules, validate_deploy_compat};
 pub use deploy::{
     callback_url_from_scale, callback_url_from_start, load_model, scale_model, start_model,
-    stop_model, validate_callback_url, ScaleDeploymentRequest, StartDeploymentRequest,
+    stop_model, validate_callback_url, validate_pd_split_deployment_images, ScaleDeploymentRequest,
+    StartDeploymentRequest,
 };
 pub use error::ServiceError;
 pub use governance::{filter_canaries_by_model, get_canary, get_slo, list_canaries, list_slos};

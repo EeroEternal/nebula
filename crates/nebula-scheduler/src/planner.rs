@@ -64,6 +64,25 @@ async fn load_image_platforms(store: &EtcdMetaStore, docker_image: Option<&str>)
     Vec::new()
 }
 
+pub async fn resolve_concrete_image(
+    store: &EtcdMetaStore,
+    image_ref: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    let Some(wanted) = image_ref.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let kvs = store.list_prefix("/images/").await?;
+    for (_, val, _) in kvs {
+        let Ok(img) = serde_json::from_slice::<EngineImage>(&val) else {
+            continue;
+        };
+        if img.id == wanted || img.image == wanted {
+            return Ok(Some(img.image));
+        }
+    }
+    Ok(Some(wanted.to_string()))
+}
+
 fn node_matches_platforms(node: &NodeStatus, platforms: &[String]) -> bool {
     if platforms.is_empty() {
         return true;
@@ -332,40 +351,6 @@ pub async fn build_plan_multi(
     })
 }
 
-/// Merge two ModelConfig values. `overrides` fields win when present.
-pub fn merge_config(
-    base: Option<&ModelConfig>,
-    overrides: Option<&ModelConfig>,
-) -> Option<ModelConfig> {
-    match (base, overrides) {
-        (None, None) => None,
-        (Some(b), None) => Some(b.clone()),
-        (None, Some(o)) => Some(o.clone()),
-        (Some(b), Some(o)) => Some(ModelConfig {
-            tensor_parallel_size: o.tensor_parallel_size.or(b.tensor_parallel_size),
-            gpu_memory_utilization: o.gpu_memory_utilization.or(b.gpu_memory_utilization),
-            max_model_len: o.max_model_len.or(b.max_model_len),
-            required_vram_mb: o.required_vram_mb.or(b.required_vram_mb),
-            lora_modules: o.lora_modules.clone().or_else(|| b.lora_modules.clone()),
-            served_model_name: o
-                .served_model_name
-                .clone()
-                .or_else(|| b.served_model_name.clone()),
-            kv_cache_dtype: o
-                .kv_cache_dtype
-                .clone()
-                .or_else(|| b.kv_cache_dtype.clone()),
-            trust_remote_code: o.trust_remote_code.or(b.trust_remote_code),
-            enable_expert_parallel: o.enable_expert_parallel.or(b.enable_expert_parallel),
-            block_size: o.block_size.or(b.block_size),
-            tokenizer_mode: o
-                .tokenizer_mode
-                .clone()
-                .or_else(|| b.tokenizer_mode.clone()),
-        }),
-    }
-}
-
 /// Build a PlacementPlan from a ModelSpec + ModelDeployment (new declarative path).
 pub async fn build_plan_from_deployment(
     store: &EtcdMetaStore,
@@ -384,13 +369,11 @@ pub async fn build_plan_from_deployment(
             .as_ref()
             .and_then(|specs| specs.get(replica_id as usize));
 
-        let merged_config = {
-            let base = merge_config(spec.config.as_ref(), deployment.config_overrides.as_ref());
-            merge_config(
-                base.as_ref(),
-                replica_spec.and_then(|s| s.config_overrides.as_ref()),
-            )
-        };
+        let merged_config = nebula_common::effective_replica_config(
+            deployment,
+            spec.config.as_ref(),
+            replica_id as usize,
+        );
         let extra_args = merged_config
             .as_ref()
             .and_then(|c| build_extra_args_from_config(spec.engine_type.as_deref(), c));
@@ -402,10 +385,17 @@ pub async fn build_plan_from_deployment(
             .and_then(|s| s.gpu_indices.as_deref())
             .or(deployment.gpu_affinity.as_deref());
 
-        let image_ref = replica_spec
-            .and_then(|s| s.image_id.as_deref())
-            .or(deployment.image_id.as_deref())
-            .or(spec.docker_image.as_deref());
+        let image_ref = nebula_common::effective_replica_image(
+            deployment,
+            spec.docker_image.as_deref(),
+            replica_id as usize,
+        );
+        let concrete_image = resolve_concrete_image(store, image_ref).await?;
+        if deployment.topology == Some(nebula_common::DeploymentTopology::PdSplit) {
+            let approved = nebula_common::approved_pd_images_from_env();
+            nebula_common::validate_pd_split_image(concrete_image.as_deref(), &approved)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
 
         let (node_id, gpu_indices) = select_node_and_gpus_for_deployment(
             store,
@@ -444,10 +434,7 @@ pub async fn build_plan_from_deployment(
             gpu_indices,
             extra_args.clone(),
             spec.engine_type.clone(),
-            replica_spec
-                .and_then(|s| s.image_id.clone())
-                .or_else(|| deployment.image_id.clone())
-                .or_else(|| spec.docker_image.clone()),
+            concrete_image,
             role,
             kv_sharing,
         ));

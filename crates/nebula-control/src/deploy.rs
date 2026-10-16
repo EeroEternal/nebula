@@ -5,7 +5,7 @@ use nebula_common::{
 use nebula_meta::MetaStore;
 use serde::Deserialize;
 
-use crate::compat::validate_deploy_compat;
+use crate::compat::{resolve_concrete_image_ref, resolve_replica_platform, validate_deploy_compat};
 use crate::error::ServiceError;
 use crate::store::{
     get_model_deployment, get_model_spec, infer_model_source, is_valid_model_uid, now_ms,
@@ -110,23 +110,26 @@ async fn validate_compat_for_replica_specs(
     fallback_node: Option<&str>,
 ) -> Result<Vec<String>, ServiceError> {
     let mut all_ids = Vec::new();
-    let mut nodes: Vec<Option<&str>> = Vec::new();
+    let mut targets: Vec<(Option<&str>, Option<&str>)> = Vec::new();
     if let Some(specs) = replica_specs {
         for spec in specs {
-            nodes.push(spec.node_id.as_deref().or(fallback_node));
+            targets.push((
+                spec.image_id.as_deref().or(image_id),
+                spec.node_id.as_deref().or(fallback_node),
+            ));
         }
     } else if fallback_node.is_some() {
-        nodes.push(fallback_node);
+        targets.push((image_id, fallback_node));
     } else {
-        nodes.push(None);
+        targets.push((image_id, None));
     }
 
-    for node_id in nodes {
+    for (rep_image_id, node_id) in targets {
         let ids = validate_deploy_compat(
             store,
             engine_type,
             None,
-            image_id,
+            rep_image_id,
             docker_image,
             node_id,
             image_override_reason,
@@ -242,8 +245,25 @@ pub async fn start_model(
             if req.gpu_indices.is_some() {
                 dep.gpu_affinity = req.gpu_indices;
             }
+            let switching_to_replicated =
+                req.topology == Some(nebula_common::DeploymentTopology::Replicated);
             if req.replica_specs.is_some() {
                 dep.replica_specs = req.replica_specs;
+            } else if switching_to_replicated {
+                if let Some(specs) = dep.replica_specs.as_mut() {
+                    for s in specs.iter_mut() {
+                        s.role = None;
+                    }
+                    if specs.iter().all(|s| {
+                        s.node_id.is_none()
+                            && s.gpu_indices.is_none()
+                            && s.config_overrides.is_none()
+                            && s.image_id.is_none()
+                            && s.role.is_none()
+                    }) {
+                        dep.replica_specs = None;
+                    }
+                }
             }
             if req.image_id.is_some() {
                 dep.image_id = req.image_id;
@@ -258,6 +278,8 @@ pub async fn start_model(
             }
             if req.kv_sharing.is_some() {
                 dep.kv_sharing = req.kv_sharing;
+            } else if switching_to_replicated {
+                dep.kv_sharing = None;
             }
             dep.compat_rule_ids = Vec::new();
             dep.version += 1;
@@ -285,30 +307,41 @@ pub async fn start_model(
         },
     };
 
-    // Structural validation (shared control logic, pool.md §pd_split v1.1)
+    let replica_count = deployment.replicas.max(1) as usize;
+    let mut replica_platforms = Vec::with_capacity(replica_count);
+    for idx in 0..replica_count {
+        let rep_cfg =
+            nebula_common::effective_replica_config(&deployment, spec.config.as_ref(), idx);
+        ensure_engine_config(spec.engine_type.as_deref(), rep_cfg.as_ref())?;
+
+        let raw_image =
+            nebula_common::effective_replica_image(&deployment, spec.docker_image.as_deref(), idx);
+        let rep_node = deployment
+            .replica_specs
+            .as_ref()
+            .and_then(|s| s.get(idx))
+            .and_then(|r| r.node_id.as_deref())
+            .or(deployment.node_affinity.as_deref());
+        let plat = resolve_replica_platform(store, raw_image, rep_node).await?;
+        replica_platforms.push(plat);
+    }
+
+    // Structural + KV-compat validation (shared control logic, pool.md §pd_split v1.1)
     // runs BEFORE environment/compat checks: an invalid topology should be
     // rejected with its own actionable reason regardless of what the cluster
     // currently looks like. This also keeps the rejection deterministic.
-    nebula_common::validate_pd_split(&deployment, spec.engine_type.as_deref())
-        .map_err(ServiceError::BadRequest)?;
+    nebula_common::validate_pd_split_with_context(
+        &deployment,
+        spec.engine_type.as_deref(),
+        spec.config.as_ref(),
+        &replica_platforms,
+    )
+    .map_err(ServiceError::BadRequest)?;
 
-    // Gate-passed artifact allowlist (review #4). Only enforced for pd_split.
-    if deployment.topology == Some(nebula_common::DeploymentTopology::PdSplit) {
-        let approved: Vec<String> = std::env::var("NEBULA_APPROVED_PD_IMAGES")
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let image = deployment
-            .image_id
-            .as_deref()
-            .or(spec.docker_image.as_deref());
-        nebula_common::validate_pd_split_image(image, &approved)
-            .map_err(ServiceError::BadRequest)?;
-    }
+    // Gate-passed artifact allowlist (review #4). Enforced on every replica's
+    // resolved concrete runtime image so replica_specs[i].image_id cannot
+    // bypass the top-level allowlist check.
+    validate_pd_split_deployment_images(store, &deployment, spec.docker_image.as_deref()).await?;
 
     let mut deployment = deployment;
     deployment.compat_rule_ids = validate_compat_for_replica_specs(
@@ -324,6 +357,29 @@ pub async fn start_model(
 
     put_model_deployment(store, model_uid, &deployment).await?;
     Ok(deployment)
+}
+
+/// Validate that every replica of a `pd_split` deployment resolves to a
+/// concrete runtime image on `NEBULA_APPROVED_PD_IMAGES`. Reused by deployment
+/// admission (`start_model`) and by canary creation/promotion/rollback so
+/// image mutations cannot bypass the allowlist.
+pub async fn validate_pd_split_deployment_images(
+    store: &dyn MetaStore,
+    deployment: &ModelDeployment,
+    spec_docker_image: Option<&str>,
+) -> Result<(), ServiceError> {
+    if deployment.topology != Some(nebula_common::DeploymentTopology::PdSplit) {
+        return Ok(());
+    }
+    let approved = nebula_common::approved_pd_images_from_env();
+    let replica_count = deployment.replicas.max(1) as usize;
+    for idx in 0..replica_count {
+        let raw_image = nebula_common::effective_replica_image(deployment, spec_docker_image, idx);
+        let concrete_image = resolve_concrete_image_ref(store, raw_image).await?;
+        nebula_common::validate_pd_split_image(concrete_image.as_deref(), &approved)
+            .map_err(ServiceError::BadRequest)?;
+    }
+    Ok(())
 }
 
 pub async fn stop_model(
@@ -552,9 +608,101 @@ mod pd_split_tests {
             "nebula/vllm:0.23.0-lmcache0.5.5",
         );
 
+        // Per-replica image override in replica_specs cannot bypass allowlist.
+        let mut r_override = req(Some(DeploymentTopology::PdSplit), true, true);
+        r_override.replica_specs.as_mut().unwrap()[1].image_id =
+            Some("unapproved/vllm:rogue".into());
+        let err = start_model(&store, "m1", r_override).await.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::BadRequest(m) if m.contains("approved list")),
+            "per-replica image override bypassed allowlist: {err:?}"
+        );
+
+        // Spec-level TP>1 is rejected for pd_split.
+        let mut spec_tp2 = spec_for("m3");
+        spec_tp2.config = Some(ModelConfig {
+            tensor_parallel_size: Some(2),
+            ..Default::default()
+        });
+        store
+            .put(
+                "/models/m3/spec",
+                serde_json::to_vec(&spec_tp2).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let err = start_model(
+            &store,
+            "m3",
+            req(Some(DeploymentTopology::PdSplit), true, true),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::BadRequest(m) if m.contains("tensor_parallel_size=1")),
+            "spec TP>1 was not rejected: {err:?}"
+        );
+
+        // Node status stored at canonical `/nodes/{id}/status` with default
+        // platform "nvidia-cuda" is accepted, whereas "huawei-ascend" is rejected.
+        let cuda_node = nebula_common::NodeStatus {
+            node_id: "node-cuda".into(),
+            last_heartbeat_ms: 1,
+            gpus: vec![],
+            api_addr: None,
+            platform: Some(nebula_common::DEFAULT_NODE_PLATFORM.into()),
+        };
+        store
+            .put(
+                "/nodes/node-cuda/status",
+                serde_json::to_vec(&cuda_node).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut r_cuda = req(Some(DeploymentTopology::PdSplit), true, true);
+        r_cuda.node_id = Some("node-cuda".into());
+        start_model(&store, "m1", r_cuda)
+            .await
+            .expect("pd_split on /nodes/node-cuda/status with nvidia-cuda must succeed");
+
+        let ascend_node = nebula_common::NodeStatus {
+            node_id: "node-ascend".into(),
+            platform: Some("huawei-ascend".into()),
+            ..cuda_node
+        };
+        store
+            .put(
+                "/nodes/node-ascend/status",
+                serde_json::to_vec(&ascend_node).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+        let mut r_ascend = req(Some(DeploymentTopology::PdSplit), true, true);
+        r_ascend.node_id = Some("node-ascend".into());
+        let err = start_model(&store, "m1", r_ascend).await.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::BadRequest(m) if m.contains("CUDA")),
+            "expected non-CUDA node under /nodes/{{id}}/status to be rejected, got: {err:?}"
+        );
+
+        // Switching an existing pd_split deployment (m1) back to replicated
+        // clears stale kv_sharing and replica roles so validation passes.
+        let dep = start_model(
+            &store,
+            "m1",
+            req(Some(DeploymentTopology::Replicated), false, false),
+        )
+        .await
+        .expect("switching back to replicated should clear pd_split fields and succeed");
+        assert_eq!(dep.topology, Some(DeploymentTopology::Replicated));
+        assert!(dep.kv_sharing.is_none());
+        assert!(dep.replica_specs.is_none());
+
         // A fresh model started without topology is replicated and never hits
-        // pd_split rules (m1 above is already pd_split from the previous step —
-        // start_model is a partial update, so its topology is preserved).
+        // pd_split rules.
         match start_model(&store, "m2", req(None, false, false)).await {
             Ok(dep) => assert_eq!(dep.topology, None),
             Err(ServiceError::BadRequest(m)) => {

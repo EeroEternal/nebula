@@ -219,6 +219,37 @@ fn replica_gpu_index(dep: &ModelDeployment, replica_id: u32) -> u32 {
         .unwrap_or(replica_id)
 }
 
+/// Resolve the concrete container image for a replica:
+/// `replica_specs[i].image_id` -> `dep.image_id` -> `spec.docker_image`,
+/// then dereference through `/images/` if it matches a registered `EngineImage.id`.
+/// Propagates store errors so a transient etcd failure never falls back to a
+/// raw `image_id` (which would change `config_fingerprint` and delete running pods).
+async fn resolve_replica_image(
+    store: &dyn MetaStore,
+    dep: &ModelDeployment,
+    spec: Option<&ModelSpec>,
+    replica_id: u32,
+) -> anyhow::Result<Option<String>> {
+    let Some(raw) = nebula_common::effective_replica_image(
+        dep,
+        spec.and_then(|s| s.docker_image.as_deref()),
+        replica_id as usize,
+    )
+    .map(str::trim)
+    .filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let kvs = store.list_prefix("/images/").await?;
+    for (_, val, _) in kvs {
+        if let Ok(img) = serde_json::from_slice::<nebula_common::EngineImage>(&val) {
+            if img.id == raw || img.image == raw {
+                return Ok(Some(img.image));
+            }
+        }
+    }
+    Ok(Some(raw.to_string()))
+}
+
 async fn ensure_replica_running(
     store: &Arc<EtcdMetaStore>,
     namespace: &str,
@@ -270,11 +301,12 @@ async fn ensure_replica_running(
         .and_then(|specs| specs.get(replica_id as usize))
         .and_then(|s| s.role)
         .unwrap_or(nebula_common::ReplicaRole::Mixed);
+    let resolved_image = resolve_replica_image(store.as_ref(), dep, spec, replica_id).await?;
     let desired_hash = config_fingerprint(
         engine_type,
         role,
         dep.kv_sharing.as_ref(),
-        spec.and_then(|s| s.docker_image.as_deref()),
+        resolved_image.as_deref(),
         spec.and_then(|s| s.model_path.as_deref()),
     );
     // An unannotated pod predates this mechanism: recreate once so it adopts
@@ -288,6 +320,18 @@ async fn ensure_replica_running(
     // Recreate when the pod is gone, in a terminal phase, or when its launch
     // config changed; keep waiting while Pending (it is still starting).
     let need_create = !matches!(phase.as_str(), "Running" | "Pending") || config_changed;
+
+    // Enforce NEBULA_APPROVED_PD_IMAGES on the execution plane before deleting
+    // an existing pod for config adoption or creating a new pod, so an
+    // out-of-band image mutation cannot roll out an unapproved pd_split image.
+    if (config_changed || need_create)
+        && (dep.topology == Some(nebula_common::DeploymentTopology::PdSplit)
+            || role != nebula_common::ReplicaRole::Mixed)
+    {
+        let approved = nebula_common::approved_pd_images_from_env();
+        nebula_common::validate_pd_split_image(resolved_image.as_deref(), &approved)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    }
 
     // Pod specs are immutable: a config change needs delete-then-create, not
     // apply. Delete now; the next reconcile tick creates the fresh pod.
@@ -310,6 +354,7 @@ async fn ensure_replica_running(
             gpu_index,
             engine_type,
             spec,
+            resolved_image: resolved_image.as_deref(),
             role,
             kv_sharing: dep.kv_sharing.as_ref(),
             config_hash: desired_hash.clone(),
@@ -421,6 +466,7 @@ struct EnginePodSpec<'a> {
     gpu_index: u32,
     engine_type: &'a str,
     spec: Option<&'a ModelSpec>,
+    resolved_image: Option<&'a str>,
     role: nebula_common::ReplicaRole,
     kv_sharing: Option<&'a nebula_common::KvSharingSpec>,
     /// Launch-config fingerprint stamped as a pod annotation so a config
@@ -437,6 +483,7 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         gpu_index,
         engine_type,
         spec,
+        resolved_image,
         role,
         kv_sharing,
         config_hash,
@@ -447,16 +494,15 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         .unwrap_or("/opt/powerllm/worker/data/models/Qwen2.5-7B-Instruct");
 
     let is_sglang = engine_type.eq_ignore_ascii_case("sglang");
-    // Honour the spec's pinned image (compat-matrix/baked-digest discipline,
-    // review #4). Falling back to a floating `:latest` made deployments
-    // depend on registry availability and silently drift from the pin.
+    // Honour the resolved deployment/replica/spec pinned image
+    // (compat-matrix/baked-digest discipline, review #4).
     let default_image = if is_sglang {
         "lmsysorg/sglang:latest"
     } else {
         "vllm/vllm-openai:v0.23.0"
     };
-    let image = spec
-        .and_then(|s| s.docker_image.as_deref())
+    let image = resolved_image
+        .or_else(|| spec.and_then(|s| s.docker_image.as_deref()))
         .unwrap_or(default_image);
     let mut args = if is_sglang {
         json!([

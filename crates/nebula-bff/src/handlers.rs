@@ -787,6 +787,48 @@ pub async fn put_image(
         return resp;
     }
     img.id = id.clone();
+
+    // If any existing pd_split deployment references this image_id, the updated
+    // concrete image string must still satisfy NEBULA_APPROVED_PD_IMAGES.
+    match st.store.list_prefix("/deployments/").await {
+        Ok(kvs) => {
+            let referenced_by_pd_split = kvs.iter().any(|(_, val, _)| {
+                let Ok(dep) = serde_json::from_slice::<nebula_common::ModelDeployment>(val) else {
+                    return false;
+                };
+                if dep.topology != Some(nebula_common::DeploymentTopology::PdSplit) {
+                    return false;
+                }
+                let top_matches = dep.image_id.as_deref() == Some(id.as_str());
+                let rep_matches = dep
+                    .replica_specs
+                    .as_ref()
+                    .map(|specs| {
+                        specs
+                            .iter()
+                            .any(|r| r.image_id.as_deref() == Some(id.as_str()))
+                    })
+                    .unwrap_or(false);
+                top_matches || rep_matches
+            });
+            if referenced_by_pd_split {
+                let approved = nebula_common::approved_pd_images_from_env();
+                if let Err(reason) =
+                    nebula_common::validate_pd_split_image(Some(img.image.as_str()), &approved)
+                {
+                    return error_response(StatusCode::BAD_REQUEST, "bad_request", &reason);
+                }
+            }
+        }
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "etcd_error",
+                &format!("etcd error: {}", e),
+            );
+        }
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

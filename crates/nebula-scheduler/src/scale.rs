@@ -1,9 +1,11 @@
 //! Scale-down replica selection helpers (shared by binary reconcile + unit tests).
 
-use nebula_common::{EndpointStats, PlacementAssignment};
+use nebula_common::{EndpointStats, PlacementAssignment, ReplicaRole};
 
 /// Choose which healthy assignments to remove when scaling down.
 /// Prefer low pending_requests, then lower replica_id for stability.
+/// When roled (`pd_split`) assignments are present, never remove the last
+/// `Prefill` or the last `Decode` replica so role completeness is preserved.
 pub fn select_replicas_to_remove(
     assignments: &[PlacementAssignment],
     remove_count: usize,
@@ -21,16 +23,36 @@ pub fn select_replicas_to_remove(
             .unwrap_or(0)
     };
 
-    let mut scored: Vec<(u32, u64)> = assignments
+    let mut remaining_prefill = assignments
         .iter()
-        .map(|a| (a.replica_id, pending_of(a.replica_id)))
+        .filter(|a| a.role == ReplicaRole::Prefill)
+        .count();
+    let mut remaining_decode = assignments
+        .iter()
+        .filter(|a| a.role == ReplicaRole::Decode)
+        .count();
+
+    let mut scored: Vec<(u32, ReplicaRole, u64)> = assignments
+        .iter()
+        .map(|a| (a.replica_id, a.role, pending_of(a.replica_id)))
         .collect();
-    scored.sort_by_key(|(rid, pending)| (*pending, *rid));
-    scored
-        .into_iter()
-        .take(remove_count)
-        .map(|(rid, _)| rid)
-        .collect()
+    scored.sort_by_key(|(rid, _, pending)| (*pending, *rid));
+
+    let mut removed = Vec::new();
+    for (rid, role, _) in scored {
+        if removed.len() >= remove_count {
+            break;
+        }
+        match role {
+            ReplicaRole::Prefill if remaining_prefill <= 1 => continue,
+            ReplicaRole::Prefill => remaining_prefill -= 1,
+            ReplicaRole::Decode if remaining_decode <= 1 => continue,
+            ReplicaRole::Decode => remaining_decode -= 1,
+            ReplicaRole::Mixed => {}
+        }
+        removed.push(rid);
+    }
+    removed
 }
 
 #[cfg(test)]
@@ -92,5 +114,26 @@ mod tests {
             .filter(|id| !remove.contains(id))
             .collect();
         assert_eq!(kept, vec![2]);
+    }
+
+    #[test]
+    fn scale_down_never_drops_last_prefill_or_decode_role() {
+        let mut p0 = assignment(0);
+        p0.role = ReplicaRole::Prefill;
+        let mut d1 = assignment(1);
+        d1.role = ReplicaRole::Decode;
+        let mut d2 = assignment(2);
+        d2.role = ReplicaRole::Decode;
+
+        // 1 prefill + 1 decode: cannot remove either without breaking role set.
+        assert!(
+            select_replicas_to_remove(&[p0.clone(), d1.clone()], 1, None).is_empty(),
+            "1P+1D must never lose its sole prefill or decode replica"
+        );
+
+        // 1 prefill + 2 decode: asking to remove 2 can only remove 1 decode (rid=1),
+        // keeping p0 (last prefill) and d2 (last decode).
+        let removed = select_replicas_to_remove(&[p0, d1, d2], 2, None);
+        assert_eq!(removed, vec![1]);
     }
 }
