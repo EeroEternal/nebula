@@ -97,4 +97,3 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
 - [ ] 昇腾真机（arm64 + NPU）：`pip install lmcache` + LMCacheConnector PD e2e——rig 的昇腾镜像是 arm64 无法在 x86 主机执行，需昇腾机器。
 - [x] CUDA 侧最小 PD 验证（2026-10-11，见 §7.4）：角色语义确认（producer/consumer + disagg_proxy 前置），无 NIXL 路径待 lmcache 修复/升级。
 - [ ] nebula 侧设计：`replica_specs` 角色字段（prefill/decode/混合）+ connector 参数进 ModelSpec（adapter 声明能力，不走 Router 分支）——`pool.md` 扩展后评审。
-

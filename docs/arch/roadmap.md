@@ -300,12 +300,12 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 ## 明确不做
 
-- 改架构主轴；Actor 回潮  
-- Gateway 绕过 Router / 双写资源  
-- xtrace 当 Prometheus 替代或 xtrace→Loki 桥  
-- 应用直连 Loki  
-- 只有 metrics、没有 abort/drain SLO 口径  
-- 引擎内 Stage 重构（S1，vLLM 上游的活）；自造 KV 传输/shuffle；Decode 中途迁 KV（等 S3 层落地再评估）  
+- 改架构主轴；Actor 回潮
+- Gateway 绕过 Router / 双写资源
+- xtrace 当 Prometheus 替代或 xtrace→Loki 桥
+- 应用直连 Loki
+- 只有 metrics、没有 abort/drain SLO 口径
+- 引擎内 Stage 重构（S1，vLLM 上游的活）；自造 KV 传输/shuffle；Decode 中途迁 KV（等 S3 层落地再评估）
 
 ---
 

@@ -328,7 +328,7 @@ etcdctl snapshot restore /backup/etcd-xxx.db --data-dir /var/lib/etcd-restore
 **升级（控制面二进制）**：
 1. 测试环境过 `./scripts/ci.sh`；
 2. 目标机 `git pull && cargo build --release`（注意 GLIBC：在目标机或同基镜像内构建）；
-3. `nebula-stack.sh stop` → `start`（滚动：先 Router 后 Gateway，引擎 pod 不动）；
+3. `./scripts/nebula-stack.sh restart-control-plane`（仅滚动重启 Router / Gateway / BFF / k8s-controller，保留 etcd 中的 `/deployments/{model_uid}` 期望与运行中的引擎 Pod；注意不要使用 `stop`，`stop` 为全栈下线，会删除 deployment 期望与模型 Pod）；
 4. 验证：`probe_stack.sh` + 发一条推理请求 + Router `/metrics` 无 error 计数增长。
 
 **升级（引擎镜像/lmcache）**：
