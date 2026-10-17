@@ -47,4 +47,3 @@
 2. **引擎与硬件无关**（OpenAI passthrough + 纯 TCP LMCache 共享 KV，不绑 NVIDIA 专属 NIXL / `p2p_nccl`）。
 3. **用声明式约束替代强耦合**（统一 `NEBULA_KV_HASH_SEED` 哈希不变量 + 镜像 Digest 门禁白名单 + 故障随时可重算的 Hint 语义）。
 4. **内建企业治理闭环**（多租户准入、有界公平队列、SLO 诊断、L3 智能选型、Canary 与成本归因）。
-

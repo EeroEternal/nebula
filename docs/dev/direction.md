@@ -270,7 +270,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
   | **16 并发** | **< 0.2%（完全相同）** | **计算受限（Compute-bound）**：一次权重读取服务 16 条序列，权重字节数不再是瓶颈 |
   | **长上下文 Prefill** | **−7% ～ −9%（4-bit 反而更慢）** | 非原生 FP4 通路下，每次 GEMM 前需在寄存器解包（Unpack）4-bit 权重，增加额外计算开销 |
 
-- **Nebula L3 对应触点**：[`crates/nebula-common/src/selection.rs`](../../crates/nebula-common/src/selection.rs#L58-L98)（`WorkloadHint.concurrency`、`ModelProfile.quantization`、`SelectionConstraints`）。
+- **Nebula L3 对应触点**：[`crates/nebula-common/src/selection.rs`](../../crates/nebula-common/src/selection.rs#L30-L98)（`WorkloadHint.concurrency`、`ModelProfile.quantization`、`SelectionConstraints`）。
 - **落地规则**：在 `Selection` 推荐打分与可解释 `reasons` 中编码该 Roofline 拐点：
   - 当 `workload.concurrency <= 4`（单流/低并发边缘池）或硬件平台具备原生 W4A4 通路（如 `NVFP4`）时，优先加分推荐 4-bit 量化镜像；
   - 当 `workload.concurrency >= 16`（多租户/多 Agent 并发服务端）且显存容量允许时，优先推荐原生 **FP8**，并明确给出原因提示（`"concurrency >= 16 enters compute-bound regime where FP8 matches 4-bit decode throughput without 4-bit prefill unpack penalty"`）。
@@ -309,5 +309,3 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
 | **DeepSeek EPLB**<br>（专家并行动态负载均衡） | Zone B (S1) | 针对 WideEP（EP32/64）下不同负载激活热门专家造成 All-to-All 短板：将逻辑专家（256）与物理槽位（288）解耦，后台滑动窗口统计频次并异步热复制高热专家到冗余槽位，二级装箱零停机消除热点 | 已合入 vLLM/SGLang 上游；Nebula 在 `multi_node_tp` / WideEP 放置时通过 `engine_args` 注入 `--enable-eplb` 等声明式开关 |
 | **非对称编解码与选择性专家量化**<br>（DeepSeek-V4.1-Flash / Meta Muse Spark Open / Bonsai 2） | Zone A | V4.1-Flash（552B MoE）Prefill 仅激活 8B、Decode 激活 16B + Bounded Replay 将 HBM KV 压至 1/4；Muse Spark（816B-A42B）仅对路由专家做 NVFP4 压至 530GB；Bonsai 2 三值化 `{-1,0,+1}` 端侧极小体积 | 在 `ModelProfile` 中登记模型架构特征与显存足迹，用于 L2 节点显存准入估算与 L3 成本/吞吐选型 |
 | **AI-SQL 查询-推理联合规划**<br>（Quail Tree Attention） | 应用/框架层 | 针对 `AI.IF` / `AI.JOIN` 百万次调用，重排算子 + 行级 KV 驻留流水线 + 树状注意力，避免 vLLM 盲目 LRU 驱逐重算 5000 万 token（快 14×） | Nebula 在北向通过 `PrefixAffinity` + 多 owner 索引 + 可选 `x-nebula-replica-id` / 会话锚定配合上层批处理框架锁住热点前缀所在副本 |
-
-
