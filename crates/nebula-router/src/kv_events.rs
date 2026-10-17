@@ -651,6 +651,36 @@ impl PrefixIndex {
             .map(|(replica, _)| replica)
     }
 
+    /// Return the deepest matched prefix block count (`replica_id -> matched_blocks`)
+    /// across all replicas (or restricted to `allowed_replicas`).
+    ///
+    /// Because each block hash in `hashes` is chained from the root, a match at
+    /// `depth` proves exact prefix identity of `depth + 1` blocks (`(depth + 1) * 16`
+    /// tokens), powering Batch 5.2's joint `SavedPrefill - QueueWait` cost function.
+    pub fn lookup_matches_in(
+        &self,
+        model_uid: &str,
+        hashes: &[[u8; 32]],
+        allowed_replicas: Option<&[u32]>,
+    ) -> std::collections::HashMap<u32, usize> {
+        let mut out = std::collections::HashMap::new();
+        for (depth, h) in hashes.iter().enumerate() {
+            let key = crate::kv_hash::external(h).to_vec();
+            if let Some(entry) = self.map.get(&(model_uid.to_string(), key)) {
+                for &replica in entry.value().keys() {
+                    if let Some(allowed) = allowed_replicas {
+                        if !allowed.contains(&replica) {
+                            continue;
+                        }
+                    }
+                    let slot = out.entry(replica).or_insert(0usize);
+                    *slot = (*slot).max(depth + 1);
+                }
+            }
+        }
+        out
+    }
+
     /// Drop replica entries not refreshed within the TTL (KV blocks are LRU-evicted
     /// inside the engine; the index must not outlive them).
     pub fn evict_expired(&self, now_ms: u64, ttl_ms: u64) -> usize {

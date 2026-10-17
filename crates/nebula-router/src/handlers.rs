@@ -305,12 +305,16 @@ pub async fn proxy_chat_completions(
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
         let dual = st.dual_write.clone();
+        let router_for_stream = st.router.clone();
+        let session_for_stream = ctx.session_id.clone();
+        let replica_for_stream = _selected_ep.replica_id;
         let model_uid_for_stream = model_uid.clone();
         let status_code = status.as_u16();
         let request_id_for_task = request_id.clone();
         tokio::spawn(async move {
             let mut first_chunk = true;
             let mut aborted = false;
+            let mut tool_pause_marked = false;
             loop {
                 tokio::select! {
                     biased;
@@ -326,6 +330,18 @@ pub async fn proxy_chat_completions(
                                     let ttft = request_start.elapsed().as_secs_f64();
                                     metrics.observe_ttft(&model_uid_for_stream, ttft);
                                     dual.emit_ttft("nebula_router", &model_uid_for_stream, ttft);
+                                }
+                                if !tool_pause_marked {
+                                    if let Some(ref sid) = session_for_stream {
+                                        if nebula_router::response_has_tool_calls(&b) {
+                                            router_for_stream.mark_tool_pause(
+                                                sid,
+                                                &model_uid_for_stream,
+                                                replica_for_stream,
+                                            );
+                                            tool_pause_marked = true;
+                                        }
+                                    }
                                 }
                                 if tx.send(Ok(b)).await.is_err() {
                                     aborted = true;
@@ -384,6 +400,12 @@ pub async fn proxy_chat_completions(
         Ok(b) => b,
         Err(_) => Bytes::new(),
     };
+    if let Some(ref sid) = ctx.session_id {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            st.router
+                .mark_tool_pause(sid, &model_uid, _selected_ep.replica_id);
+        }
+    }
 
     let e2e = request_start.elapsed().as_secs_f64();
     st.metrics.observe_e2e_latency(&model_uid, e2e);

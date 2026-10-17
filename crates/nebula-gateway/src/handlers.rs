@@ -19,9 +19,10 @@ use nebula_meta::MetaStore;
 
 use crate::auth::AuthContext;
 use crate::interface::{
-    anthropic_json_to_openai_chat, check_tooling_gate, maybe_normalize_router_error,
-    openai_chat_json_to_anthropic, parse_openai_sse_chunk, payload_too_large_response,
-    responses_json_to_openai_chat, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
+    anthropic_json_to_openai_chat, check_score_gate, check_tooling_gate,
+    maybe_normalize_router_error, openai_chat_json_to_anthropic, parse_openai_sse_chunk,
+    payload_too_large_response, responses_json_to_openai_chat, upstream_transport_error,
+    AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
     classify_reqwest_error, forward_embedded, forward_upstream_response, post_router_chat,
@@ -495,6 +496,16 @@ pub async fn proxy_post(
                 return deny;
             }
         }
+    } else if uri_path.ends_with("/v1/score") {
+        if let Ok(payload) = serde_json::from_slice::<Value>(&body_bytes) {
+            let model = payload
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Some(deny) = check_score_gate(&*st.store, model.as_deref()).await {
+                return deny;
+            }
+        }
     }
 
     let prepared = match prepare_upstream(&st, &auth, &headers, &body_bytes).await {
@@ -511,9 +522,14 @@ pub async fn proxy_post(
                 .model
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
+            let is_continuation = st
+                .router
+                .as_ref()
+                .map(|r| r.is_tool_continuation(prepared.ctx.session_id.as_deref(), &body_bytes))
+                .unwrap_or_else(|| nebula_router::request_body_has_tool_result(&body_bytes));
             match queues
                 .for_model(&model)
-                .acquire(prepared.ctx.tenant_id.as_deref())
+                .acquire_with_priority(prepared.ctx.tenant_id.as_deref(), is_continuation)
                 .await
             {
                 Ok(p) => Some(p),
@@ -575,6 +591,11 @@ pub async fn proxy_post(
         );
     }
     let _guard = prepared._conc_guard;
+    let routed_endpoint = prepared
+        .routed_endpoint
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     forward_upstream_response(
         &st,
@@ -584,6 +605,8 @@ pub async fn proxy_post(
         _queue_permit,
         queue_wait_ms,
         upstream_ttft_ms,
+        prepared.ctx.session_id.as_deref(),
+        routed_endpoint,
     )
     .await
 }

@@ -350,8 +350,29 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
          nebula_router_pd_decode_local_hit_total {}\n",
         st.router.pd_decode_local_hit_total(),
     ));
+    body.push_str(&format!(
+        "# HELP nebula_router_pd_short_bypass_total pd_split short cold requests bypassing controller lookup and prefill pool to unsaturated decode pool.\n\
+         # TYPE nebula_router_pd_short_bypass_total counter\n\
+         nebula_router_pd_short_bypass_total {}\n",
+        st.router.pd_short_bypass_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_tool_pause_marked_total Coding agent sessions marked as ToolPaused on tool_calls finish_reason.\n\
+         # TYPE nebula_router_tool_pause_marked_total counter\n\
+         nebula_router_tool_pause_marked_total {}\n\
+         # HELP nebula_router_tool_continuation_hit_total Coding agent continuation turns routed to anchored replica under active Tool-Pause lease.\n\
+         # TYPE nebula_router_tool_continuation_hit_total counter\n\
+         nebula_router_tool_continuation_hit_total {}\n",
+        st.router.tool_pause_marked_total(),
+        st.router.tool_continuation_hit_total(),
+    ));
     let strategy = st.router.strategy_name();
-    for reason in ["no_signal", "below_threshold", "owner_unavailable"] {
+    for reason in [
+        "no_signal",
+        "below_threshold",
+        "owner_unavailable",
+        "owner_congested",
+    ] {
         body.push_str(&format!(
             "nebula_router_strategy_fallback_total{{strategy=\"{strategy}\",reason=\"{reason}\"}} {}\n",
             st.router.strategy_fallback_total(strategy, reason),

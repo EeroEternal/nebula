@@ -286,6 +286,7 @@ async fn main() {
         .route("/v1/completions", post(proxy_post))
         .route("/v1/embeddings", post(proxy_post))
         .route("/v1/rerank", post(proxy_post))
+        .route("/v1/score", post(proxy_post))
         .route("/v1/models", get(list_models))
         .nest("/platform/v1", platform_routes)
         .layer(middleware::from_fn_with_state(

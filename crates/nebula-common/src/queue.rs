@@ -100,6 +100,7 @@ pub struct EngineQueue {
     waiting: Mutex<WaitState>,
     inflight: Arc<AtomicUsize>,
     admitted: AtomicUsize,
+    admitted_continuation: AtomicUsize,
     queued: AtomicUsize,
     denied_full: AtomicUsize,
     denied_tenant: AtomicUsize,
@@ -154,6 +155,7 @@ impl EngineQueue {
             waiting: Mutex::new(WaitState::default()),
             inflight: Arc::new(AtomicUsize::new(0)),
             admitted: AtomicUsize::new(0),
+            admitted_continuation: AtomicUsize::new(0),
             queued: AtomicUsize::new(0),
             denied_full: AtomicUsize::new(0),
             denied_tenant: AtomicUsize::new(0),
@@ -177,6 +179,10 @@ impl EngineQueue {
         self.admitted.load(Ordering::Relaxed)
     }
 
+    pub fn admitted_continuation_total(&self) -> usize {
+        self.admitted_continuation.load(Ordering::Relaxed)
+    }
+
     pub fn queued_total(&self) -> usize {
         self.queued.load(Ordering::Relaxed)
     }
@@ -189,8 +195,15 @@ impl EngineQueue {
         )
     }
 
-    fn make_permit(&self, permit: OwnedSemaphorePermit) -> EnginePermit {
+    fn make_permit(
+        &self,
+        permit: OwnedSemaphorePermit,
+        priority_continuation: bool,
+    ) -> EnginePermit {
         self.admitted.fetch_add(1, Ordering::Relaxed);
+        if priority_continuation {
+            self.admitted_continuation.fetch_add(1, Ordering::Relaxed);
+        }
         self.inflight.fetch_add(1, Ordering::Relaxed);
         EnginePermit {
             _permit: permit,
@@ -200,9 +213,26 @@ impl EngineQueue {
 
     /// Acquire a concurrency slot, waiting in the bounded queue when `fair`.
     pub async fn acquire(&self, tenant: Option<&str>) -> Result<EnginePermit, QueueDeny> {
+        self.acquire_with_priority(tenant, false).await
+    }
+
+    /// Acquire a concurrency slot with optional continuation priority (Batch 5.3).
+    ///
+    /// When `priority_continuation` is `true` (an active Coding Agent returning
+    /// from a `tool_calls` pause with `role="tool"` or an active Tool-Pause
+    /// session lease), `QueueMode::Fair` grants 25% burst headroom on both
+    /// global queue depth and per-tenant waiter share (at least +1 slot) and
+    /// doubles `max_wait`, preventing multi-turn agent workflows with high
+    /// attained GPU service (PLAS) from being dropped at the cold-request
+    /// watermark.
+    pub async fn acquire_with_priority(
+        &self,
+        tenant: Option<&str>,
+        priority_continuation: bool,
+    ) -> Result<EnginePermit, QueueDeny> {
         // Fast path: a slot is free.
         if let Ok(permit) = self.sem.clone().try_acquire_owned() {
-            return Ok(self.make_permit(permit));
+            return Ok(self.make_permit(permit, priority_continuation));
         }
 
         // Busy: fast-fail, or `max_wait=0`, reject immediately.
@@ -213,18 +243,31 @@ impl EngineQueue {
 
         let key = tenant.unwrap_or(DEFAULT_TENANT).to_string();
 
-        // Bounded enqueue with per-tenant cap; the guard releases the slot on
-        // drop (including cancellation while waiting).
+        // Bounded enqueue with per-tenant cap; continuation requests get 25%
+        // burst headroom (+1 min) so returning tool calls are not starved by
+        // cold arrivals.
         let _waiting_guard = {
             let mut st = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
-            if st.total >= self.cfg.max_size {
+            let effective_max_size = if priority_continuation {
+                self.cfg
+                    .max_size
+                    .saturating_add((self.cfg.max_size / 4).max(1))
+            } else {
+                self.cfg.max_size
+            };
+            if st.total >= effective_max_size {
                 self.denied_full.fetch_add(1, Ordering::Relaxed);
                 return Err(QueueDeny::QueueFull);
             }
-            let cap = ((self.cfg.max_size as f64) * self.cfg.tenant_share).ceil() as usize;
-            let cap = cap.max(1);
+            let base_cap = ((self.cfg.max_size as f64) * self.cfg.tenant_share).ceil() as usize;
+            let base_cap = base_cap.max(1);
+            let effective_cap = if priority_continuation {
+                base_cap.saturating_add((base_cap / 4).max(1))
+            } else {
+                base_cap
+            };
             let cur = st.per_tenant.get(&key).copied().unwrap_or(0);
-            if cur >= cap {
+            if cur >= effective_cap {
                 self.denied_tenant.fetch_add(1, Ordering::Relaxed);
                 return Err(QueueDeny::TenantQueueFull);
             }
@@ -237,11 +280,15 @@ impl EngineQueue {
         };
         self.queued.fetch_add(1, Ordering::Relaxed);
 
-        let waited =
-            tokio::time::timeout(self.cfg.max_wait, self.sem.clone().acquire_owned()).await;
+        let effective_wait = if priority_continuation {
+            self.cfg.max_wait.saturating_mul(2)
+        } else {
+            self.cfg.max_wait
+        };
+        let waited = tokio::time::timeout(effective_wait, self.sem.clone().acquire_owned()).await;
 
         match waited {
-            Ok(Ok(permit)) => Ok(self.make_permit(permit)),
+            Ok(Ok(permit)) => Ok(self.make_permit(permit, priority_continuation)),
             Ok(Err(_)) => Err(QueueDeny::Closed),
             Err(_) => {
                 self.denied_timeout.fetch_add(1, Ordering::Relaxed);
@@ -401,5 +448,37 @@ mod tests {
         h3.abort();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(q.depth(), 0);
+    }
+
+    #[tokio::test]
+    async fn priority_continuation_grants_headroom_beyond_cold_watermark() {
+        // max_size=4, tenant_share=0.5 => cold tenant cap = 2, continuation cap = 3.
+        let q = EngineQueue::new(cfg(QueueMode::Fair, 1, 4, 1000));
+        let held = q.acquire(Some("agent")).await.expect("held");
+        let q1 = q.clone();
+        let h1 = tokio::spawn(async move { q1.acquire(Some("agent")).await });
+        let q2 = q.clone();
+        let h2 = tokio::spawn(async move { q2.acquire(Some("agent")).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Cold 3rd request from "agent" is rejected at the base tenant cap (2).
+        let cold = q.acquire_with_priority(Some("agent"), false).await;
+        assert_eq!(cold.unwrap_err(), QueueDeny::TenantQueueFull);
+
+        // Active Tool-Pause continuation request from "agent" gets 25% headroom
+        // (+1 slot) and queues instead of failing with 429.
+        let q3 = q.clone();
+        let cont = tokio::spawn(async move { q3.acquire_with_priority(Some("agent"), true).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!cont.is_finished(), "continuation request must be queued");
+
+        drop(held);
+        let p1 = h1.await.unwrap().unwrap();
+        drop(p1);
+        let p2 = h2.await.unwrap().unwrap();
+        drop(p2);
+        let p3 = cont.await.unwrap().unwrap();
+        drop(p3);
+        assert_eq!(q.admitted_continuation_total(), 1);
     }
 }
