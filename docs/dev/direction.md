@@ -28,7 +28,7 @@ Nebula 是**单二进制 + etcd 权威 + 快速起栈**；Dynamo / llm-d 都要�
 |------|-------------|------|
 | 吃 **vLLM KV events** | ✅ P1c 已落地（[`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs)） | 消费 ZMQ `BlockStored` 实时构建块链索引 |
 | **跨副本前缀亲和** | ✅ P1c 已落地（[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs) + `chat_template`） | **唯一能真超过单实例直连的系统级手段**（冷启动拒绝 12%→0%，暖态 goodput +23%） |
-| **全局 KV 索引 `nebula-indexd`** | ✅ Batch 2 已落地（[`nebula-indexd.rs`](../../crates/nebula-router/src/bin/nebula-indexd.rs)） | 原始帧转发 + 周期快照扇出；Router 热路径 100% 查本地内存 |
+| **全局 KV 索引 `nebula-indexd`** | ✅ Batch 2 已落地（[`indexd.rs`](../../crates/nebula-router/src/bin/indexd.rs)） | 原始帧转发 + 周期快照扇出；Router 热路径 100% 查本地内存 |
 | **`pd_split` 共享 KV 角色化路由** | ✅ Batch 3 v1 已落地（[`pool.md`](../arch/pool.md) §pd_split） | LMCache `lm://` 共享 KV + controller `/lookup`；暖态 TTFT p99 −21% |
 | 选路升级 **Filter→Score→Pick + 插件** | llm-d EPP、Dynamo `router-plugins` | 单阶段 `select()` → 可插拔管线（后续演进） |
 
@@ -88,7 +88,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
    - **做法**：不再用“聚合命中率最高”的伪启发式，而是消费 vLLM 的 ZMQ `BlockStored` 事件，固定全栈 `PYTHONHASHSEED` 与 `sha256_cbor` 块链式哈希（[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs) / [`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs)），并在 Router 侧支持 `chat_template` 精确分词对齐。
    - **收益**：让每个前缀的 KV 只驻留一份，集群有效缓存容量线性叠加。在 96 前缀过载压测下（见 [`benefit-verification.md`](benefit-verification.md)），冷启动拒绝率从 **12% 降到 0%**（goodput **2.4×**），暖态有效吞吐 **+23%**。
 2. **`nebula-indexd` 全局 KV 索引服务（元数据与热路径解耦，见 [`prefix-affinity.md` §5.8](prefix-affinity.md#58-全局索引服务-nebula-indexdbatch-2-2026-10-11)）**
-   - **做法**：独立二进制 [`nebula-indexd`](../../crates/nebula-router/src/bin/nebula-indexd.rs) 作为引擎 KV 事件的唯一稳定汇聚点，维护权威索引并通过“原始帧增量转发 + 周期快照（`!reset` / `!snapshot`）”扇出给多个 Router / 嵌入式 Gateway。
+   - **做法**：独立二进制 [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) 作为引擎 KV 事件的唯一稳定汇聚点，维护权威索引并通过“原始帧增量转发 + 周期快照（`!reset` / `!snapshot`）”扇出给多个 Router / 嵌入式 Gateway。
    - **收益**：Router 热路径 100% 查本地内存（零外部 RPC），重启可在单个快照周期内自愈，indexd 挂掉只退化为本地存量，不阻塞推理。
 3. **`pd_split` v1：基于共享 KV 的角色化放置与路由（见 [`../arch/pool.md` §pd_split](../arch/pool.md#pd_split-拓扑与角色化放置p2c-pd-设计稿-v112026-10-12经独立评审-rework-修订)、[`engines.md` §7](engines.md#7-pd-分离传输选型与引擎版本钉死batch-3-第一步2026-10-11)）**
    - **做法**：不绑 NVIDIA 专属的 NIXL / `p2p_nccl`，选型硬件无关的 **LMCache（`lm://` 纯 TCP 共享 KV 存储 + `lmcache_controller`）**。副本按角色划分为 `prefill`（`kv_producer`，负责算冷前缀并写入共享存储）和 `decode`（`kv_both`，命中暖前缀直接从共享存储 Retrieve）。Router 通过查询 controller `/lookup` 判断冷暖（[`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L341)）：**冷流量进 Prefill 池生产 KV，暖流量进 Decode 池消费 KV**。
@@ -131,7 +131,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
 - **MapReduce 教训**：Master 只维护中间块在哪里的目录（Location Directory），真正的大块数据流直接在 Worker 和存储间走，绝不经过 Master 转发。
 - **Nebula 的落地**：
   - KV 字节流只走引擎与 `lmcache_server` 之间的 `lm://` 通道，**永远不经过 Nebula Gateway/Router**（见 [`engines.md`:L93](engines.md#L93)）。
-  - Nebula 只通过 [`nebula-indexd`](../../crates/nebula-router/src/bin/nebula-indexd.rs) 或 `lmcache_controller` 的 `/lookup` 询问一句“这个 token 前缀的 KV 块现在在不在池子里？”，拿到 `warm / cold` 信号后做路由决策，保持控制面与路由层的极度轻量。
+  - Nebula 只通过 [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) 或 `lmcache_controller` 的 `/lookup` 询问一句“这个 token 前缀的 KV 块现在在不在池子里？”，拿到 `warm / cold` 信号后做路由决策，保持控制面与路由层的极度轻量。
 
 ---
 
@@ -145,7 +145,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
    Router 不去问引擎内部怎么分块，引擎也不回调 Router；而是通过环境约束——强行统一 `NEBULA_KV_HASH_SEED == PYTHONHASHSEED`、钉死 `--prefix-caching-hash-algo sha256_cbor`、固定 `block_size=16`、共用同一份 `tokenizer.json`（见 [`../arch/pool.md` §数据模型增量](../arch/pool.md#数据模型增量实现契约)、[`prefix-affinity.md` §5.2](prefix-affinity.md#52-hashsha256_cbor-链式需显式固定-seed--algo)）。只要满足这组数学约束，Router 算出的 8 字节 key、Prefill 写进存储的 key、Decode 去拉取的 key **天然 100% 逐位一致**，零运行时耦合。
 2. **准入与兼容硬约束（替代运行时的 `if-else` 适配）**
    不在数据面代码里写平台或版本分支（见 [`../arch/control-plane-adapters.md` §4.3](../arch/control-plane-adapters.md#43-热路径只认这三件事)），而是用部署期硬约束把不满足前提的组合直接拒绝在门外：
-   - 拓扑约束：`pd_split` 必须 `TP=1`、同 `kv_cache_dtype`、同硬件族、且至少 1 Prefill + 1 Decode（[`validate_pd_split`](../../crates/nebula-common/src/model_deployment.rs#L296)）；
+   - 拓扑与兼容约束：[`validate_pd_split`](../../crates/nebula-common/src/model_deployment.rs#L296) 强制校验 `engine_type == "vllm"`、`kv_sharing` 必填（`lm://` + `serde == "naive"`）、全部副本显式指定非 `Mixed` 角色且满足 `>= 1 Prefill + >= 1 Decode`；按副本池平台兼容矩阵（[`validate_compat_for_replica_specs`](../../crates/nebula-control/src/deploy.rs#L314)）与 [`../arch/pool.md` §兼容性矩阵](../arch/pool.md#L201) 约束 v1 适用边界（同硬件族、同 `kv_cache_dtype`、`TP=1`）；
    - 产物约束：镜像 Digest 必须先过 `scripts/check_lmcache_compat.sh` 真机正数传输门禁，再写入 `NEBULA_APPROVED_PD_IMAGES` 白名单（[`validate_pd_split_image`](../../crates/nebula-common/src/model_deployment.rs#L258)，见 [`../arch/pool.md` §部署产物绑定](../arch/pool.md#部署产物绑定评审-4-修正)）。
    **把复杂度全部收敛为启动前的“静态校验约束”，让运行时的热路径极度简单。**
 3. **“只发 Hint + 随时可重算”的弱耦合契约（替代分布式事务）**
@@ -186,7 +186,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
    | 业界趋同方向（`llm-d` / `Dynamo` / `AIBrix` / `Mooncake`） | 解决的核心物理墙 | Nebula 当前状态与对应实现 |
    |---|---|---|
    | **1. 网关与选路解耦**（Envoy `ext_proc` + GAIE `InferencePool` / EPP） | L7 网关对显存状态失明；选路需感知 Token/KV | ✅ 已具备：Gateway/嵌入式 Router 消费规范化 `/endpoints/` 与 `/stats/`（见 [`../arch/control-plane-adapters.md`](../arch/control-plane-adapters.md)） |
-   | **2. 固定块哈希 + 异步事件流前缀索引**（16/64-token Block Hash + ZMQ/gRPC 事件 + 本地无锁树/表） | 集中式查表网络延迟爆炸；Round-Robin 破坏 Prefix Cache 局部性 | ✅ 已落地：[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs)（16-token `sha256_cbor`）+ [`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs)（ZMQ `BlockStored`）+ [`nebula-indexd.rs`](../../crates/nebula-router/src/bin/nebula-indexd.rs) |
+   | **2. 固定块哈希 + 异步事件流前缀索引**（16/64-token Block Hash + ZMQ/gRPC 事件 + 本地无锁树/表） | 集中式查表网络延迟爆炸；Round-Robin 破坏 Prefix Cache 局部性 | ✅ 已落地：[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs)（16-token `sha256_cbor`）+ [`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs)（ZMQ `BlockStored`）+ [`indexd.rs`](../../crates/nebula-router/src/bin/indexd.rs) |
    | **3. 跨机 KV 传输接口归一**（`vLLM KVConnector` + NIXL / LMCache / Mooncake Store） | 跨机 HBM/DRAM/远端池缺乏统一异步原语 | ✅ 已落地：选用硬件中立的 `LMCacheConnectorV1` + `lmcache_server`（`lm://` 纯 TCP），不绑 NVIDIA 专属 NIXL（见 [`engines.md` §7](engines.md#7-pd-分离传输选型与引擎版本钉死batch-3-第一步2026-10-11)） |
    | **4. PD 角色分池与短请求旁路**（Prefill 池小 TP 算力密集 vs Decode 池带宽密集 + Threshold Gating） | 长 Prefill 阻塞 Decode TPOT；短请求跨机传输得不偿失 | ✅/⏳ `pd_split` v1 角色路由已落地（[`../arch/pool.md`](../arch/pool.md)）；**短请求旁路与多 owner 联合打分见 §11.2** |
    | **5. SLO 驱动的二元曲面规划**（看 `ISL/OSL + TTFT/TPOT` 而非 GPU `SM_UTIL`） | Decode 受限于显存带宽，带宽 100% 满载时 `SM_UTIL` 仅 ~25%，传统 HPA 失效 | ✅/⏳ [`slo.rs`](../../crates/nebula-common/src/slo.rs) 已评估 TTFT/错误率；**按 TTFT vs TPOT/KV 水位指导 P:D 池配比见 §11.3** |
@@ -223,7 +223,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
   多副本下，同一个热门 System Prompt 或文档前缀往往同时驻留在多个副本的 HBM/DRAM 中，或者不同副本持有不同深度的前缀匹配。主流路由器不再采用“单赢家硬跳转”，而是维护每个候选节点 $w$ 的匹配深度 $\text{HitRate}(w)$，并与节点实时排队负载联合计算无锁代价函数（决策延迟 < 1ms）：
   $$\text{Score}(w) = \alpha \cdot \text{SavedPrefillTokens}(w) - \beta \cdot \text{QueueWaitCost}(w) - \gamma \cdot \text{KvUsagePenalty}(w)$$
 - **Nebula 现状痛点**：
-  1. 目前 [`PrefixIndex`](../../crates/nebula-router/src/kv_events.rs) 的表结构为 `DashMap<(String, u64), (u32, u64)>`（**单 hash 单 owner**）：在 `pd_split` 拓扑下，`Prefill` 副本产生 `BlockStored` 事件会覆盖 `Decode` 副本的 owner 记录，导致角色过滤后无法在 `Decode` 池内识别谁已经本地持有该前缀（即 [`../arch/pool.md`:L194](../arch/pool.md#L194) 的 **评审 #5 待办项**）；
+  1. 目前 [`PrefixIndex`](../../crates/nebula-router/src/kv_events.rs#L119) 的表结构为 `DashMap<(String, Vec<u8>), (u32, u64)>`（**8 字节块哈希单 key 单 owner**）：在 `pd_split` 拓扑下，`Prefill` 副本产生 `BlockStored` 事件会覆盖 `Decode` 副本的 owner 记录，导致角色过滤后无法在 `Decode` 池内识别谁已经本地持有该前缀（即 [`../arch/pool.md`:L194](../arch/pool.md#L194) 的 **评审 #5 待办项**）；
   2. 目前 [`PrefixAffinity::select`](../../crates/nebula-router/src/strategy.rs#L173-L198) 是二元选择：只要 `ctx.prefix_owner` 存在且未触发 95% KV 过载熔断，哪怕该副本已有大量 `pending_requests` 排队、而另一台副本完全空闲，也会硬打过去，在热点前缀突发时易制造单点排队 Straggler。
 - **对应代码触点与改造方案（合并 `pd_split v1.1` 评审 #5 与 `Filter→Score→Pick`）**：
   - **触点**：[`crates/nebula-router/src/kv_events.rs`](../../crates/nebula-router/src/kv_events.rs)（`PrefixIndex`）、[`crates/nebula-router/src/strategy.rs`](../../crates/nebula-router/src/strategy.rs)（`SelectionCtx` / `PrefixAffinity`）。
@@ -240,7 +240,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
   - **触点**：Gateway 流式/非流式响应解析（[`crates/nebula-gateway/src/proxy_common.rs`](../../crates/nebula-gateway/src/proxy_common.rs)）、有界公平准入队列（[`crates/nebula-common/src/queue.rs`](../../crates/nebula-common/src/queue.rs)）、Router 会话亲和（[`crates/nebula-router/src/lib.rs`:L754-L778](../../crates/nebula-router/src/lib.rs#L754-L778)）。
   - **设计（Zone C 纯网关/路由层实现，零引擎侵入）**：
     1. **Tool-Pause 状态标记**：当 Gateway 转发响应检测到 `finish_reason == "tool_calls"`（或流式 `delta.tool_calls`）时，在进程内记录该会话/前缀指纹处于 `ToolPaused` 状态（默认租约 TTL `60s`）；
-    2. **续接请求识别与准入优先**：当后续请求携带 `role: "tool"` 消息（或命中 `ToolPaused` 会话租约）在 TTL 窗口内返回时，判定为**活跃 Agent 续接请求**，在 [`BoundedFairQueue`](../../crates/nebula-common/src/queue.rs) 中赋予优先于全新冷请求的放行水位（避免长链路 Agent 在第 $N$ 轮半途 429 夭折），并在 Router 中强锚定原持有副本。
+    2. **续接请求识别与准入优先**：当后续请求携带 `role: "tool"` 消息（或命中 `ToolPaused` 会话租约）在 TTL 窗口内返回时，判定为**活跃 Agent 续接请求**，在 [`EngineQueue`（`QueueMode::Fair`）](../../crates/nebula-common/src/queue.rs#L97) 中赋予优先于全新冷请求的放行水位（避免长链路 Agent 在第 $N$ 轮半途 429 夭折），并在 Router 中强锚定原持有副本。
 
 #### 4. SGLang `/v1/score` 极速打分端点的 L1 能力声明与前缀亲和透传
 

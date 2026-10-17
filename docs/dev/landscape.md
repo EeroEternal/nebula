@@ -11,7 +11,7 @@
 |---|---|---|---|---|---|
 | **核心设计哲学** | K8s 云原生标准底座 + vLLM 深度协同 | 全栈极致性能 + NVIDIA 硬件通信原语 | 高密度云原生 + 大规模多 LoRA / 混部 | 以 KV Cache 为中心的解耦存储与极速路由 | **无需 K8s、单二进制起栈 + 用声明式约束替代强耦合 + 企业级多租户治理** |
 | **网关与路由规范** | K8s **GAIE** (`InferencePool` / `InferenceModel`) + Envoy `ext_proc` → EPP | Dynamo Smart/KV Router（支持 Envoy 集成与独立部署） | Envoy `ext_proc` 插件 + 语义/前缀路由 | Rust `sgl-router`（影子 Radix 树 + 联合代价） | Rust **Gateway + 嵌入式/独立 Router**（`PrefixAffinity` + 角色路由，热路径 ~0.1ms） |
-| **全局 KV 状态同步** | 块哈希 + 事件流 → EPP 全局索引 | ZMQ KV 事件流 → 分布式 Radix 树（`kv-router` / `kv-hashing`） | 节点指标 + 前缀/语义路由 | 预测型影子前缀树 + 节点队列/KV 水位联合打分 | ✅ **16-token `sha256_cbor`（[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs)）+ ZMQ `BlockStored` + [`nebula-indexd`](../../crates/nebula-router/src/bin/nebula-indexd.rs) 快照扇出** |
+| **全局 KV 状态同步** | 块哈希 + 事件流 → EPP 全局索引 | ZMQ KV 事件流 → 分布式 Radix 树（`kv-router` / `kv-hashing`） | 节点指标 + 前缀/语义路由 | 预测型影子前缀树 + 节点队列/KV 水位联合打分 | ✅ **16-token `sha256_cbor`（[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs)）+ ZMQ `BlockStored` + [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) 快照扇出** |
 | **跨节点 KV 传输/存储** | 集成 **NIXL** + `vLLM KVConnector` | 原生 **NIXL**（UCX/RDMA/NVLink/GDS）+ `kvbm-*` | 集成 InfiniStore / Vineyard / LMCache | **Mooncake Transfer Engine**（RDMA 拓扑优化） | ✅ **硬件中立 `LMCacheConnectorV1` + `lmcache_server`（`lm://` 纯 TCP）**，兼容 CUDA 与昇腾 |
 | **PD 分离与弹性调度** | Variant Autoscaler + 双阶段直通 + **短请求旁路** | **Dynamo Planner**（按 ISL/OSL 实时重平衡 P:D）+ 短请求旁路 | 基于滑动窗口 SLO 的混部弹性伸缩器 | 动态 Prefill / Decode 实例池与防过载预测 | ✅ **`pd_split` v1 共享 KV 角色化路由**（[`pool.md`](../arch/pool.md)，TTFT p99 −21%）；短请求旁路与动态配比见 [`direction.md` §11](direction.md#11-2026-llm-serving-技术趋势参照与-nebula-落点映射) |
 | **多租户与企业治理** | 依赖外部 K8s 网关生态 | 非核心（偏底层算力基础设施） | 侧重多 LoRA 密度与 K8s 混部 | 侧重底层 KV 传输与路由 | ✅ **内建租户配额、有界公平队列、审计、成本归因、兼容矩阵、L3 选型与 Canary** |
@@ -20,7 +20,7 @@
 
 | Dynamo crate | Nebula 对应组件 | 当前状态 |
 |---|---|---|
-| `kv-router` | `nebula-router` + [`nebula-indexd`](../../crates/nebula-router/src/bin/nebula-indexd.rs) | ✅ 已落地（P1c + Batch 2 全局索引扇出） |
+| `kv-router` | `nebula-router` + [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) | ✅ 已落地（P1c + Batch 2 全局索引扇出） |
 | `kv-hashing` | [`nebula_router::kv_hash`](../../crates/nebula-router/src/kv_hash.rs) + [`prompt_hash`](../../crates/nebula-router/src/prompt_hash.rs) | ✅ 已落地（`sha256_cbor` + `chat_template` token 级对齐） |
 | `kvbm-*`（KV Block Manager） | `lmcache_server` + `lmcache_controller`（由 [`nebula-stack.sh`](../../scripts/nebula-stack.sh) 编排，Router [`controller_warm`](../../crates/nebula-router/src/lib.rs#L341) 查询） | ✅ 已落地 `pd_split` v1（借力外部 S3 组件，KV 字节旁路 Nebula） |
 | `router-plugins` | [`RoutingStrategy`](../../crates/nebula-router/src/strategy.rs) trait | ⏳ 单赢家 `select()` 已落地；待升级多 owner 联合代价打分（[`direction.md` §11.2](direction.md#2-多-owner-前缀索引--节省-prefill-vs-排队等待联合代价打分joint-cost-function)） |
