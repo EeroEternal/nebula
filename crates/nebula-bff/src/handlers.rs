@@ -277,6 +277,7 @@ pub async fn engine_stats(
             last_updated_ms: now_ms,
             pending_requests: pending,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: kv_usage,
         });

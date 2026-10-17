@@ -253,43 +253,51 @@ fn classify_quantization(
 }
 
 /// Roofline quantization score bonus and explainable reason (Batch 5.5):
-/// - `concurrency <= 4` or native W4A4 (`NVFP4`): +15.0 bonus for 4-bit candidates.
+/// - `concurrency <= 4` or native W4A4 (`NVFP4`): +15.0 bonus for 4-bit candidates under Latency/Throughput preference.
 /// - `concurrency >= 16` without native W4A4: +15.0 bonus for FP8 candidates (and -5.0 unpack
-///   penalty on non-native 4-bit candidates, plus the explainable Roofline reason on both).
+///   penalty on non-native 4-bit candidates) under Latency/Throughput preference.
+/// - Under `SelectionPreference::Cost` (`$/1k tokens`), numeric bonus is `0.0` so cost ordering
+///   is never inverted by a latency/throughput constant, while the explainable Roofline reason
+///   is still attached.
 fn roofline_quantization_adjustment(
     req: &SelectionRequest,
     candidate: &BackendCandidate,
 ) -> (f64, Option<&'static str>) {
     let (bucket, native_w4a4) = classify_quantization(req.model.quantization.as_deref(), candidate);
-    let Some(conc) = req.workload.concurrency else {
-        if native_w4a4 && bucket == QuantBucket::FourBit {
-            return (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON));
+    let (raw_bonus, reason) = match req.workload.concurrency {
+        None => {
+            if native_w4a4 && bucket == QuantBucket::FourBit {
+                (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON))
+            } else {
+                (0.0, None)
+            }
         }
-        return (0.0, None);
-    };
-
-    if native_w4a4 && bucket == QuantBucket::FourBit {
-        return (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON));
-    }
-
-    if conc <= 4 {
-        match bucket {
+        Some(_) if native_w4a4 && bucket == QuantBucket::FourBit => {
+            (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON))
+        }
+        Some(conc) if conc <= 4 => match bucket {
             QuantBucket::FourBit => (15.0, Some(ROOFLINE_MEMORY_BOUND_4BIT_REASON)),
             _ => (0.0, None),
-        }
-    } else if conc >= 16 {
-        match bucket {
+        },
+        Some(conc) if conc >= 16 => match bucket {
             QuantBucket::Fp8 => (15.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
             QuantBucket::FourBit => (-5.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
             QuantBucket::Other => (0.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
-        }
-    } else {
-        (0.0, None)
-    }
+        },
+        Some(_) => (0.0, None),
+    };
+    let effective_bonus = match req.constraints.preference {
+        SelectionPreference::Cost => 0.0,
+        SelectionPreference::Latency | SelectionPreference::Throughput => raw_bonus,
+    };
+    (effective_bonus, reason)
 }
 
 fn score_candidate(pref: SelectionPreference, c: &BackendCandidate, roofline_bonus: f64) -> f64 {
-    let switch_penalty = c.switching_cost * 10.0;
+    let switch_penalty = match pref {
+        SelectionPreference::Cost => c.switching_cost * 0.01,
+        SelectionPreference::Latency | SelectionPreference::Throughput => c.switching_cost * 10.0,
+    };
     let base = match pref {
         SelectionPreference::Latency => {
             let ttft = c.ttft_p95_ms.unwrap_or(f64::MAX);

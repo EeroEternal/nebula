@@ -420,7 +420,16 @@ pub async fn list_diagnostic_events(
     }
 
     // Engine scrape diagnostics (Batch 5.6: detect silent prefix-cache disablement
-    // on active vLLM / hybrid-attention replicas where prefix_cache_hit_rate is absent).
+    // on active vLLM / hybrid-attention replicas where prefix_cache_queries_total is 0).
+    let mut model_specs: std::collections::HashMap<String, nebula_common::ModelSpec> =
+        std::collections::HashMap::new();
+    if let Ok(specs_raw) = store.list_prefix("/models/").await {
+        for (_, v, _) in specs_raw {
+            if let Ok(spec) = serde_json::from_slice::<nebula_common::ModelSpec>(&v) {
+                model_specs.insert(spec.model_uid.clone(), spec);
+            }
+        }
+    }
     if let Ok(stats_raw) = store.list_prefix("/stats/").await {
         for (_, v, _) in stats_raw {
             let Ok(st) = serde_json::from_slice::<nebula_common::EndpointStats>(&v) else {
@@ -434,10 +443,22 @@ pub async fn list_diagnostic_events(
             let Some(dep) = running_deps.get(&st.model_uid) else {
                 continue;
             };
+            let spec = model_specs.get(&st.model_uid);
+            let is_vllm = spec
+                .and_then(|s| s.engine_type.as_deref())
+                .map(|et| nebula_common::resolve_engine_type(Some(et)) == "vllm")
+                .unwrap_or(true);
+            if !is_vllm {
+                continue;
+            }
             let prefix_caching_expected = dep
                 .config_overrides
                 .as_ref()
                 .and_then(|c| c.enable_prefix_caching)
+                .or_else(|| {
+                    spec.and_then(|s| s.config.as_ref())
+                        .and_then(|c| c.enable_prefix_caching)
+                })
                 .unwrap_or(true);
             if let Some(ev) = nebula_common::diagnose_hybrid_prefix_cache(
                 &st.model_uid,
@@ -445,7 +466,7 @@ pub async fn list_diagnostic_events(
                 prefix_caching_expected,
                 st.pending_requests > 0,
                 st.prefix_cache_hit_rate,
-                None,
+                st.prefix_cache_queries_total,
                 st.last_updated_ms,
             ) {
                 events.push(ev);

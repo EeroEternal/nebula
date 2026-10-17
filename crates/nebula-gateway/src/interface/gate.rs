@@ -75,7 +75,8 @@ pub fn unsupported_score_response(engine_type: Option<&str>) -> Response {
     )
 }
 
-/// Look up model spec engine_type from etcd (`/models/{uid}/spec`).
+/// Look up model spec engine_type from etcd (`/models/{uid}/spec`), resolving
+/// an omitted `engine_type` on an existing `ModelSpec` to `DEFAULT_ENGINE_TYPE` (`"vllm"`).
 pub async fn resolve_engine_type_for_model(
     store: &dyn MetaStore,
     model: Option<&str>,
@@ -88,9 +89,9 @@ pub async fn resolve_engine_type_for_model(
     match store.get(&key).await {
         Ok(Some((data, _))) => {
             let spec: ModelSpec = serde_json::from_slice(&data).ok()?;
-            spec.engine_type
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| s.to_ascii_lowercase())
+            Some(nebula_common::resolve_engine_type(
+                spec.engine_type.as_deref(),
+            ))
         }
         _ => None,
     }

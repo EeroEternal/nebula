@@ -653,22 +653,6 @@ pub async fn scrape_vllm_stats(
             "scraped speculative decoding acceptance length"
         );
     }
-    if let Some(ev) = nebula_common::diagnose_hybrid_prefix_cache(
-        model_uid,
-        replica_id,
-        true,
-        stats.pending_requests > 0,
-        stats.prefix_cache_hit_rate,
-        diag.prefix_cache_queries_total,
-        ts_ms,
-    ) {
-        tracing::warn!(
-            model_uid = %model_uid,
-            replica_id,
-            summary = %ev.summary,
-            "engine scrape diagnostic"
-        );
-    }
     Ok(stats)
 }
 

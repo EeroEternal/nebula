@@ -167,9 +167,9 @@ fn build_sglang_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
         args.push("--disable-radix-cache".to_string());
     }
     if let Some(spec) = cfg.speculative_config.as_ref() {
-        if let Some(method) = spec.method {
+        if let Some(algo) = spec.method.and_then(|m| m.as_sglang_algorithm()) {
             args.push("--speculative-algorithm".to_string());
-            args.push(method.as_sglang_algorithm().to_string());
+            args.push(algo.to_string());
         }
         if let Some(ref draft) = spec.draft_model {
             args.push("--speculative-draft-model-path".to_string());
@@ -178,14 +178,6 @@ fn build_sglang_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
         if let Some(k) = spec.num_speculative_tokens {
             args.push("--speculative-num-draft-tokens".to_string());
             args.push(k.to_string());
-        }
-        if let Some(max_l) = spec.prompt_lookup_max {
-            args.push("--prompt-lookup-max".to_string());
-            args.push(max_l.to_string());
-        }
-        if let Some(min_l) = spec.prompt_lookup_min {
-            args.push("--prompt-lookup-min".to_string());
-            args.push(min_l.to_string());
         }
     }
 
@@ -310,25 +302,35 @@ mod tests {
             .find(|w| w[0] == "--speculative-config")
             .expect("vllm --speculative-config");
         let parsed: serde_json::Value = serde_json::from_str(&spec_pair[1]).unwrap();
-        assert_eq!(parsed["method"], "dflash2");
+        assert_eq!(parsed["method"], "draft_model");
         assert_eq!(parsed["model"], "Qwen/Qwen3.8-27B-DFlash2");
         assert_eq!(parsed["num_speculative_tokens"], 16);
         assert_eq!(parsed["prompt_lookup_max"], 8);
 
-        let sg_args = build_engine_extra_args(Some("sglang"), &cfg)
+        let sg_cfg = ModelConfig {
+            enable_prefix_caching: Some(false),
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Dflash2),
+                draft_model: Some("Qwen/Qwen3.8-27B-DFlash2".into()),
+                num_speculative_tokens: Some(16),
+                prompt_lookup_max: None,
+                prompt_lookup_min: None,
+            }),
+            ..sample_cfg()
+        };
+        let sg_args = build_engine_extra_args(Some("sglang"), &sg_cfg)
             .unwrap()
             .unwrap();
+        assert!(sg_args.iter().any(|a| a == "--disable-radix-cache"));
         assert!(sg_args
             .windows(2)
-            .any(|w| w[0] == "--speculative-algorithm" && w[1] == "DFLASH2"));
+            .any(|w| w[0] == "--speculative-algorithm" && w[1] == "EAGLE"));
         assert!(sg_args.windows(2).any(
             |w| w[0] == "--speculative-draft-model-path" && w[1] == "Qwen/Qwen3.8-27B-DFlash2"
         ));
         assert!(sg_args
             .windows(2)
             .any(|w| w[0] == "--speculative-num-draft-tokens" && w[1] == "16"));
-        assert!(sg_args
-            .windows(2)
-            .any(|w| w[0] == "--prompt-lookup-max" && w[1] == "8"));
+        assert!(!sg_args.iter().any(|a| a == "--prompt-lookup-max"));
     }
 }

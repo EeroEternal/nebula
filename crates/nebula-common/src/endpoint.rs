@@ -88,6 +88,11 @@ pub struct EndpointStats {
     /// which stored a permille scale falsely labeled as bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kv_cache_usage: Option<f64>,
+
+    /// Cumulative prefix-cache query count scraped from `vllm:prefix_cache_queries_total`
+    /// when exposed by the engine (`None` when the engine does not expose the counter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix_cache_queries_total: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +107,8 @@ struct EndpointStatsDe {
     prompt_cache_hit_rate: Option<f64>,
     #[serde(default)]
     kv_cache_usage: Option<f64>,
+    #[serde(default)]
+    prefix_cache_queries_total: Option<f64>,
     /// Legacy permille-as-bytes fields; accepted on read only.
     #[serde(default)]
     kv_cache_used_bytes: Option<u64>,
@@ -132,6 +139,7 @@ impl From<EndpointStatsDe> for EndpointStats {
             prefix_cache_hit_rate: d.prefix_cache_hit_rate,
             prompt_cache_hit_rate: d.prompt_cache_hit_rate,
             kv_cache_usage,
+            prefix_cache_queries_total: d.prefix_cache_queries_total,
         }
     }
 }
@@ -155,6 +163,7 @@ impl EndpointStats {
             prefix_cache_hit_rate: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: None,
+            prefix_cache_queries_total: None,
         }
     }
 }

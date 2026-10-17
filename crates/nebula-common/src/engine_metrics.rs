@@ -81,6 +81,7 @@ pub fn parse_vllm_metrics_text(
         prefix_cache_hit_rate,
         prompt_cache_hit_rate: None,
         kv_cache_usage,
+        prefix_cache_queries_total: diag.prefix_cache_queries_total,
     }
 }
 
@@ -162,6 +163,7 @@ pub fn parse_sglang_metrics_text(
         prefix_cache_hit_rate,
         prompt_cache_hit_rate: None,
         kv_cache_usage,
+        prefix_cache_queries_total: diag.prefix_cache_queries_total,
     }
 }
 
@@ -248,8 +250,12 @@ pub fn parse_engine_scrape_diagnostics(
 }
 
 /// Emit a `DiagnosticEvent` when a model expects prefix caching (`prefix_caching_expected`)
-/// and is actively serving (`active_traffic`), yet `prefix_cache_queries` remains 0 or absent
+/// and is actively serving (`active_traffic`), yet the scraped `prefix_cache_queries_total`
+/// counter is explicitly `Some(0.0)` while `prefix_cache_hit_rate` is `None`
 /// (the vLLM `is_hybrid=True` silent prefix-cache disablement trap).
+///
+/// Never fires when `prefix_cache_queries_total` is `None` (e.g. SGLang or engines
+/// that do not expose `prefix_cache_queries_total`).
 pub fn diagnose_hybrid_prefix_cache(
     model_uid: &str,
     replica_id: u32,
@@ -263,8 +269,8 @@ pub fn diagnose_hybrid_prefix_cache(
         return None;
     }
     let silently_disabled = match prefix_cache_queries_total {
-        Some(q) => q <= 0.0,
-        None => prefix_cache_hit_rate.is_none(),
+        Some(q) => q <= 0.0 && prefix_cache_hit_rate.is_none(),
+        None => false,
     };
     if !silently_disabled {
         return None;
@@ -397,5 +403,10 @@ vllm:spec_decode_num_drafts_total{model=\"qwen3.8\"} 100\n";
         .expect("should emit hybrid prefix cache diagnostic event");
         assert_eq!(ev.kind, "scrape");
         assert!(ev.summary.contains("enable_prefix_caching=true"));
+
+        // Engines that do not expose prefix_cache_queries_total (e.g. SGLang) must NOT trigger false positives.
+        assert!(
+            diagnose_hybrid_prefix_cache("sglang-model", 0, true, true, None, None, 1000).is_none()
+        );
     }
 }

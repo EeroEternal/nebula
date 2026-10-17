@@ -337,12 +337,6 @@ pub fn evaluate_slo_with_pools(
             });
         }
         if tpot_breached || decode_kv_saturated {
-            if decode_kv_saturated && ev.breaches.is_empty() {
-                ev.breaches.push(format!(
-                    "decode_avg_kv_usage {:.2} > 0.85 saturation threshold",
-                    pool_telemetry.decode_avg_kv_usage.unwrap_or(0.0)
-                ));
-            }
             ev.suggestions.push(SloSuggestion {
                 kind: "scale_decode_pool".into(),
                 message: format!(
@@ -500,7 +494,7 @@ mod tests {
         let mut s = slo();
         s.tpot_p95_ms = Some(50.0);
 
-        // 1. TTFT breach + Prefill pending saturated -> scale_prefill_pool
+        // 1. TTFT breach + Prefill pending saturated -> Breaching + scale_prefill_pool
         let ev_prefill = evaluate_slo_with_pools(
             &s,
             Some(1.0),
@@ -521,8 +515,8 @@ mod tests {
             .iter()
             .any(|sg| sg.kind == "scale_prefill_pool" && sg.target == "prefill_pool"));
 
-        // 2. Decode KV usage > 0.85 -> scale_decode_pool
-        let ev_decode = evaluate_slo_with_pools(
+        // 2. Decode KV usage > 0.85 while all SLO targets are met -> Compliant + scale_decode_pool suggestion
+        let ev_decode_kv = evaluate_slo_with_pools(
             &s,
             Some(1.0),
             Some(500.0),
@@ -536,8 +530,30 @@ mod tests {
             },
             1,
         );
-        assert_eq!(ev_decode.status, SloComplianceStatus::Breaching);
-        assert!(ev_decode
+        assert_eq!(ev_decode_kv.status, SloComplianceStatus::Compliant);
+        assert!(ev_decode_kv.breaches.is_empty());
+        assert!(ev_decode_kv
+            .suggestions
+            .iter()
+            .any(|sg| sg.kind == "scale_decode_pool" && sg.target == "decode_pool"));
+
+        // 3. TPOT breach -> Breaching + scale_decode_pool
+        let ev_decode_tpot = evaluate_slo_with_pools(
+            &s,
+            Some(1.0),
+            Some(500.0),
+            Some(5000.0),
+            Some(5.0),
+            &PdPoolTelemetry {
+                is_pd_split: true,
+                tpot_p95_ms: Some(80.0),
+                prefill_pending_max: Some(0),
+                decode_avg_kv_usage: Some(0.50),
+            },
+            1,
+        );
+        assert_eq!(ev_decode_tpot.status, SloComplianceStatus::Breaching);
+        assert!(ev_decode_tpot
             .suggestions
             .iter()
             .any(|sg| sg.kind == "scale_decode_pool" && sg.target == "decode_pool"));

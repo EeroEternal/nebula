@@ -259,6 +259,7 @@ mod tests {
             last_updated_ms: 1,
             pending_requests: 12,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.9),
         };
@@ -295,6 +296,7 @@ mod tests {
             last_updated_ms: 1,
             pending_requests: 6,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.30),
         };
@@ -304,6 +306,7 @@ mod tests {
             last_updated_ms: 1,
             pending_requests: 1,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.90),
         };

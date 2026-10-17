@@ -83,6 +83,7 @@ mod tests {
             last_updated_ms: 0,
             pending_requests: pending,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: None,
         }
