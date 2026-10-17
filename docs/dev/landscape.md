@@ -22,19 +22,19 @@
 |---|---|---|
 | `kv-router` | `nebula-router` + [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) | ✅ 已落地（P1c + Batch 2 全局索引扇出） |
 | `kv-hashing` | [`nebula_router::kv_hash`](../../crates/nebula-router/src/kv_hash.rs) + [`prompt_hash`](../../crates/nebula-router/src/prompt_hash.rs) | ✅ 已落地（`sha256_cbor` + `chat_template` token 级对齐） |
-| `kvbm-*`（KV Block Manager） | `lmcache_server` + `lmcache_controller`（由 [`nebula-stack.sh`](../../scripts/nebula-stack.sh) 编排，Router [`controller_warm`](../../crates/nebula-router/src/lib.rs#L341) 查询） | ✅ 已落地 `pd_split` v1（借力外部 S3 组件，KV 字节旁路 Nebula） |
-| `router-plugins` | [`RoutingStrategy`](../../crates/nebula-router/src/strategy.rs) trait | ⏳ 单赢家 `select()` 已落地；待升级多 owner 联合代价打分（[`direction.md` §11.2](direction.md#2-多-owner-前缀索引--节省-prefill-vs-排队等待联合代价打分joint-cost-function)） |
+| `kvbm-*`（KV Block Manager） | `lmcache_server` + `lmcache_controller`（由 [`nebula-stack.sh`](../../scripts/nebula-stack.sh) 编排，Router [`controller_warm`](../../crates/nebula-router/src/lib.rs#L578) 查询） | ✅ 已落地 `pd_split` v1（借力外部 S3 组件，KV 字节旁路 Nebula） |
+| `router-plugins` | [`RoutingStrategy`](../../crates/nebula-router/src/strategy.rs) trait | ✅ 已落地多 owner 联合代价打分（[`direction.md` §11.2](direction.md#2-多-owner-前缀索引--节省-prefill-vs-排队等待联合代价打分joint-cost-function)） |
 | `runtime` / `sidecar` | `nebula-scheduler` / `nebula-node` / `nebula-k8s-controller` | ✅ 已落地（含 `ReplicaRole` 注入与配置指纹重建） |
 
 ## 3. 能力缺口演进（从 2026-09 初评到 2026-10 现状）
 
 1. **KV 全局索引 + 跨副本前缀亲和**：✅ **已闭环**（P1c + `nebula-indexd` + 客户端口径 A/B 验证：冷启动拒绝率 12%→0%、goodput 2.4×，暖态 goodput +23%，见 [`benefit-verification.md`](benefit-verification.md)）。
 2. **基于共享 KV 的 PD 角色化编排（`pd_split` v1）**：✅ **已闭环**（LMCache TCP 共享存储 + controller `/lookup` + 四场景故障注入 0 拒绝 + 暖态 TTFT p99 −21%，见 [`../arch/pool.md`](../arch/pool.md)）。
-3. **下一步高价值缺口（Workload-Aware 演进，详见 [`direction.md` §11.2–§11.3](direction.md#112-zone-c--s2-数据面与路由层4-项高价值可吸收设计待实现)）**：
-   - **`pd_split` 短请求智能旁路（Short-Prompt Bypass）**：`< 256 tokens` 短冷请求跳过 `/lookup` 直走 Decode 池原地计算，消除单 Prefill 副本排队瓶颈；
-   - **多 Owner 前缀索引 + 联合代价打分（`SavedPrefill - QueueWait`）**：同时解决 `pd_split` Decode 池内本地命中优先（评审 #5）与热点前缀单点拥塞；
+3. **Workload-Aware 路由与控制面演进（Batch 5.1–5.7，详见 [`direction.md` §11.2–§11.3](direction.md#112-zone-c--s2-数据面与路由层4-项高价值可吸收设计-已实现batch-5154)）**：✅ **已落地（2026-10-17）**
+   - **`pd_split` 短请求智能旁路（Short-Prompt Bypass）**：`< 256 tokens` 短冷请求跳过 `/lookup` 直走未饱和 Decode 池原地计算，消除单 Prefill 副本排队瓶颈；
+   - **多 Owner 前缀索引 + 联合代价打分（`SavedPrefill - QueueWait`）**：同时解决 `pd_split` Decode 池内本地命中优先（评审 #5）与热点前缀单点拥塞溢流（`owner_congested`）；
    - **Coding Agent `Tool-Pause` 感知会话保护与 `/v1/score` 透传**：参考 Continuum / Autellix 与 SGLang JEV 打分范式，保护多步工具调用 Agent 的已获服务量（PLAS）；
-   - **L3 并发感知量化选型（16 并发 FP8 vs 4-bit 拐点）+ L2 投机采样（DSpark/DFlash2 + Context Lookup）参数化 + L4 二元曲面（TTFT vs TPOT/KV）池配比建议**。
+   - **L3 并发感知量化选型（16 并发 FP8 vs 4-bit 拐点）+ L2 投机采样（DSpark/DFlash2 + Context Lookup）参数化 + L4 二元曲面（TTFT vs TPOT/KV）池配比建议（`scale_prefill_pool` / `scale_decode_pool`）**。
 
 ## 4. 最值得注意：连 llm-d 都在考虑「非 K8s 模式」，而 AgentX 证明了“亲和优于盲目拆 PD”
 
