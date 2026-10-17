@@ -280,6 +280,7 @@ pub async fn forward_upstream_response(
     permit: Option<nebula_common::queue::EnginePermit>,
     queue_wait_ms: u64,
     upstream_ttft_ms: u64,
+    tenant_id: Option<&str>,
     session_id: Option<&str>,
     routed_endpoint: Option<(String, u32)>,
 ) -> Response {
@@ -301,6 +302,7 @@ pub async fn forward_upstream_response(
         let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
+        let tenant_for_stream = tenant_id.map(|s| s.to_string());
         let session_for_stream = session_id.map(|s| s.to_string());
         let routed_for_stream = routed_endpoint.clone();
         let stage_timing = st.stage_timing;
@@ -343,7 +345,12 @@ pub async fn forward_upstream_response(
                                         routed_for_stream.as_ref(),
                                     ) {
                                         if nebula_router::response_has_tool_calls(&b) {
-                                            router.mark_tool_pause(sid, m, *r);
+                                            router.mark_tool_pause_for_tenant(
+                                                tenant_for_stream.as_deref(),
+                                                sid,
+                                                m,
+                                                *r,
+                                            );
                                             tool_pause_marked = true;
                                         }
                                     }
@@ -386,7 +393,7 @@ pub async fn forward_upstream_response(
         (st.router.as_ref(), session_id, routed_endpoint.as_ref())
     {
         if nebula_router::response_has_tool_calls(&bytes) {
-            router.mark_tool_pause(sid, m, *r);
+            router.mark_tool_pause_for_tenant(tenant_id, sid, m, *r);
         }
     }
     if let Some(normalized) = maybe_normalize_router_error(status, &bytes) {

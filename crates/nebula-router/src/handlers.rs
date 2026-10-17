@@ -306,6 +306,7 @@ pub async fn proxy_chat_completions(
         let metrics = st.metrics.clone();
         let dual = st.dual_write.clone();
         let router_for_stream = st.router.clone();
+        let tenant_for_stream = ctx.tenant_id.clone();
         let session_for_stream = ctx.session_id.clone();
         let replica_for_stream = _selected_ep.replica_id;
         let model_uid_for_stream = model_uid.clone();
@@ -334,7 +335,8 @@ pub async fn proxy_chat_completions(
                                 if !tool_pause_marked {
                                     if let Some(ref sid) = session_for_stream {
                                         if nebula_router::response_has_tool_calls(&b) {
-                                            router_for_stream.mark_tool_pause(
+                                            router_for_stream.mark_tool_pause_for_tenant(
+                                                tenant_for_stream.as_deref(),
                                                 sid,
                                                 &model_uid_for_stream,
                                                 replica_for_stream,
@@ -402,8 +404,12 @@ pub async fn proxy_chat_completions(
     };
     if let Some(ref sid) = ctx.session_id {
         if nebula_router::response_has_tool_calls(&bytes) {
-            st.router
-                .mark_tool_pause(sid, &model_uid, _selected_ep.replica_id);
+            st.router.mark_tool_pause_for_tenant(
+                ctx.tenant_id.as_deref(),
+                sid,
+                &model_uid,
+                _selected_ep.replica_id,
+            );
         }
     }
 

@@ -52,10 +52,28 @@ const PD_LOOKUP_TIMEOUT_MS: u64 = 200;
 /// aligned with LMCache's 256-token chunk boundary).
 pub const DEFAULT_PD_BYPASS_TOKENS: usize = 256;
 
+/// Default `NEBULA_PD_PREFILL_SPILLOVER_PENDING` (0 = disabled by default so
+/// `pd_split` preserves strict Prefill/Decode stage isolation unless opted in).
+pub const DEFAULT_PD_PREFILL_SPILLOVER_PENDING: u64 = 0;
+
 /// Default TTL (ms) and capacity bound for Coding Agent `Tool-Pause` session
-/// leases (Batch 5.3).
+/// leases and session affinity (Batch 5.3).
 pub const DEFAULT_TOOL_PAUSE_TTL_MS: u64 = 60_000;
 pub const TOOL_PAUSE_MAX_ENTRIES: usize = 4_096;
+pub const SESSION_AFFINITY_MAX_ENTRIES: usize = 4_096;
+
+/// Tenant-scoped session key `(tenant_id, session_id)` so one tenant cannot
+/// collide with, hijack, or borrow another tenant's continuation lease or
+/// replica affinity.
+type SessionKey = (Option<String>, String);
+
+fn session_key(tenant_id: Option<&str>, session_id: &str) -> SessionKey {
+    let tenant = tenant_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    (tenant, session_id.trim().to_string())
+}
 
 fn warm_cache_key(model_uid: &str, token_ids: &[u32]) -> (String, [u8; 32]) {
     use sha2::{Digest, Sha256};
@@ -67,42 +85,6 @@ fn warm_cache_key(model_uid: &str, token_ids: &[u32]) -> (String, [u8; 32]) {
     (model_uid.to_string(), digest)
 }
 
-/// Inspect a request JSON body (`/v1/chat/completions`, `/v1/responses`, or
-/// `/v1/messages`) to detect whether it is a Coding Agent tool-execution
-/// continuation turn (`role == "tool"`, `type == "function_call_output"`, or
-/// `type == "tool_result"`).
-pub fn request_body_has_tool_result(body: &[u8]) -> bool {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
-        return false;
-    };
-    if let Some(messages) = v.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages.iter().rev().take(4) {
-            if msg.get("role").and_then(|r| r.as_str()) == Some("tool") {
-                return true;
-            }
-            if let Some(content) = msg.get("content").and_then(|c| c.as_array()) {
-                if content
-                    .iter()
-                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
-                {
-                    return true;
-                }
-            }
-        }
-    }
-    if let Some(input) = v.get("input").and_then(|i| i.as_array()) {
-        if input.iter().rev().take(4).any(|item| {
-            matches!(
-                item.get("type").and_then(|t| t.as_str()),
-                Some("function_call_output" | "tool_result")
-            )
-        }) {
-            return true;
-        }
-    }
-    false
-}
-
 /// Inspect an upstream response payload or SSE chunk to detect whether the
 /// model paused for a tool call (`finish_reason == "tool_calls"` or non-empty
 /// `tool_calls` array).
@@ -112,7 +94,7 @@ pub fn response_has_tool_calls(bytes: &[u8]) -> bool {
     };
     if !text.contains("tool_calls") {
         return false;
-    }
+    };
     if text.contains("\"finish_reason\":\"tool_calls\"")
         || text.contains("\"finish_reason\": \"tool_calls\"")
     {
@@ -180,9 +162,9 @@ impl std::fmt::Display for RouteError {
 pub struct Router {
     endpoints: DashMap<(String, u32), EndpointInfo>,
     stats: DashMap<(String, u32), EndpointStats>,
-    session_affinity: DashMap<String, (String, u32)>,
-    /// Batch 5.3: bounded Tool-Pause session leases `session_id -> (model_uid, replica_id, expires_at_ms)`.
-    tool_pause_leases: DashMap<String, (String, u32, u64)>,
+    session_affinity: DashMap<SessionKey, (String, u32)>,
+    /// Batch 5.3: bounded Tool-Pause session leases `(tenant_id, session_id) -> (model_uid, replica_id, expires_at_ms)`.
+    tool_pause_leases: DashMap<SessionKey, (String, u32, u64)>,
     tool_pause_ttl_ms: u64,
     tool_pause_marked_total: AtomicU64,
     tool_continuation_hit_total: AtomicU64,
@@ -229,7 +211,7 @@ pub struct Router {
     pd_decode_local_hit_total: AtomicU64,
     /// Minimum pending_requests across Prefill replicas before cold requests
     /// can spill over to idle Decode replicas (0 disables spillover).
-    pd_prefill_spillover_pending: u64,
+    pd_prefill_spillover_pending: AtomicU64,
     /// Batch 5.1: token threshold below which `pd_split` skips controller `/lookup`
     /// and routes cold short requests directly to unsaturated Decode replicas.
     pd_bypass_tokens: usize,
@@ -280,7 +262,7 @@ impl Router {
         let pd_prefill_spillover_pending = std::env::var("NEBULA_PD_PREFILL_SPILLOVER_PENDING")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(1);
+            .unwrap_or(DEFAULT_PD_PREFILL_SPILLOVER_PENDING);
         let pd_bypass_tokens = std::env::var("NEBULA_PD_BYPASS_TOKENS")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
@@ -321,7 +303,7 @@ impl Router {
             stage_decode_fallback_total: AtomicU64::new(0),
             stage_prefill_spillover_total: AtomicU64::new(0),
             pd_decode_local_hit_total: AtomicU64::new(0),
-            pd_prefill_spillover_pending,
+            pd_prefill_spillover_pending: AtomicU64::new(pd_prefill_spillover_pending),
             pd_bypass_tokens,
             pd_short_bypass_total: AtomicU64::new(0),
             pd_warm_cache: DashMap::new(),
@@ -485,15 +467,52 @@ impl Router {
         self.tool_continuation_hit_total.load(Ordering::Relaxed)
     }
 
+    pub fn set_pd_prefill_spillover_pending(&self, threshold: u64) {
+        self.pd_prefill_spillover_pending
+            .store(threshold, Ordering::Relaxed);
+    }
+
+    fn insert_session_affinity(&self, key: SessionKey, model_uid: String, replica_id: u32) {
+        if self.session_affinity.len() >= SESSION_AFFINITY_MAX_ENTRIES
+            && !self.session_affinity.contains_key(&key)
+        {
+            if let Some(evict_key) = self.session_affinity.iter().next().map(|e| e.key().clone()) {
+                self.session_affinity.remove(&evict_key);
+            }
+        }
+        self.session_affinity.insert(key, (model_uid, replica_id));
+    }
+
     /// Record a Coding Agent `Tool-Pause` session lease (`finish_reason == "tool_calls"`,
-    /// Batch 5.3) so when the agent returns with `role == "tool"` within the
-    /// lease window (`NEBULA_TOOL_PAUSE_TTL_MS`, default 60s), it gets priority
-    /// queue admission and strong replica anchoring.
+    /// Batch 5.3) scoped to `(tenant_id, session_id)` so when the same tenant's
+    /// session returns within the lease window (`NEBULA_TOOL_PAUSE_TTL_MS`,
+    /// default 60s), it gets priority queue admission and strong replica anchoring.
     pub fn mark_tool_pause(&self, session_id: &str, model_uid: &str, replica_id: u32) {
-        self.mark_tool_pause_at(session_id, model_uid, replica_id, now_ms());
+        self.mark_tool_pause_for_tenant_at(None, session_id, model_uid, replica_id, now_ms());
+    }
+
+    pub fn mark_tool_pause_for_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        session_id: &str,
+        model_uid: &str,
+        replica_id: u32,
+    ) {
+        self.mark_tool_pause_for_tenant_at(tenant_id, session_id, model_uid, replica_id, now_ms());
     }
 
     pub fn mark_tool_pause_at(&self, session_id: &str, model_uid: &str, replica_id: u32, now: u64) {
+        self.mark_tool_pause_for_tenant_at(None, session_id, model_uid, replica_id, now);
+    }
+
+    pub fn mark_tool_pause_for_tenant_at(
+        &self,
+        tenant_id: Option<&str>,
+        session_id: &str,
+        model_uid: &str,
+        replica_id: u32,
+        now: u64,
+    ) {
         let session_id = session_id.trim();
         if session_id.is_empty() {
             return;
@@ -504,65 +523,82 @@ impl Router {
                 return;
             }
         }
-        if self.tool_pause_leases.len() >= TOOL_PAUSE_MAX_ENTRIES {
+        let key = session_key(tenant_id, session_id);
+        if self.tool_pause_leases.len() >= TOOL_PAUSE_MAX_ENTRIES
+            && !self.tool_pause_leases.contains_key(&key)
+        {
             self.tool_pause_leases.retain(|_, (_, _, exp)| *exp > now);
-            let len = self.tool_pause_leases.len();
-            if len >= TOOL_PAUSE_MAX_ENTRIES {
-                let to_remove = (len + 1).saturating_sub(TOOL_PAUSE_MAX_ENTRIES).max(1);
-                let mut entries: Vec<(String, u64)> = self
+            while self.tool_pause_leases.len() >= TOOL_PAUSE_MAX_ENTRIES {
+                let Some(oldest_key) = self
                     .tool_pause_leases
                     .iter()
-                    .map(|e| (e.key().clone(), e.value().2))
-                    .collect();
-                entries.sort_by_key(|(_, exp)| *exp);
-                for (k, _) in entries.into_iter().take(to_remove) {
-                    self.tool_pause_leases.remove(&k);
-                }
+                    .min_by_key(|e| e.value().2)
+                    .map(|e| e.key().clone())
+                else {
+                    break;
+                };
+                self.tool_pause_leases.remove(&oldest_key);
             }
         }
         let expires_at = now.saturating_add(self.tool_pause_ttl_ms);
-        self.tool_pause_leases.insert(
-            session_id.to_string(),
-            (model_uid.to_string(), replica_id, expires_at),
-        );
-        self.session_affinity
-            .insert(session_id.to_string(), (model_uid.to_string(), replica_id));
+        self.tool_pause_leases
+            .insert(key.clone(), (model_uid.to_string(), replica_id, expires_at));
+        self.insert_session_affinity(key, model_uid.to_string(), replica_id);
         self.tool_pause_marked_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// True when `session_id` currently holds a non-expired Tool-Pause lease.
+    /// True when `(None, session_id)` currently holds a non-expired Tool-Pause lease.
     pub fn has_active_tool_pause(&self, session_id: &str) -> bool {
-        self.has_active_tool_pause_at(session_id, now_ms())
+        self.has_active_tool_pause_for_tenant_at(None, session_id, now_ms())
+    }
+
+    pub fn has_active_tool_pause_for_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        session_id: &str,
+    ) -> bool {
+        self.has_active_tool_pause_for_tenant_at(tenant_id, session_id, now_ms())
     }
 
     pub fn has_active_tool_pause_at(&self, session_id: &str, now: u64) -> bool {
-        let mut expired = false;
-        let active = if let Some(entry) = self.tool_pause_leases.get(session_id) {
-            if entry.value().2 > now {
-                true
-            } else {
-                expired = true;
-                false
-            }
-        } else {
-            false
-        };
-        if expired {
-            self.tool_pause_leases.remove(session_id);
-        }
-        active
+        self.has_active_tool_pause_for_tenant_at(None, session_id, now)
     }
 
-    /// True when the request is a Coding Agent tool-execution continuation turn
-    /// (either carries an active `Tool-Pause` session lease or a `role="tool"` /
-    /// `tool_result` / `function_call_output` message).
-    pub fn is_tool_continuation(&self, session_id: Option<&str>, body: &[u8]) -> bool {
-        if let Some(sid) = session_id {
-            if self.has_active_tool_pause(sid) {
-                return true;
-            }
+    pub fn has_active_tool_pause_for_tenant_at(
+        &self,
+        tenant_id: Option<&str>,
+        session_id: &str,
+        now: u64,
+    ) -> bool {
+        let session_id = session_id.trim();
+        if session_id.is_empty() {
+            return false;
         }
-        request_body_has_tool_result(body)
+        let key = session_key(tenant_id, session_id);
+        self.tool_pause_leases
+            .remove_if(&key, |_, (_, _, exp)| *exp <= now);
+        self.tool_pause_leases
+            .get(&key)
+            .map(|entry| entry.value().2 > now)
+            .unwrap_or(false)
+    }
+
+    /// True when the request holds a valid server-recorded `Tool-Pause` session
+    /// lease for `(tenant_id, session_id)`. Client-supplied request bodies
+    /// (`role == "tool"`) are never trusted on their own to prevent privilege
+    /// spoofing and cross-tenant session hijacking.
+    pub fn is_tool_continuation(&self, session_id: Option<&str>) -> bool {
+        self.is_tool_continuation_for_tenant(None, session_id)
+    }
+
+    pub fn is_tool_continuation_for_tenant(
+        &self,
+        tenant_id: Option<&str>,
+        session_id: Option<&str>,
+    ) -> bool {
+        session_id
+            .map(|sid| self.has_active_tool_pause_for_tenant(tenant_id, sid))
+            .unwrap_or(false)
     }
 
     /// Ask the LMCache controller whether the shared store holds this
@@ -586,16 +622,14 @@ impl Router {
         let cache_key = warm_cache_key(model_uid, token_ids);
         {
             let now = now_ms();
-            let mut expired = false;
+            self.pd_warm_cache.remove_if(&cache_key, |_, (_, ts)| {
+                now.saturating_sub(*ts) >= PD_WARM_CACHE_MS
+            });
             if let Some(entry) = self.pd_warm_cache.get(&cache_key) {
                 let (warm, ts) = *entry.value();
                 if now.saturating_sub(ts) < PD_WARM_CACHE_MS {
                     return warm;
                 }
-                expired = true;
-            }
-            if expired {
-                self.pd_warm_cache.remove(&cache_key);
             }
         }
         let body = serde_json::json!({
@@ -641,24 +675,25 @@ impl Router {
     }
 
     fn insert_warm_cache_at(&self, cache_key: (String, [u8; 32]), warm: bool, now: u64) {
-        if self.pd_warm_cache.len() >= PD_WARM_CACHE_MAX_ENTRIES {
+        if self.pd_warm_cache.len() >= PD_WARM_CACHE_MAX_ENTRIES
+            && !self.pd_warm_cache.contains_key(&cache_key)
+        {
             // 1. Sweep all TTL-expired entries first.
             self.pd_warm_cache
                 .retain(|_, (_, ts)| now.saturating_sub(*ts) < PD_WARM_CACHE_MS);
             // 2. If still at capacity (e.g. burst of >4096 distinct prompts within 2s),
-            // evict the oldest entries so capacity never exceeds PD_WARM_CACHE_MAX_ENTRIES.
-            let len = self.pd_warm_cache.len();
-            if len >= PD_WARM_CACHE_MAX_ENTRIES {
-                let to_remove = (len + 1).saturating_sub(PD_WARM_CACHE_MAX_ENTRIES).max(1);
-                let mut entries: Vec<((String, [u8; 32]), u64)> = self
+            // evict the oldest entry in O(n) via min_by_key so capacity never exceeds
+            // PD_WARM_CACHE_MAX_ENTRIES.
+            while self.pd_warm_cache.len() >= PD_WARM_CACHE_MAX_ENTRIES {
+                let Some(oldest_key) = self
                     .pd_warm_cache
                     .iter()
-                    .map(|e| (e.key().clone(), e.value().1))
-                    .collect();
-                entries.sort_by_key(|(_, ts)| *ts);
-                for (k, _) in entries.into_iter().take(to_remove) {
-                    self.pd_warm_cache.remove(&k);
-                }
+                    .min_by_key(|e| e.value().1)
+                    .map(|e| e.key().clone())
+                else {
+                    break;
+                };
+                self.pd_warm_cache.remove(&oldest_key);
             }
         }
         self.pd_warm_cache.insert(cache_key, (warm, now));
@@ -725,13 +760,16 @@ impl Router {
     /// Extract token IDs for an OpenAI-style or SGLang `/v1/score` body
     /// (`/v1/completions` `prompt`, `/v1/chat/completions` `messages` rendered
     /// with the model's chat template, or `/v1/score` `query` / `text` shared
-    /// context). Used by `body_route_hints` and `body_prompt_hashes`.
+    /// context when accompanied by `items` or `label_token_ids`). `/v1/rerank`
+    /// bodies (`{"query", "documents"}`) are intentionally excluded.
     pub fn body_token_ids(&self, model_uid: &str, body: &[u8]) -> Option<Vec<u32>> {
         let v: serde_json::Value = serde_json::from_slice(body).ok()?;
         let name = self
             .model_uids_to_names
             .get(model_uid)
             .map(|e| e.value().clone());
+        let is_score_payload = (v.get("items").is_some() || v.get("label_token_ids").is_some())
+            && v.get("documents").is_none();
         match v.get("prompt") {
             Some(serde_json::Value::String(s)) => {
                 self.prefix_hasher.prompt_ids(model_uid, name.as_deref(), s)
@@ -743,7 +781,7 @@ impl Router {
             _ if v.get("messages").is_some() => {
                 self.prefix_hasher.chat_ids(model_uid, name.as_deref(), &v)
             }
-            _ if v.get("query").is_some() => match v.get("query")? {
+            _ if is_score_payload && v.get("query").is_some() => match v.get("query")? {
                 serde_json::Value::String(s) => {
                     self.prefix_hasher.prompt_ids(model_uid, name.as_deref(), s)
                 }
@@ -760,7 +798,7 @@ impl Router {
                 }
                 _ => None,
             },
-            _ if v.get("text").and_then(|t| t.as_str()).is_some() => {
+            _ if is_score_payload && v.get("text").and_then(|t| t.as_str()).is_some() => {
                 let s = v.get("text")?.as_str()?;
                 self.prefix_hasher.prompt_ids(model_uid, name.as_deref(), s)
             }
@@ -816,8 +854,13 @@ impl Router {
     }
 
     pub fn clear_session_affinity(&self, session_id: &str) {
-        self.session_affinity.remove(session_id);
-        self.tool_pause_leases.remove(session_id);
+        self.clear_session_affinity_for_tenant(None, session_id);
+    }
+
+    pub fn clear_session_affinity_for_tenant(&self, tenant_id: Option<&str>, session_id: &str) {
+        let key = session_key(tenant_id, session_id);
+        self.session_affinity.remove(&key);
+        self.tool_pause_leases.remove(&key);
     }
 
     /// Register a bidirectional model_uid ↔ model_name mapping.
@@ -1036,8 +1079,10 @@ impl Router {
         // a cold first turn routes to Prefill to populate shared KV, while subsequent
         // warm turns must evaluate stage routing to land on a Decode replica).
         if let Some(session_id) = ctx.session_id.as_deref() {
-            let tool_pause_active = self.has_active_tool_pause_at(session_id, now);
-            if let Some(aff) = self.session_affinity.get(session_id) {
+            let key = session_key(ctx.tenant_id.as_deref(), session_id);
+            let tool_pause_active =
+                self.has_active_tool_pause_for_tenant_at(ctx.tenant_id.as_deref(), session_id, now);
+            if let Some(aff) = self.session_affinity.get(&key) {
                 let (aff_model_uid, aff_replica_id) = aff.value();
                 if aff_model_uid == model_uid {
                     let excluded = exclude
@@ -1197,8 +1242,11 @@ impl Router {
         if is_pd_split {
             let affinity_on_decode = ctx
                 .session_id
-                .as_ref()
-                .and_then(|sid| self.session_affinity.get(sid).map(|e| e.value().clone()))
+                .as_deref()
+                .and_then(|sid| {
+                    let key = session_key(ctx.tenant_id.as_deref(), sid);
+                    self.session_affinity.get(&key).map(|e| e.value().clone())
+                })
                 .map(|(m, r)| {
                     candidates_data.iter().any(|(ep, _)| {
                         ep.model_uid == m && ep.replica_id == r && ep.role == ReplicaRole::Decode
@@ -1222,6 +1270,7 @@ impl Router {
                 && prefix_hashes
                     .map(|hs| hs.len() * 16 < bypass_tokens)
                     .unwrap_or(false);
+            let spillover_threshold = self.pd_prefill_spillover_pending.load(Ordering::Relaxed);
             if pool.is_empty() {
                 let counter = if want == ReplicaRole::Decode {
                     &self.stage_decode_fallback_total
@@ -1235,54 +1284,56 @@ impl Router {
                     "pd_split role pool empty; falling back to all candidates"
                 );
             } else if want == ReplicaRole::Prefill && is_short_prompt {
-                let decode_pool: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
+                // Only bypass to Decode replicas with fresh stats (`s.is_some()`):
+                // never treat missing stats as `pending_requests = 0`.
+                let decode_with_stats: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
                     .iter()
-                    .filter(|(ep, _)| ep.role == ReplicaRole::Decode)
+                    .filter(|(ep, s)| ep.role == ReplicaRole::Decode && s.is_some())
                     .cloned()
                     .collect();
                 let min_prefill_pending = pool
                     .iter()
-                    .map(|(_, s)| s.as_ref().map(|st| st.pending_requests).unwrap_or(0))
+                    .filter_map(|(_, s)| s.as_ref().map(|st| st.pending_requests))
                     .min()
                     .unwrap_or(0);
-                let min_decode_pending = decode_pool
+                let min_decode_pending = decode_with_stats
                     .iter()
-                    .map(|(_, s)| s.as_ref().map(|st| st.pending_requests).unwrap_or(0))
-                    .min()
-                    .unwrap_or(u64::MAX);
-                if !decode_pool.is_empty()
-                    && (min_decode_pending == 0 || min_decode_pending <= min_prefill_pending)
-                {
-                    self.pd_short_bypass_total.fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!(
-                        model_uid = %model_uid,
-                        bypass_tokens,
-                        min_decode_pending,
-                        "pd_split short prompt bypassing prefill pool to unsaturated decode pool"
-                    );
-                    candidates_data = decode_pool;
+                    .filter_map(|(_, s)| s.as_ref().map(|st| st.pending_requests))
+                    .min();
+                if let Some(min_decode_pending) = min_decode_pending {
+                    if min_decode_pending == 0 || min_decode_pending <= min_prefill_pending {
+                        self.pd_short_bypass_total.fetch_add(1, Ordering::Relaxed);
+                        tracing::debug!(
+                            model_uid = %model_uid,
+                            bypass_tokens,
+                            min_decode_pending,
+                            "pd_split short prompt bypassing prefill pool to unsaturated decode pool"
+                        );
+                        candidates_data = decode_with_stats;
+                    } else {
+                        candidates_data = pool;
+                    }
                 } else {
                     candidates_data = pool;
                 }
-            } else if want == ReplicaRole::Prefill && self.pd_prefill_spillover_pending > 0 {
-                // Single-mapper bottleneck protection: when every Prefill replica has
-                // pending_requests >= pd_prefill_spillover_pending and at least one
-                // Decode (kv_both) replica has strictly lower pending load, spill cold
-                // traffic over to those idle/lighter Decode replicas instead of queuing
-                // behind a saturated Prefill mapper.
+            } else if want == ReplicaRole::Prefill && spillover_threshold > 0 {
+                // Opt-in single-mapper bottleneck protection: when every Prefill replica
+                // has fresh stats with pending_requests >= spillover_threshold and at least
+                // one Decode (kv_both) replica has fresh stats with strictly lower pending
+                // load, spill cold traffic over to those lighter Decode replicas.
                 let min_prefill_pending = pool
                     .iter()
-                    .map(|(_, s)| s.as_ref().map(|st| st.pending_requests).unwrap_or(0))
+                    .filter_map(|(_, s)| s.as_ref().map(|st| st.pending_requests))
                     .min()
                     .unwrap_or(0);
-                if min_prefill_pending >= self.pd_prefill_spillover_pending {
+                if min_prefill_pending >= spillover_threshold {
                     let spillover_decode: Vec<(EndpointInfo, Option<EndpointStats>)> =
                         candidates_data
                             .iter()
                             .filter(|(ep, s)| {
                                 ep.role == ReplicaRole::Decode
-                                    && s.as_ref().map(|st| st.pending_requests).unwrap_or(0)
-                                        < min_prefill_pending
+                                    && s.as_ref()
+                                        .is_some_and(|st| st.pending_requests < min_prefill_pending)
                             })
                             .cloned()
                             .collect();
@@ -1389,11 +1440,9 @@ impl Router {
         }
 
         if selected.role != ReplicaRole::Prefill {
-            if let Some(session_id) = ctx.session_id.clone() {
-                self.session_affinity.insert(
-                    session_id,
-                    (selected.model_uid.clone(), selected.replica_id),
-                );
+            if let Some(session_id) = ctx.session_id.as_deref() {
+                let key = session_key(ctx.tenant_id.as_deref(), session_id);
+                self.insert_session_affinity(key, selected.model_uid.clone(), selected.replica_id);
             }
         }
 
@@ -1648,7 +1697,7 @@ mod plan_version_tests {
         // Session anchored on the decode replica → decode.
         router
             .session_affinity
-            .insert("s1".into(), ("m1".into(), 1));
+            .insert(session_key(None, "s1"), ("m1".into(), 1));
         let ep = router
             .route(&ctx_with_session(Some("s1")), "m1", None, false)
             .unwrap();
@@ -1668,7 +1717,10 @@ mod plan_version_tests {
             .unwrap();
         assert_eq!(ep1.replica_id, 0);
         assert!(
-            router.session_affinity.get("sess-1").is_none(),
+            router
+                .session_affinity
+                .get(&session_key(None, "sess-1"))
+                .is_none(),
             "cold prefill turn must not save session_affinity"
         );
 
@@ -1677,7 +1729,7 @@ mod plan_version_tests {
         // select Decode (replica 1), then anchor the session on Decode.
         router
             .session_affinity
-            .insert("sess-1".into(), ("m1".into(), 0));
+            .insert(session_key(None, "sess-1"), ("m1".into(), 0));
         let ep2 = router
             .route(&ctx_with_session(Some("sess-1")), "m1", None, true)
             .unwrap();
@@ -1685,7 +1737,7 @@ mod plan_version_tests {
         assert_eq!(
             router
                 .session_affinity
-                .get("sess-1")
+                .get(&session_key(None, "sess-1"))
                 .map(|e| e.value().clone()),
             Some(("m1".to_string(), 1))
         );
@@ -1896,22 +1948,61 @@ mod plan_version_tests {
 
         let now = now_ms();
         // Prefill replica 0 is busy (pending_requests = 2), while Decode replica 1
-        // (kv_both) is idle (pending_requests = 0).
+        // initially has NO stats (None): must NOT be treated as pending=0 even when
+        // spillover is enabled.
         router.upsert_stats(EndpointStats {
             model_uid: "m1".into(),
             replica_id: 0,
             last_updated_ms: now,
             pending_requests: 2,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.2),
         });
+
+        // By default (DEFAULT_PD_PREFILL_SPILLOVER_PENDING = 0), spillover is off.
         router.upsert_stats(EndpointStats {
             model_uid: "m1".into(),
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 0,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.1),
+        });
+        let ep_default = router
+            .route(&ctx_with_session(None), "m1", None, false)
+            .unwrap();
+        assert_eq!(
+            ep_default.replica_id, 0,
+            "by default spillover is disabled (0) so cold traffic stays on Prefill"
+        );
+        assert_eq!(router.stage_prefill_spillover_total(), 0);
+
+        // Opt in to spillover (threshold = 1), but if Decode replica 1 lacks fresh
+        // stats, it must NOT be treated as pending=0.
+        router.set_pd_prefill_spillover_pending(1);
+        router.remove_stats("m1", 1);
+        let ep_no_decode_stats = router
+            .route(&ctx_with_session(None), "m1", None, false)
+            .unwrap();
+        assert_eq!(
+            ep_no_decode_stats.replica_id, 0,
+            "Decode replica without stats must not be treated as pending=0"
+        );
+        assert_eq!(router.stage_prefill_spillover_total(), 0);
+
+        // Once Decode replica 1 reports fresh stats with pending_requests = 0,
+        // opt-in spillover routes cold request to Decode replica 1.
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 0,
+            prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
         });
@@ -1921,13 +2012,13 @@ mod plan_version_tests {
             .unwrap();
         assert_eq!(
             ep.replica_id, 1,
-            "cold request must spill over to idle Decode (kv_both) replica when Prefill replica is saturated"
+            "cold request must spill over to idle Decode (kv_both) replica when opted in and Prefill replica is saturated"
         );
         assert_eq!(router.stage_prefill_spillover_total(), 1);
         assert_eq!(
             router
                 .session_affinity
-                .get("cold-sess")
+                .get(&session_key(None, "cold-sess"))
                 .map(|e| e.value().clone()),
             Some(("m1".to_string(), 1)),
             "spilled request handled by Decode replica anchors session directly on that Decode replica"
@@ -2089,9 +2180,39 @@ mod plan_version_tests {
         router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
         router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
 
-        // 2 blocks = 32 tokens < DEFAULT_PD_BYPASS_TOKENS (256) => cold short
-        // prompt bypasses Prefill directly to Decode when Decode is unsaturated.
         let short_hashes = [[0x11u8; 32], [0x22u8; 32]];
+        // When Decode replica 1 has NO stats (`None`), it must NOT be treated as
+        // `pending_requests = 0` — short prompt stays on Prefill.
+        let ep_no_stats = router
+            .route(&ctx_with_session(None), "m1", Some(&short_hashes), false)
+            .unwrap();
+        assert_eq!(ep_no_stats.replica_id, 0);
+        assert_eq!(router.pd_short_bypass_total(), 0);
+
+        // Once Decode replica 1 reports fresh unsaturated stats (pending=0),
+        // 2 blocks = 32 tokens < DEFAULT_PD_BYPASS_TOKENS (256) bypasses Prefill
+        // directly to Decode.
+        let now = now_ms();
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 0,
+            last_updated_ms: now,
+            pending_requests: 0,
+            prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.1),
+        });
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 0,
+            prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.1),
+        });
         let ep = router
             .route(&ctx_with_session(None), "m1", Some(&short_hashes), false)
             .unwrap();
@@ -2108,22 +2229,13 @@ mod plan_version_tests {
 
         // When Decode is busy (pending=3) and Prefill is idle (pending=0),
         // short prompt does NOT bypass to saturated Decode.
-        let now = now_ms();
-        router.upsert_stats(EndpointStats {
-            model_uid: "m1".into(),
-            replica_id: 0,
-            last_updated_ms: now,
-            pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prompt_cache_hit_rate: None,
-            kv_cache_usage: Some(0.1),
-        });
         router.upsert_stats(EndpointStats {
             model_uid: "m1".into(),
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 3,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.4),
         });
@@ -2160,6 +2272,7 @@ mod plan_version_tests {
             last_updated_ms: now,
             pending_requests: 4,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.5),
         });
@@ -2169,6 +2282,7 @@ mod plan_version_tests {
             last_updated_ms: now,
             pending_requests: 0,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
         });
@@ -2189,7 +2303,7 @@ mod plan_version_tests {
     }
 
     #[test]
-    fn tool_pause_lease_marks_and_continues_on_anchored_replica() {
+    fn tool_pause_lease_marks_and_isolates_by_tenant_without_body_spoofing() {
         let router = Router::new();
         router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
         router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
@@ -2198,22 +2312,38 @@ mod plan_version_tests {
         let resp_json = br#"{"choices":[{"index":0,"finish_reason":"tool_calls","message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}"#;
         assert!(response_has_tool_calls(resp_json));
 
-        let req_tool_body = br#"{"model":"m1","messages":[{"role":"user","content":"run test"},{"role":"assistant","tool_calls":[{"id":"call_1"}]},{"role":"tool","tool_call_id":"call_1","content":"ok"}]}"#;
-        assert!(request_body_has_tool_result(req_tool_body));
+        // Without a server-recorded lease, no session is granted continuation
+        // privilege (client-supplied `role:"tool"` cannot spoof privilege).
+        assert!(!router.is_tool_continuation_for_tenant(Some("tenant-a"), Some("agent-sess-1")));
+        assert!(!router.is_tool_continuation(Some("agent-sess-1")));
 
-        router.mark_tool_pause_at("agent-sess-1", "m1", 2, now_ms());
+        // Server records a tool-pause lease for (tenant-a, agent-sess-1) on Decode replica 2.
+        router.mark_tool_pause_for_tenant_at(Some("tenant-a"), "agent-sess-1", "m1", 2, now_ms());
         assert_eq!(router.tool_pause_marked_total(), 1);
-        assert!(router.is_tool_continuation(Some("agent-sess-1"), br#"{}"#));
+        assert!(router.is_tool_continuation_for_tenant(Some("tenant-a"), Some("agent-sess-1")));
+        // Tenant B reusing the same x-session-id does NOT inherit Tenant A's
+        // continuation privilege or replica affinity.
+        assert!(!router.is_tool_continuation_for_tenant(Some("tenant-b"), Some("agent-sess-1")));
+        assert!(!router.is_tool_continuation_for_tenant(None, Some("agent-sess-1")));
 
-        let ep = router
-            .route(&ctx_with_session(Some("agent-sess-1")), "m1", None, false)
-            .unwrap();
-        assert_eq!(ep.replica_id, 2);
+        let mut ctx_a = ctx_with_session(Some("agent-sess-1"));
+        ctx_a.tenant_id = Some("tenant-a".into());
+        let ep_a = router.route(&ctx_a, "m1", None, false).unwrap();
+        assert_eq!(ep_a.replica_id, 2);
+        assert_eq!(router.tool_continuation_hit_total(), 1);
+
+        let mut ctx_b = ctx_with_session(Some("agent-sess-1"));
+        ctx_b.tenant_id = Some("tenant-b".into());
+        let ep_b = router.route(&ctx_b, "m1", None, false).unwrap();
+        assert_eq!(
+            ep_b.replica_id, 0,
+            "tenant-b cold request with same session_id must route to Prefill, not tenant-a's Decode anchor"
+        );
         assert_eq!(router.tool_continuation_hit_total(), 1);
     }
 
     #[test]
-    fn body_token_ids_supports_score_query_and_text() {
+    fn body_token_ids_supports_score_query_and_excludes_rerank() {
         let tk_json = br#"{
             "version": "1.0",
             "truncation": null,
@@ -2238,6 +2368,10 @@ mod plan_version_tests {
 
         let score_ids = br#"{"model":"m1","query":[2,3],"label_token_ids":[1,4]}"#;
         assert_eq!(router.body_token_ids("m1", score_ids), Some(vec![2, 3]));
+
+        // /v1/rerank body (`{"query", "documents"}`) must NOT be tokenized as /v1/score.
+        let rerank_body = br#"{"model":"m1","query":"hello world","documents":["doc1","doc2"]}"#;
+        assert_eq!(router.body_token_ids("m1", rerank_body), None);
     }
 }
 

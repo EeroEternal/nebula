@@ -525,8 +525,13 @@ pub async fn proxy_post(
             let is_continuation = st
                 .router
                 .as_ref()
-                .map(|r| r.is_tool_continuation(prepared.ctx.session_id.as_deref(), &body_bytes))
-                .unwrap_or_else(|| nebula_router::request_body_has_tool_result(&body_bytes));
+                .map(|r| {
+                    r.is_tool_continuation_for_tenant(
+                        prepared.ctx.tenant_id.as_deref(),
+                        prepared.ctx.session_id.as_deref(),
+                    )
+                })
+                .unwrap_or(false);
             match queues
                 .for_model(&model)
                 .acquire_with_priority(prepared.ctx.tenant_id.as_deref(), is_continuation)
@@ -605,6 +610,7 @@ pub async fn proxy_post(
         _queue_permit,
         queue_wait_ms,
         upstream_ttft_ms,
+        prepared.ctx.tenant_id.as_deref(),
         prepared.ctx.session_id.as_deref(),
         routed_endpoint,
     )

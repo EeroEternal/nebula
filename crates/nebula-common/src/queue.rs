@@ -8,12 +8,12 @@
 //! as upstream congestion — that self-locks under burst load. See
 //! `docs/dev/queue-admission.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
 /// Queue execution mode: wait for a permit (fair) vs reject with 429 (fast fail).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,10 +93,13 @@ struct WaitState {
 
 const DEFAULT_TENANT: &str = "__default__";
 
+type PriorityWaiterQueue = Arc<Mutex<VecDeque<oneshot::Sender<OwnedSemaphorePermit>>>>;
+
 /// One engine's (model's) bounded fair queue.
 pub struct EngineQueue {
     cfg: QueueConfig,
     sem: Arc<Semaphore>,
+    priority_waiters: PriorityWaiterQueue,
     waiting: Mutex<WaitState>,
     inflight: Arc<AtomicUsize>,
     admitted: AtomicUsize,
@@ -108,15 +111,36 @@ pub struct EngineQueue {
 }
 
 /// Held for the request lifetime (including the streamed response). Dropping it
-/// releases the concurrency slot.
+/// releases the concurrency slot, handing off directly to any queued
+/// continuation waiter before falling back to the cold FIFO semaphore.
 pub struct EnginePermit {
-    _permit: OwnedSemaphorePermit,
+    permit: Option<OwnedSemaphorePermit>,
+    priority_waiters: PriorityWaiterQueue,
     inflight: Arc<AtomicUsize>,
 }
 
 impl Drop for EnginePermit {
     fn drop(&mut self) {
         self.inflight.fetch_sub(1, Ordering::Relaxed);
+        if let Some(permit) = self.permit.take() {
+            let mut q = self
+                .priority_waiters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let mut handoff = Some(permit);
+            while let Some(tx) = q.pop_front() {
+                match tx.send(handoff.take().unwrap()) {
+                    Ok(()) => break,
+                    Err(returned_permit) => {
+                        // That priority waiter already timed out or acquired via
+                        // semaphore; try the next priority waiter.
+                        handoff = Some(returned_permit);
+                    }
+                }
+            }
+            // If `handoff` is still `Some`, dropping it here returns the slot to
+            // `self.sem` for cold FIFO waiters.
+        }
     }
 }
 
@@ -152,6 +176,7 @@ impl EngineQueue {
         Arc::new(Self {
             cfg,
             sem: Arc::new(Semaphore::new(max)),
+            priority_waiters: Arc::new(Mutex::new(VecDeque::new())),
             waiting: Mutex::new(WaitState::default()),
             inflight: Arc::new(AtomicUsize::new(0)),
             admitted: AtomicUsize::new(0),
@@ -206,7 +231,8 @@ impl EngineQueue {
         }
         self.inflight.fetch_add(1, Ordering::Relaxed);
         EnginePermit {
-            _permit: permit,
+            permit: Some(permit),
+            priority_waiters: self.priority_waiters.clone(),
             inflight: self.inflight.clone(),
         }
     }
@@ -219,12 +245,12 @@ impl EngineQueue {
     /// Acquire a concurrency slot with optional continuation priority (Batch 5.3).
     ///
     /// When `priority_continuation` is `true` (an active Coding Agent returning
-    /// from a `tool_calls` pause with `role="tool"` or an active Tool-Pause
-    /// session lease), `QueueMode::Fair` grants 25% burst headroom on both
-    /// global queue depth and per-tenant waiter share (at least +1 slot) and
-    /// doubles `max_wait`, preventing multi-turn agent workflows with high
-    /// attained GPU service (PLAS) from being dropped at the cold-request
-    /// watermark.
+    /// from a server-recorded `tool_calls` pause lease), `QueueMode::Fair`
+    /// wakes the continuation waiter ahead of queued cold requests, grants 25%
+    /// burst headroom on both global queue depth and per-tenant waiter share
+    /// (at least +1 slot), and doubles `max_wait`, preventing multi-turn agent
+    /// workflows with high attained GPU service (PLAS) from being starved or
+    /// dropped at the cold-request watermark.
     pub async fn acquire_with_priority(
         &self,
         tenant: Option<&str>,
@@ -285,7 +311,28 @@ impl EngineQueue {
         } else {
             self.cfg.max_wait
         };
-        let waited = tokio::time::timeout(effective_wait, self.sem.clone().acquire_owned()).await;
+
+        let waited = if priority_continuation {
+            let (tx, mut rx) = oneshot::channel();
+            {
+                let mut q = self
+                    .priority_waiters
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                q.push_back(tx);
+            }
+            let sem = self.sem.clone();
+            tokio::time::timeout(effective_wait, async move {
+                tokio::select! {
+                    biased;
+                    Ok(permit) = &mut rx => Ok(permit),
+                    res = sem.acquire_owned() => res,
+                }
+            })
+            .await
+        } else {
+            tokio::time::timeout(effective_wait, self.sem.clone().acquire_owned()).await
+        };
 
         match waited {
             Ok(Ok(permit)) => Ok(self.make_permit(permit, priority_continuation)),
@@ -473,12 +520,17 @@ mod tests {
         assert!(!cont.is_finished(), "continuation request must be queued");
 
         drop(held);
+        // Priority continuation waiter wakes up AHEAD of earlier cold waiters h1/h2.
+        let p_cont = cont.await.unwrap().unwrap();
+        assert!(
+            !h1.is_finished(),
+            "cold waiter h1 should still wait while continuation runs"
+        );
+        drop(p_cont);
         let p1 = h1.await.unwrap().unwrap();
         drop(p1);
         let p2 = h2.await.unwrap().unwrap();
         drop(p2);
-        let p3 = cont.await.unwrap().unwrap();
-        drop(p3);
         assert_eq!(q.admitted_continuation_total(), 1);
     }
 }
