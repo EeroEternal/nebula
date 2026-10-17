@@ -226,6 +226,14 @@ export interface ModelSpec {
   created_by?: string | null
 }
 
+export interface ReplicaPlacementSpec {
+  node_id?: string | null
+  gpu_indices?: number[] | null
+  image_id?: string | null
+  config_overrides?: ModelConfig | null
+  role?: 'mixed' | 'prefill' | 'decode'
+}
+
 export interface ModelDeployment {
   model_uid: string
   desired_state: 'running' | 'stopped'
@@ -240,11 +248,7 @@ export interface ModelDeployment {
     remote_url: string
     serde?: string
   } | null
-  replica_specs?: Array<{
-    role?: 'mixed' | 'prefill' | 'decode'
-    image_id?: string | null
-    node_id?: string | null
-  }>
+  replica_specs?: ReplicaPlacementSpec[]
   version: number
   updated_at_ms: number
 }

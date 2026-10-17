@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { v2 } from "@/lib/api"
+import type { ReplicaPlacementSpec } from "@/lib/types"
 import { useI18n } from "@/lib/useI18n"
 
 type Role = "prefill" | "decode"
@@ -40,7 +41,9 @@ export function DeployDialog({
     const [topology, setTopology] = useState<"replicated" | "pd_split">("replicated")
     const [topologyTouched, setTopologyTouched] = useState(false)
     const [roles, setRoles] = useState<Role[]>(Array.from({ length: replicasDefault }, () => "mixed" as unknown as Role))
+    const [baseReplicaSpecs, setBaseReplicaSpecs] = useState<ReplicaPlacementSpec[]>([])
     const [remoteUrl, setRemoteUrl] = useState("lm://127.0.0.1:6800")
+    const [kvSerde, setKvSerde] = useState("naive")
     const [hydrating, setHydrating] = useState(false)
     const [busy, setBusy] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -57,9 +60,11 @@ export function DeployDialog({
                 const dep = detail.deployment
                 const repCount = Math.max(1, Math.min(16, dep?.replicas || replicasDefault || 2))
                 setReplicas(repCount)
+                setBaseReplicaSpecs(dep?.replica_specs || [])
                 if (dep?.topology === "pd_split") {
                     setTopology("pd_split")
                     setRemoteUrl(dep.kv_sharing?.remote_url || "lm://127.0.0.1:6800")
+                    setKvSerde(dep.kv_sharing?.serde || "naive")
                     const hydratedRoles: Role[] = Array.from({ length: repCount }, (_, idx) => {
                         const r = dep.replica_specs?.[idx]?.role
                         return r === "prefill" || r === "decode"
@@ -70,6 +75,7 @@ export function DeployDialog({
                 } else {
                     setTopology("replicated")
                     setRemoteUrl("lm://127.0.0.1:6800")
+                    setKvSerde("naive")
                     setRoles(Array.from({ length: repCount }, () => "mixed" as unknown as Role))
                 }
             })
@@ -101,6 +107,7 @@ export function DeployDialog({
         if (tp === "replicated") {
             setRoles(Array.from({ length: replicas }, () => "mixed" as unknown as Role))
             setRemoteUrl("lm://127.0.0.1:6800")
+            setKvSerde("naive")
         }
     }
 
@@ -115,8 +122,11 @@ export function DeployDialog({
             const body: Record<string, unknown> = { replicas }
             if (topology === "pd_split") {
                 body.topology = "pd_split"
-                body.kv_sharing = { remote_url: remoteUrl, serde: "naive" }
-                body.replica_specs = roles.slice(0, replicas).map((role) => ({ role }))
+                body.kv_sharing = { remote_url: remoteUrl, serde: kvSerde || "naive" }
+                body.replica_specs = roles.slice(0, replicas).map((role, idx) => ({
+                    ...(baseReplicaSpecs[idx] || {}),
+                    role,
+                }))
             } else if (topologyTouched) {
                 body.topology = "replicated"
             }
