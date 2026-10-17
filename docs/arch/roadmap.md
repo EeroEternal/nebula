@@ -292,6 +292,18 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 - benchmark/canary 调度到空闲副本（`/stats/` 忙闲信号 + 准入队列低优先级）；Phase 3 Selection 联动前置。
 
+### Batch 5：Workload-Aware 路由与控制面演进（基于 2026 推理趋势参照，见 [`../dev/direction.md` §11](../dev/direction.md#11-2026-llm-serving-技术趋势参照与-nebula-落点映射)）
+
+| # | 任务 | 参照来源 | 触点与状态 |
+|---|------|----------|------------|
+| 5.1 | **`pd_split` 短请求智能旁路（Short-Prompt Bypass）**：`prompt_tokens < NEBULA_PD_BYPASS_TOKENS`（默认 256）且 Decode 池未饱和时跳过 `/lookup` 直走 Decode 池原地计算 | `llm-d` / `Dynamo` Threshold Gating + LMCache 256-token chunk 边界 | ⏳ [`crates/nebula-router/src/lib.rs`](../../crates/nebula-router/src/lib.rs) |
+| 5.2 | **多 Owner 前缀索引 + 联合代价打分（`SavedPrefill - QueueWait`）**：合并 `pd_split v1.1` 评审 #5（Decode 池内本地命中优先）与热点前缀防拥塞溢流 | `Dynamo` KV Router / `sgl-router` / `AIBrix` | ⏳ [`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs), [`strategy.rs`](../../crates/nebula-router/src/strategy.rs) |
+| 5.3 | **Coding Agent `Tool-Pause` 感知会话亲和与准入保护**：识别 `finish_reason="tool_calls"` 挂起窗口（TTL ~60s），对 `role="tool"` 续接请求提供高优准入与强副本锚定 | UC Berkeley **Continuum** / **Autellix (PLAS)** | ⏳ `nebula-gateway`, [`queue.rs`](../../crates/nebula-common/src/queue.rs), `nebula-router` |
+| 5.4 | **SGLang `/v1/score` L1 能力声明与前缀亲和透传**：支持单次 Prefill 候选词概率打分（配合 JEV 毫秒级路由/上下文压缩门控） | SGLang `/v1/score` + `fast-jev-compaction` | ⏳ [`capability.rs`](../../crates/nebula-common/src/capability.rs), `nebula-gateway`, [`prompt_hash.rs`](../../crates/nebula-router/src/prompt_hash.rs) |
+| 5.5 | **L3 并发感知量化选型定律**：编码 `Batch=1`（4-bit +27%）到 `Batch>=16`（FP8 与 4-bit 差距 <0.2%，且无 Prefill 解包损耗）的 Roofline 拐点 | DGX Spark Qwen3.8-27B 实测对照 | ⏳ [`selection.rs`](../../crates/nebula-common/src/selection.rs) |
+| 5.6 | **L2 投机采样套件（DSpark / DFlash2 + Context Lookup）参数化 + Hybrid 模型 Prefix Cache 静默禁用体检** | DSpark（比 MTP 快 46%）、DFlash2+Lookup（381 tok/s）、Beam 成套发布、`is_hybrid` 陷阱 | ⏳ [`model_spec.rs`](../../crates/nebula-common/src/model_spec.rs), [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs), [`engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs) |
+| 5.7 | **L4 二元曲面（TTFT vs TPOT/KV 水位）驱动 `pd_split` 池配比建议**：替代失真的 Decode 期 GPU `SM_UTIL` | `Dynamo Planner` / `llm-d SLO Autoscaler` | ⏳ [`slo.rs`](../../crates/nebula-common/src/slo.rs), [`capacity.rs`](../../crates/nebula-common/src/capacity.rs) |
+
 ### 顺手卫生项（夹带做）
 
 - 数据面 retry 语义收敛（首字节前可重试，单一实现）；review skill 增加引擎 adapter 仅声明 capability 规则。

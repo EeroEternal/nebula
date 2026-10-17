@@ -67,8 +67,8 @@
 | [`dev/ha/report.md`](dev/ha/report.md) | 高可用验收报告 |
 | [`dev/hw/phase0-pro6000.md`](dev/hw/phase0-pro6000.md) | Phase 0 真机（pro6000 / RTX PRO 6000）验证摘要 |
 | [`dev/hw/vllm-serving-perf.md`](dev/hw/vllm-serving-perf.md) | vLLM 服务层（Rust 前端 vs Python）与 Nebula 数据面性能实验（RTX 5090） |
-| [`dev/landscape.md`](dev/landscape.md) | 推理编排框架对照（Dynamo / llm-d）与 Nebula 的能力缺口 |
-| [`dev/direction.md`](dev/direction.md) | **发展方向与编排边界备忘**：State- & Stage-Aware 定位、MapReduce 五原则、Zone A–C / S1–S3 边界与“用约束替代强耦合” |
+| [`dev/landscape.md`](dev/landscape.md) | 推理编排框架五方对照（`llm-d` / `Dynamo` / `AIBrix` / `Mooncake` / `Nebula`）与能力演进 |
+| [`dev/direction.md`](dev/direction.md) | **发展方向与编排边界备忘**：State- & Stage-Aware 定位、MapReduce 五原则、Zone A–C / S1–S3 边界与 2026 趋势映射 |
 | [`dev/assessment.md`](dev/assessment.md) | **范围与设计评估**（2026-10-12）：治理边界、路由一致性、PD 语义与交付建议 |
 | [`dev/benefit-verification.md`](dev/benefit-verification.md) | **收益验证报告（客户端口径）**：前缀亲和在冷启动与暖态过载下的 Goodput / P99 / 拒绝率实测 |
 | [`dev/queue-admission.md`](dev/queue-admission.md) | **P0-#2 设计**：引擎级有界公平队列准入（不做 AIMD） |
