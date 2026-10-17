@@ -194,6 +194,7 @@ pub struct PrefixIndex {
     map: DashMap<(String, Vec<u8>), OwnerMap>,
     tombstones: DashMap<TombstoneKey, TombstoneVal>,
     model_reset_watermark: DashMap<String, Watermark>,
+    watermark_lock: std::sync::RwLock<()>,
     epoch: u64,
     generation: AtomicU64,
     inserts_total: AtomicU64,
@@ -210,6 +211,7 @@ impl PrefixIndex {
             map: DashMap::new(),
             tombstones: DashMap::new(),
             model_reset_watermark: DashMap::new(),
+            watermark_lock: std::sync::RwLock::new(()),
             epoch,
             generation: AtomicU64::new(0),
             inserts_total: AtomicU64::new(0),
@@ -304,8 +306,13 @@ impl PrefixIndex {
         per.into_iter().collect()
     }
 
-    /// Snapshot the publisher `(epoch, generation)` watermark and per-replica keys for a model.
+    /// Snapshot the publisher `generation` watermark and per-replica keys for a model
+    /// atomically with respect to in-flight generation allocation + event application.
     pub fn snapshot_for_with_gen(&self, model_uid: &str) -> (u64, ReplicaSnapshot) {
+        let _guard = self
+            .watermark_lock
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let gen = self.current_generation().max(1);
         (gen, self.snapshot_for(model_uid))
     }
@@ -329,10 +336,14 @@ impl PrefixIndex {
     ///   adopts the new `(epoch, reset_gen)` watermark instead of getting stuck
     ///   on the previous incarnation's higher `reset_gen`.
     pub fn clear_model_at_watermark(&self, model_uid: &str, epoch: u64, reset_gen: u64) {
+        let _guard = self
+            .watermark_lock
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         if reset_gen == 0 {
             self.model_reset_watermark.remove(model_uid);
         } else {
-            if epoch == self.epoch {
+            if epoch != 0 && epoch == self.epoch {
                 self.observe_local_generation(reset_gen);
             }
             let mut prev_epoch_to_purge: Option<u64> = None;
@@ -378,19 +389,15 @@ impl PrefixIndex {
             if reset_gen == 0 {
                 self.map.remove(&k);
             } else {
-                let mut remove_key = false;
-                if let Some(mut entry) = self.map.get_mut(&k) {
+                self.map.remove_if_mut(&k, |_, owners| {
                     // Keep only entries from the same epoch that are strictly
                     // newer than `reset_gen`; older entries (or entries from a
                     // superseded indexd epoch) are replaced by the snapshot.
-                    entry.value_mut().retain(|_, &mut (_, e_epoch, e_gen)| {
+                    owners.retain(|_, &mut (_, e_epoch, e_gen)| {
                         e_epoch == epoch && e_gen > reset_gen
                     });
-                    remove_key = entry.value().is_empty();
-                }
-                if remove_key {
-                    self.map.remove(&k);
-                }
+                    owners.is_empty()
+                });
             }
         }
         if reset_gen == 0 {
@@ -407,8 +414,12 @@ impl PrefixIndex {
     }
 
     pub fn apply(&self, model_uid: &str, replica_id: u32, events: &[KvEvent], now_ms: u64) {
+        let _guard = self
+            .watermark_lock
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let gen = self.next_generation();
-        self.apply_with_watermark(model_uid, replica_id, events, now_ms, self.epoch, gen);
+        self.apply_with_watermark_locked(model_uid, replica_id, events, now_ms, self.epoch, gen);
     }
 
     pub fn apply_with_gen(
@@ -431,14 +442,34 @@ impl PrefixIndex {
         epoch: u64,
         gen: u64,
     ) {
-        let (epoch, gen) = if gen == 0 {
+        let _guard = self
+            .watermark_lock
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        self.apply_with_watermark_locked(model_uid, replica_id, events, now_ms, epoch, gen);
+    }
+
+    fn apply_with_watermark_locked(
+        &self,
+        model_uid: &str,
+        replica_id: u32,
+        events: &[KvEvent],
+        now_ms: u64,
+        epoch: u64,
+        gen: u64,
+    ) {
+        let (epoch, gen) = if epoch == 0 && gen == 0 {
             (self.epoch, self.next_generation())
+        } else if gen == 0 {
+            (epoch, self.next_generation())
         } else {
-            let eff_epoch = if epoch == 0 { self.epoch } else { epoch };
-            if eff_epoch == self.epoch {
+            // Only advance local generation when the frame explicitly carries
+            // this instance's non-zero epoch; legacy 8-byte wire frames have
+            // `epoch == 0` and must never impersonate `self.epoch`.
+            if epoch != 0 && epoch == self.epoch {
                 self.observe_local_generation(gen);
             }
-            (eff_epoch, gen)
+            (epoch, gen)
         };
         if let Some((reset_epoch, reset_gen)) = self
             .model_reset_watermark
@@ -482,29 +513,24 @@ impl PrefixIndex {
                         let c = canon(h);
                         let key = (model_uid.to_string(), c.clone());
                         let tkey = (model_uid.to_string(), c, replica_id);
-                        if let Some(existing) = self.map.get(&key) {
-                            if let Some(&(ex_ts, ex_epoch, ex_gen)) =
-                                existing.value().get(&replica_id)
-                            {
-                                if is_older_watermark(epoch, gen, now_ms, ex_epoch, ex_gen, ex_ts) {
-                                    self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
-                                    continue;
-                                }
-                            }
-                        }
-                        if let Some(tomb) = self.tombstones.get(&tkey) {
-                            let (t_epoch, t_gen, t_ts) = *tomb.value();
+                        if let dashmap::mapref::entry::Entry::Occupied(tomb) =
+                            self.tombstones.entry(tkey)
+                        {
+                            let (t_epoch, t_gen, t_ts) = *tomb.get();
                             if is_older_watermark(epoch, gen, now_ms, t_epoch, t_gen, t_ts) {
                                 self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
                                 continue;
                             }
-                            drop(tomb);
-                            self.tombstones.remove(&tkey);
+                            tomb.remove();
                         }
-                        self.map
-                            .entry(key)
-                            .or_default()
-                            .insert(replica_id, (now_ms, epoch, gen));
+                        let mut owners = self.map.entry(key).or_default();
+                        if let Some(&(ex_ts, ex_epoch, ex_gen)) = owners.get(&replica_id) {
+                            if is_older_watermark(epoch, gen, now_ms, ex_epoch, ex_gen, ex_ts) {
+                                self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                        }
+                        owners.insert(replica_id, (now_ms, epoch, gen));
                         inserted_any = true;
                     }
                     if inserted_any {
@@ -517,25 +543,25 @@ impl PrefixIndex {
                         let key = (model_uid.to_string(), c.clone());
                         let tkey = (model_uid.to_string(), c, replica_id);
                         let mut skip = false;
-                        let mut remove_key = false;
-                        if let Some(mut existing) = self.map.get_mut(&key) {
+                        if let dashmap::mapref::entry::Entry::Occupied(mut existing) =
+                            self.map.entry(key)
+                        {
                             if let Some(&(ex_ts, ex_epoch, ex_gen)) =
-                                existing.value().get(&replica_id)
+                                existing.get().get(&replica_id)
                             {
                                 if is_older_watermark(epoch, gen, now_ms, ex_epoch, ex_gen, ex_ts) {
                                     skip = true;
                                 } else {
-                                    existing.value_mut().remove(&replica_id);
-                                    remove_key = existing.value().is_empty();
+                                    existing.get_mut().remove(&replica_id);
+                                    if existing.get().is_empty() {
+                                        existing.remove();
+                                    }
                                 }
                             }
                         }
                         if skip {
                             self.stale_dropped_total.fetch_add(1, Ordering::Relaxed);
                             continue;
-                        }
-                        if remove_key {
-                            self.map.remove(&key);
                         }
                         self.tombstones
                             .entry(tkey)
@@ -568,20 +594,49 @@ impl PrefixIndex {
                         .map(|e| e.key().clone())
                         .collect();
                     for k in keys {
-                        let mut remove_key = false;
-                        if let Some(mut entry) = self.map.get_mut(&k) {
-                            entry.value_mut().remove(&replica_id);
-                            remove_key = entry.value().is_empty();
-                        }
-                        if remove_key {
-                            self.map.remove(&k);
-                        }
+                        self.map.remove_if_mut(&k, |_, owners| {
+                            owners.remove(&replica_id);
+                            owners.is_empty()
+                        });
                         self.tombstones
                             .insert((k.0, k.1, replica_id), (epoch, gen, now_ms));
                     }
                 }
             }
         }
+    }
+
+    /// Atomically allocate the next generation within `self.epoch`, stamp
+    /// `frames[1]` with `(self.epoch, gen)`, and apply the event batch while
+    /// holding `watermark_lock` so concurrent snapshots never observe an
+    /// allocated generation before its entries are applied.
+    pub fn ingest_and_stamp_frames(&self, frames: &mut [bytes::Bytes]) -> (u64, u64) {
+        let _guard = self
+            .watermark_lock
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        let gen = self.next_generation();
+        let epoch = self.epoch;
+        frames[1] = bytes::Bytes::from(encode_watermark(epoch, gen));
+        if let Some((model_uid, replica_id)) = parse_topic(&frames[0]) {
+            let events = parse_batch(&frames[2]);
+            if !events.is_empty() {
+                self.apply_with_watermark_locked(
+                    &model_uid,
+                    replica_id,
+                    &events,
+                    now_ms(),
+                    epoch,
+                    gen,
+                );
+            }
+        } else {
+            tracing::warn!(
+                topic = %String::from_utf8_lossy(&frames[0]),
+                "unparseable kv event topic"
+            );
+        }
+        (epoch, gen)
     }
 
     /// Pick the replica holding the longest matched prefix chain across all replicas.
@@ -688,16 +743,12 @@ impl PrefixIndex {
         let keys: Vec<(String, Vec<u8>)> = self.map.iter().map(|e| e.key().clone()).collect();
         let mut evicted = 0usize;
         for k in keys {
-            let mut remove_key = false;
-            if let Some(mut entry) = self.map.get_mut(&k) {
-                let before = entry.value().len();
-                entry.value_mut().retain(|_, &mut (ts, _, _)| ts >= cutoff);
-                evicted += before.saturating_sub(entry.value().len());
-                remove_key = entry.value().is_empty();
-            }
-            if remove_key {
-                self.map.remove(&k);
-            }
+            self.map.remove_if_mut(&k, |_, owners| {
+                let before = owners.len();
+                owners.retain(|_, &mut (ts, _, _)| ts >= cutoff);
+                evicted += before.saturating_sub(owners.len());
+                owners.is_empty()
+            });
         }
         let tkeys: Vec<(String, Vec<u8>, u32)> = self
             .tombstones
@@ -772,11 +823,8 @@ pub async fn kv_events_loop(
         if frames.len() < 3 {
             continue;
         }
-        let gen = index.next_generation();
-        let epoch = index.epoch();
-        frames[1] = bytes::Bytes::from(encode_watermark(epoch, gen));
-        let _ = tx.send(frames.clone());
-        apply_frames_with_watermark(&frames, &index, epoch, gen);
+        index.ingest_and_stamp_frames(&mut frames);
+        let _ = tx.send(frames);
     }
 }
 
@@ -877,16 +925,15 @@ pub fn apply_control_with_watermark(
     payload: &[u8],
     index: &PrefixIndex,
 ) {
-    let eff_epoch = if epoch == 0 { index.epoch() } else { epoch };
     if let Some(model) = topic.strip_prefix("!reset/") {
-        index.clear_model_at_watermark(model, eff_epoch, gen);
+        index.clear_model_at_watermark(model, epoch, gen);
         return;
     }
     if let Some(rest) = topic.strip_prefix("!snapshot/") {
         if let Some((model, replica)) = rest.rsplit_once('/') {
             if let Ok(replica) = replica.parse::<u32>() {
                 let events = parse_batch(payload);
-                index.apply_with_watermark(model, replica, &events, now_ms(), eff_epoch, gen);
+                index.apply_with_watermark(model, replica, &events, now_ms(), epoch, gen);
             }
         }
     }
@@ -1522,5 +1569,63 @@ mod tests {
             300,
         );
         assert_eq!(idx.lookup("m", &[h0, h1]), Some(1));
+    }
+
+    #[test]
+    fn legacy_8byte_frame_with_zero_epoch_does_not_impersonate_local_epoch() {
+        let idx = PrefixIndex::new();
+        let h0: [u8; 32] = H0.try_into().unwrap();
+        assert_eq!(idx.current_generation(), 0);
+
+        // Legacy 8-byte wire frame parses as (epoch=0, gen=999).
+        let (epoch, gen) = parse_watermark(&999u64.to_be_bytes());
+        assert_eq!((epoch, gen), (0, 999));
+
+        idx.apply_with_watermark(
+            "m",
+            0,
+            &[KvEvent::Stored {
+                block_hashes: vec![H0.to_vec()],
+                medium: None,
+            }],
+            100,
+            epoch,
+            gen,
+        );
+        // Must NOT advance local generation counter to 999.
+        assert_eq!(idx.current_generation(), 0);
+        assert_eq!(idx.lookup("m", &[h0]), Some(0));
+
+        // Subsequent local event (self.epoch, gen=1) at newer timestamp (200 > 100)
+        // must be accepted rather than dropped against the legacy frame's gen=999.
+        idx.apply(
+            "m",
+            0,
+            &[KvEvent::Removed {
+                block_hashes: vec![H0.to_vec()],
+            }],
+            200,
+        );
+        assert_eq!(idx.current_generation(), 1);
+        assert_eq!(idx.lookup("m", &[h0]), None);
+    }
+
+    #[test]
+    fn ingest_and_stamp_frames_and_snapshot_for_with_gen_are_consistent() {
+        let idx = PrefixIndex::new();
+        let payload = encode_stored_batch(&[vec![0xaa; 8]]);
+        let mut frames = vec![
+            bytes::Bytes::from("m/0"),
+            bytes::Bytes::from_static(&[0u8; 8]),
+            bytes::Bytes::from(payload),
+        ];
+        let (epoch, gen) = idx.ingest_and_stamp_frames(&mut frames);
+        assert_eq!(epoch, idx.epoch());
+        assert_eq!(gen, 1);
+        assert_eq!(parse_watermark(&frames[1]), (epoch, 1));
+
+        let (snap_gen, snap) = idx.snapshot_for_with_gen("m");
+        assert_eq!(snap_gen, 1);
+        assert_eq!(snap, vec![(0, vec![vec![0xaa; 8]])]);
     }
 }
