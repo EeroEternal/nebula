@@ -202,9 +202,95 @@ pub fn switching_cost(current: &CurrentBackend, candidate: &RecommendCandidate) 
     cost
 }
 
-fn score_candidate(pref: SelectionPreference, c: &BackendCandidate) -> f64 {
+pub const ROOFLINE_COMPUTE_BOUND_FP8_REASON: &str =
+    "concurrency >= 16 enters compute-bound regime where FP8 matches 4-bit decode throughput without 4-bit prefill unpack penalty";
+pub const ROOFLINE_MEMORY_BOUND_4BIT_REASON: &str =
+    "concurrency <= 4 is memory-bandwidth-bound where 4-bit quantization delivers ~20-27% decode speedup";
+pub const ROOFLINE_NATIVE_W4A4_REASON: &str =
+    "native W4A4/NVFP4 hardware path preserves 4-bit speedup without register unpack penalty";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuantBucket {
+    FourBit,
+    Fp8,
+    Other,
+}
+
+fn classify_quantization(
+    model_quant: Option<&str>,
+    candidate: &BackendCandidate,
+) -> (QuantBucket, bool) {
+    let combined = format!(
+        "{} {} {} {}",
+        model_quant.unwrap_or(""),
+        candidate.image_id.as_deref().unwrap_or(""),
+        candidate.platform.as_deref().unwrap_or(""),
+        candidate.reasons.join(" ")
+    )
+    .to_ascii_lowercase();
+
+    let native_w4a4 = combined.contains("nvfp4")
+        || combined.contains("w4a4")
+        || combined.contains("b200")
+        || combined.contains("gb200")
+        || combined.contains("gb300");
+
+    if combined.contains("fp8") || combined.contains("w8a8") || combined.contains("int8") {
+        (QuantBucket::Fp8, native_w4a4)
+    } else if combined.contains("4bit")
+        || combined.contains("4-bit")
+        || combined.contains("awq")
+        || combined.contains("gptq")
+        || combined.contains("int4")
+        || combined.contains("w4a16")
+        || combined.contains("nvfp4")
+        || combined.contains("fp4")
+    {
+        (QuantBucket::FourBit, native_w4a4)
+    } else {
+        (QuantBucket::Other, native_w4a4)
+    }
+}
+
+/// Roofline quantization score bonus and explainable reason (Batch 5.5):
+/// - `concurrency <= 4` or native W4A4 (`NVFP4`): +15.0 bonus for 4-bit candidates.
+/// - `concurrency >= 16` without native W4A4: +15.0 bonus for FP8 candidates (and -5.0 unpack
+///   penalty on non-native 4-bit candidates, plus the explainable Roofline reason on both).
+fn roofline_quantization_adjustment(
+    req: &SelectionRequest,
+    candidate: &BackendCandidate,
+) -> (f64, Option<&'static str>) {
+    let (bucket, native_w4a4) = classify_quantization(req.model.quantization.as_deref(), candidate);
+    let Some(conc) = req.workload.concurrency else {
+        if native_w4a4 && bucket == QuantBucket::FourBit {
+            return (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON));
+        }
+        return (0.0, None);
+    };
+
+    if native_w4a4 && bucket == QuantBucket::FourBit {
+        return (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON));
+    }
+
+    if conc <= 4 {
+        match bucket {
+            QuantBucket::FourBit => (15.0, Some(ROOFLINE_MEMORY_BOUND_4BIT_REASON)),
+            _ => (0.0, None),
+        }
+    } else if conc >= 16 {
+        match bucket {
+            QuantBucket::Fp8 => (15.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
+            QuantBucket::FourBit => (-5.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
+            QuantBucket::Other => (0.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
+        }
+    } else {
+        (0.0, None)
+    }
+}
+
+fn score_candidate(pref: SelectionPreference, c: &BackendCandidate, roofline_bonus: f64) -> f64 {
     let switch_penalty = c.switching_cost * 10.0;
-    match pref {
+    let base = match pref {
         SelectionPreference::Latency => {
             let ttft = c.ttft_p95_ms.unwrap_or(f64::MAX);
             -(ttft + switch_penalty)
@@ -217,7 +303,8 @@ fn score_candidate(pref: SelectionPreference, c: &BackendCandidate) -> f64 {
             let cost = c.cost_per_1k_tokens.unwrap_or(f64::MAX);
             -(cost + switch_penalty)
         }
-    }
+    };
+    base + roofline_bonus
 }
 
 fn preference_label(pref: SelectionPreference) -> &'static str {
@@ -231,6 +318,7 @@ fn preference_label(pref: SelectionPreference) -> &'static str {
 fn build_score_breakdown(
     pref: SelectionPreference,
     c: &BackendCandidate,
+    roofline_bonus: f64,
     score: f64,
 ) -> Vec<String> {
     let switch_penalty = c.switching_cost * 10.0;
@@ -261,20 +349,30 @@ fn build_score_breakdown(
             ));
         }
     }
+    if roofline_bonus.abs() > f64::EPSILON {
+        parts.push(format!("roofline_bonus={roofline_bonus:.1}"));
+    }
     parts.push(format!("switch_penalty={switch_penalty:.1}"));
     parts.push(format!("switching_cost={:.2}", c.switching_cost));
     parts.push(format!("score={score:.2}"));
     parts
 }
 
-fn annotate_scores(pref: SelectionPreference, candidates: &mut [BackendCandidate]) {
+fn annotate_scores(req: &SelectionRequest, candidates: &mut [BackendCandidate]) {
+    let pref = req.constraints.preference;
     for c in candidates.iter_mut() {
-        let score = score_candidate(pref, c);
+        let (roofline_bonus, roofline_reason) = roofline_quantization_adjustment(req, c);
+        let score = score_candidate(pref, c, roofline_bonus);
         c.score = score;
-        c.score_breakdown = build_score_breakdown(pref, c, score);
+        c.score_breakdown = build_score_breakdown(pref, c, roofline_bonus, score);
         let pref_reason = format!("preference={}", preference_label(pref));
         if !c.reasons.iter().any(|r| r == &pref_reason) {
             c.reasons.insert(0, pref_reason);
+        }
+        if let Some(reason) = roofline_reason {
+            if !c.reasons.iter().any(|r| r == reason) {
+                c.reasons.push(reason.to_string());
+            }
         }
     }
 }
@@ -338,8 +436,10 @@ pub fn select_backends(
 
     let pref = req.constraints.preference;
     out.sort_by(|a, b| {
-        score_candidate(pref, b)
-            .partial_cmp(&score_candidate(pref, a))
+        let (ba, _) = roofline_quantization_adjustment(req, a);
+        let (bb, _) = roofline_quantization_adjustment(req, b);
+        score_candidate(pref, b, bb)
+            .partial_cmp(&score_candidate(pref, a, ba))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -347,7 +447,7 @@ pub fn select_backends(
     if out.len() > max_k {
         out.truncate(max_k);
     }
-    annotate_scores(pref, &mut out);
+    annotate_scores(req, &mut out);
 
     let status = if out.is_empty() {
         RecommendConfidence::InsufficientData
@@ -624,5 +724,94 @@ mod tests {
         .unwrap();
         assert_eq!(ok.deployment.model_uid, "qwen");
         assert_eq!(ok.engine_type, "vllm");
+    }
+
+    #[test]
+    fn roofline_prefers_4bit_at_low_concurrency_and_fp8_at_high_concurrency() {
+        let mut p_4bit = sample_profile("vllm");
+        p_4bit.profile_key.param_fingerprint = Some("awq-4bit".into());
+        p_4bit.run_ids = vec!["r-4bit".into()];
+
+        let mut p_fp8 = sample_profile("sglang");
+        p_fp8.profile_key.param_fingerprint = Some("fp8".into());
+        p_fp8.run_ids = vec!["r-fp8".into()];
+
+        let mut r_4bit = sample_run("vllm");
+        r_4bit.run_id = "r-4bit".into();
+        r_4bit.profile_key.param_fingerprint = Some("awq-4bit".into());
+        r_4bit.image_id = Some("vllm-awq-4bit".into());
+
+        let mut r_fp8 = sample_run("sglang");
+        r_fp8.run_id = "r-fp8".into();
+        r_fp8.profile_key.param_fingerprint = Some("fp8".into());
+        r_fp8.image_id = Some("sglang-fp8".into());
+
+        let profiles = vec![p_4bit, p_fp8];
+        let runs = vec![r_4bit, r_fp8];
+
+        let base_model = ModelProfile {
+            profile_id: "p1".into(),
+            model_uid: Some("qwen3.8-27b".into()),
+            model_name: "Qwen/Qwen2.5-0.5B-Instruct".into(),
+            architecture: ModelArchitecture::Dense,
+            parameter_billions: Some(27.0),
+            quantization: None,
+            context_length: Some(32768),
+            updated_at_ms: 1,
+        };
+
+        // Concurrency <= 4 (memory-bound): 4-bit gets +15 bonus and ranks first
+        let low_conc = select_backends(
+            &SelectionRequest {
+                model: base_model.clone(),
+                workload: WorkloadHint {
+                    workload_id: Some("short-chat-v1".into()),
+                    concurrency: Some(1),
+                    target_qps: None,
+                },
+                constraints: SelectionConstraints {
+                    preference: SelectionPreference::Throughput,
+                    ..Default::default()
+                },
+                current: CurrentBackend::default(),
+            },
+            &profiles,
+            &runs,
+        );
+        assert_eq!(
+            low_conc.candidates[0].image_id.as_deref(),
+            Some("vllm-awq-4bit")
+        );
+        assert!(low_conc.candidates[0]
+            .reasons
+            .iter()
+            .any(|r| r == ROOFLINE_MEMORY_BOUND_4BIT_REASON));
+
+        // Concurrency >= 16 (compute-bound): FP8 gets +15 bonus, 4-bit gets -5 unpack penalty
+        let high_conc = select_backends(
+            &SelectionRequest {
+                model: base_model,
+                workload: WorkloadHint {
+                    workload_id: Some("short-chat-v1".into()),
+                    concurrency: Some(16),
+                    target_qps: None,
+                },
+                constraints: SelectionConstraints {
+                    preference: SelectionPreference::Throughput,
+                    ..Default::default()
+                },
+                current: CurrentBackend::default(),
+            },
+            &profiles,
+            &runs,
+        );
+        assert_eq!(
+            high_conc.candidates[0].image_id.as_deref(),
+            Some("sglang-fp8")
+        );
+        assert!(high_conc.candidates[0]
+            .reasons
+            .iter()
+            .any(|r| r == ROOFLINE_COMPUTE_BOUND_FP8_REASON));
     }
 }

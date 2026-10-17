@@ -1,6 +1,6 @@
 //! Parse Router Prometheus text for SLO evaluation (shared Gateway / BFF).
 
-use nebula_common::{evaluate_slo, ModelSlo, SloEvaluation};
+use nebula_common::{ModelSlo, SloEvaluation};
 
 use crate::store::now_ms;
 
@@ -102,6 +102,19 @@ fn normalize_zero(value: f64) -> f64 {
 
 /// Evaluate SLO using Router metrics text. Low/no traffic → insufficient_data.
 pub fn evaluate_slo_from_router_metrics(slo: &ModelSlo, metrics_text: &str) -> SloEvaluation {
+    evaluate_slo_from_router_metrics_with_pools(
+        slo,
+        metrics_text,
+        &nebula_common::PdPoolTelemetry::default(),
+    )
+}
+
+/// Evaluate SLO using Router metrics text and optional `pd_split` role-pool telemetry (Batch 5.7).
+pub fn evaluate_slo_from_router_metrics_with_pools(
+    slo: &ModelSlo,
+    metrics_text: &str,
+    pool_telemetry: &nebula_common::PdPoolTelemetry,
+) -> SloEvaluation {
     let window_secs = match slo.window.as_str() {
         "5m" => 300.0,
         "15m" => 900.0,
@@ -149,5 +162,77 @@ pub fn evaluate_slo_from_router_metrics(slo: &ModelSlo, metrics_text: &str) -> S
             None
         }
     };
-    evaluate_slo(slo, availability, ttft, latency, request_rate, now_ms())
+    nebula_common::evaluate_slo_with_pools(
+        slo,
+        availability,
+        ttft,
+        latency,
+        request_rate,
+        pool_telemetry,
+        now_ms(),
+    )
+}
+
+/// Load `PdPoolTelemetry` (`is_pd_split`, `prefill_pending_max`, `decode_avg_kv_usage`)
+/// from etcd `/deployments/`, `/endpoints/`, and `/stats/` for a model.
+pub async fn load_pd_pool_telemetry(
+    store: &dyn nebula_meta::MetaStore,
+    model_uid: &str,
+) -> nebula_common::PdPoolTelemetry {
+    use nebula_common::{
+        DeploymentTopology, EndpointInfo, EndpointStats, ModelDeployment, ReplicaRole,
+    };
+
+    let dep_is_pd = match store.get(&format!("/deployments/{model_uid}")).await {
+        Ok(Some((bytes, _))) => serde_json::from_slice::<ModelDeployment>(&bytes)
+            .ok()
+            .and_then(|d| d.topology)
+            .map(|t| matches!(t, DeploymentTopology::PdSplit))
+            .unwrap_or(false),
+        _ => false,
+    };
+
+    let eps: Vec<EndpointInfo> = store
+        .list_prefix("/endpoints/")
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, v, _)| serde_json::from_slice::<EndpointInfo>(&v).ok())
+        .filter(|e| e.model_uid == model_uid)
+        .collect();
+
+    let stats: Vec<EndpointStats> = store
+        .list_prefix("/stats/")
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, v, _)| serde_json::from_slice::<EndpointStats>(&v).ok())
+        .filter(|s| s.model_uid == model_uid)
+        .collect();
+
+    let is_pd_split = dep_is_pd || eps.iter().any(|e| e.role != ReplicaRole::Mixed);
+    let prefill_pending_max = eps
+        .iter()
+        .filter(|e| e.role == ReplicaRole::Prefill)
+        .filter_map(|e| stats.iter().find(|s| s.replica_id == e.replica_id))
+        .map(|s| s.pending_requests)
+        .max();
+    let decode_kvs: Vec<f64> = eps
+        .iter()
+        .filter(|e| e.role == ReplicaRole::Decode)
+        .filter_map(|e| stats.iter().find(|s| s.replica_id == e.replica_id))
+        .filter_map(|s| s.kv_cache_usage)
+        .collect();
+    let decode_avg_kv_usage = if decode_kvs.is_empty() {
+        None
+    } else {
+        Some(decode_kvs.iter().sum::<f64>() / decode_kvs.len() as f64)
+    };
+
+    nebula_common::PdPoolTelemetry {
+        is_pd_split,
+        tpot_p95_ms: None,
+        prefill_pending_max,
+        decode_avg_kv_usage,
+    }
 }

@@ -642,12 +642,34 @@ pub async fn scrape_vllm_stats(
         }
     };
 
-    Ok(parse_vllm_metrics_text(
-        &text,
+    let ts_ms = now_ms();
+    let stats = parse_vllm_metrics_text(&text, model_uid, replica_id, ts_ms);
+    let diag = nebula_common::parse_engine_scrape_diagnostics(Some("vllm"), &text);
+    if let Some(tau) = diag.spec_decode_mean_acceptance_length {
+        tracing::debug!(
+            model_uid = %model_uid,
+            replica_id,
+            spec_decode_mean_acceptance_length = tau,
+            "scraped speculative decoding acceptance length"
+        );
+    }
+    if let Some(ev) = nebula_common::diagnose_hybrid_prefix_cache(
         model_uid,
         replica_id,
-        now_ms(),
-    ))
+        true,
+        stats.pending_requests > 0,
+        stats.prefix_cache_hit_rate,
+        diag.prefix_cache_queries_total,
+        ts_ms,
+    ) {
+        tracing::warn!(
+            model_uid = %model_uid,
+            replica_id,
+            summary = %ev.summary,
+            "engine scrape diagnostic"
+        );
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]

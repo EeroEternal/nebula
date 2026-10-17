@@ -17,8 +17,6 @@ pub fn parse_vllm_metrics_text(
     let mut running_requests: u64 = 0;
     let mut kv_cache_usage: Option<f64> = None;
     let mut prefix_cache_hit_rate: Option<f64> = None;
-    let mut prefix_cache_hits: Option<f64> = None;
-    let mut prefix_cache_queries: Option<f64> = None;
 
     for line in text.lines() {
         if line.starts_with('#') {
@@ -60,16 +58,15 @@ pub fn parse_vllm_metrics_text(
                 prefix_cache_hit_rate = Some(val);
             }
         }
-        if let Some(val) = extract_metric(line, "prefix_cache_hits_total") {
-            prefix_cache_hits = Some(val);
-        } else if let Some(val) = extract_metric(line, "prefix_cache_queries_total") {
-            prefix_cache_queries = Some(val);
-        }
     }
 
+    let diag = parse_engine_scrape_diagnostics(Some("vllm"), text);
     // Compute prefix cache hit rate from counters if no direct gauge was found
     if prefix_cache_hit_rate.is_none() {
-        if let (Some(hits), Some(queries)) = (prefix_cache_hits, prefix_cache_queries) {
+        if let (Some(hits), Some(queries)) = (
+            diag.prefix_cache_hits_total,
+            diag.prefix_cache_queries_total,
+        ) {
             if queries > 0.0 {
                 prefix_cache_hit_rate = Some(hits / queries);
             }
@@ -119,8 +116,7 @@ fn extract_ns_metric(line: &str, namespace: &str, metric_suffix: &str) -> Option
 /// Parse SGLang `/metrics` into `EndpointStats`.
 ///
 /// SGLang exposes `sglang:num_requests_waiting` / `num_requests_running` and
-/// `sglang:token_usage` (KV cache usage ratio). Prefix/prompt cache are not
-/// mapped until official metrics are confirmed.
+/// `sglang:token_usage` (KV cache usage ratio).
 pub fn parse_sglang_metrics_text(
     text: &str,
     model_uid: &str,
@@ -149,12 +145,21 @@ pub fn parse_sglang_metrics_text(
         }
     }
 
+    let diag = parse_engine_scrape_diagnostics(Some("sglang"), text);
+    let prefix_cache_hit_rate = match (
+        diag.prefix_cache_hits_total,
+        diag.prefix_cache_queries_total,
+    ) {
+        (Some(hits), Some(queries)) if queries > 0.0 => Some(hits / queries),
+        _ => None,
+    };
+
     EndpointStats {
         model_uid: model_uid.to_string(),
         replica_id,
         last_updated_ms,
         pending_requests: pending_requests + running_requests,
-        prefix_cache_hit_rate: None,
+        prefix_cache_hit_rate,
         prompt_cache_hit_rate: None,
         kv_cache_usage,
     }
@@ -173,6 +178,107 @@ pub fn parse_engine_metrics(
         Some("sglang") => parse_sglang_metrics_text(text, model_uid, replica_id, last_updated_ms),
         _ => parse_vllm_metrics_text(text, model_uid, replica_id, last_updated_ms),
     }
+}
+
+/// Extended engine scrape diagnostics (Batch 5.6): speculative decoding mean
+/// acceptance length ($\tau$, the true speedup metric rather than raw acceptance
+/// rate) and `prefix_cache_queries_total` for detecting silent prefix-cache
+/// disablement on hybrid-attention models (e.g. `Qwen3.8` `is_hybrid=True`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct EngineScrapeDiagnostics {
+    pub prefix_cache_queries_total: Option<f64>,
+    pub prefix_cache_hits_total: Option<f64>,
+    /// Mean accepted tokens per forward pass ($\tau \ge 1.0$, e.g. `1.0 + accepted / drafts`).
+    pub spec_decode_mean_acceptance_length: Option<f64>,
+}
+
+/// Parse speculative-decoding $\tau$ and prefix-cache query counters from a
+/// vLLM or SGLang `/metrics` body.
+pub fn parse_engine_scrape_diagnostics(
+    engine_type: Option<&str>,
+    text: &str,
+) -> EngineScrapeDiagnostics {
+    let is_sglang = matches!(
+        engine_type.map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("sglang")
+    );
+    let ns = if is_sglang { "sglang" } else { "vllm" };
+
+    let mut queries: Option<f64> = None;
+    let mut hits: Option<f64> = None;
+    let mut mean_tau: Option<f64> = None;
+    let mut accepted_tokens: Option<f64> = None;
+    let mut draft_rounds: Option<f64> = None;
+
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(v) = extract_ns_metric(line, ns, "prefix_cache_queries_total") {
+            queries = Some(v);
+        } else if let Some(v) = extract_ns_metric(line, ns, "prefix_cache_hits_total") {
+            hits = Some(v);
+        } else if let Some(v) = extract_ns_metric(line, ns, "spec_decode_mean_acceptance_length")
+            .or_else(|| extract_ns_metric(line, ns, "spec_accept_length"))
+        {
+            mean_tau = Some(v);
+        } else if let Some(v) = extract_ns_metric(line, ns, "spec_decode_num_accepted_tokens_total")
+        {
+            accepted_tokens = Some(v);
+        } else if let Some(v) = extract_ns_metric(line, ns, "spec_decode_num_drafts_total")
+            .or_else(|| extract_ns_metric(line, ns, "spec_decode_draft_rounds_total"))
+        {
+            draft_rounds = Some(v);
+        }
+    }
+
+    if mean_tau.is_none() {
+        if let (Some(acc), Some(rounds)) = (accepted_tokens, draft_rounds) {
+            if rounds > 0.0 {
+                mean_tau = Some(1.0 + (acc / rounds));
+            }
+        }
+    }
+
+    EngineScrapeDiagnostics {
+        prefix_cache_queries_total: queries,
+        prefix_cache_hits_total: hits,
+        spec_decode_mean_acceptance_length: mean_tau,
+    }
+}
+
+/// Emit a `DiagnosticEvent` when a model expects prefix caching (`prefix_caching_expected`)
+/// and is actively serving (`active_traffic`), yet `prefix_cache_queries` remains 0 or absent
+/// (the vLLM `is_hybrid=True` silent prefix-cache disablement trap).
+pub fn diagnose_hybrid_prefix_cache(
+    model_uid: &str,
+    replica_id: u32,
+    prefix_caching_expected: bool,
+    active_traffic: bool,
+    prefix_cache_hit_rate: Option<f64>,
+    prefix_cache_queries_total: Option<f64>,
+    ts_ms: u64,
+) -> Option<crate::slo::DiagnosticEvent> {
+    if !prefix_caching_expected || !active_traffic {
+        return None;
+    }
+    let silently_disabled = match prefix_cache_queries_total {
+        Some(q) => q <= 0.0,
+        None => prefix_cache_hit_rate.is_none(),
+    };
+    if !silently_disabled {
+        return None;
+    }
+    Some(crate::slo::DiagnosticEvent {
+        ts_ms,
+        kind: "scrape".into(),
+        summary: format!(
+            "replica {replica_id} has prefix_cache_queries=0 under active load: hybrid-attention model may have prefix caching silently disabled; set enable_prefix_caching=true"
+        ),
+        model_uid: Some(model_uid.to_string()),
+        node_id: None,
+        data_source: Some("engine".into()),
+    })
 }
 
 #[cfg(test)]
@@ -265,5 +371,31 @@ sglang:token_usage{model=\"m\"} 0.45\n";
         );
         // Unknown engine falls back to vLLM.
         assert_eq!(parse_engine_metrics(None, v, "m", 0, 1).pending_requests, 2);
+    }
+
+    #[test]
+    fn parses_spec_decode_mean_acceptance_tau_and_detects_silent_hybrid_prefix_cache_trap() {
+        let text = "\
+vllm:prefix_cache_queries_total{model=\"qwen3.8\"} 0\n\
+vllm:prefix_cache_hits_total{model=\"qwen3.8\"} 0\n\
+vllm:spec_decode_num_accepted_tokens_total{model=\"qwen3.8\"} 1400\n\
+vllm:spec_decode_num_drafts_total{model=\"qwen3.8\"} 100\n";
+        let diag = parse_engine_scrape_diagnostics(Some("vllm"), text);
+        assert_eq!(diag.prefix_cache_queries_total, Some(0.0));
+        // tau = 1 + 1400/100 = 15.0 tokens per verification pass
+        assert_eq!(diag.spec_decode_mean_acceptance_length, Some(15.0));
+
+        let ev = diagnose_hybrid_prefix_cache(
+            "qwen3.8-27b",
+            0,
+            true,
+            true,
+            None,
+            diag.prefix_cache_queries_total,
+            1000,
+        )
+        .expect("should emit hybrid prefix cache diagnostic event");
+        assert_eq!(ev.kind, "scrape");
+        assert!(ev.summary.contains("enable_prefix_caching=true"));
     }
 }

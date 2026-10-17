@@ -31,12 +31,12 @@ pub use benchmark::{
     RecommendResponse, WorkloadClass,
 };
 pub use capability::{
-    parse_version_tuple, resolve_engine_type, static_capability, static_capability_sglang,
-    static_capability_vllm, static_version_support, tool_calling_for_engine,
-    validate_engine_and_config, validate_engine_type, validate_engine_version,
-    validate_model_config, CapabilitySource, EngineCapability, EngineVersionSupport,
-    ObservabilityCapability, ReplicaCapability, ServingTopologyKind, SupportLevel,
-    DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
+    parse_version_tuple, resolve_engine_type, score_api_for_engine, static_capability,
+    static_capability_sglang, static_capability_vllm, static_version_support,
+    tool_calling_for_engine, validate_engine_and_config, validate_engine_type,
+    validate_engine_version, validate_model_config, CapabilitySource, EngineCapability,
+    EngineVersionSupport, ObservabilityCapability, ReplicaCapability, ServingTopologyKind,
+    SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
 };
 pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
 pub use cluster::ClusterStatus;
@@ -47,6 +47,10 @@ pub use compat::{
 pub use endpoint::{EndpointInfo, EndpointKind, EndpointStats, EndpointStatus};
 pub use engine_args::{build_engine_extra_args, build_engine_extra_args_lenient};
 pub use engine_image::{EngineImage, ImagePullStatus, NodeImageStatus, VersionPolicy};
+pub use engine_metrics::{
+    diagnose_hybrid_prefix_cache, parse_engine_metrics, parse_engine_scrape_diagnostics,
+    EngineScrapeDiagnostics,
+};
 pub use execution_context::{
     build_execution_context, inject_execution_context, parse_and_sanitize_inference_hint,
     ExecutionContext, InferenceHint, HEADER_BUDGET_TOKENS, HEADER_DEADLINE_MS, HEADER_HINT_TRUSTED,
@@ -79,10 +83,12 @@ pub use selection::{
     draft_from_candidate, select_backends, switching_cost, BackendCandidate, CurrentBackend,
     DeploymentDraft, DraftRequest, ModelArchitecture, ModelProfile, SelectionConstraints,
     SelectionPreference, SelectionRequest, SelectionResponse, WorkloadHint,
+    ROOFLINE_COMPUTE_BOUND_FP8_REASON, ROOFLINE_MEMORY_BOUND_4BIT_REASON,
+    ROOFLINE_NATIVE_W4A4_REASON,
 };
 pub use slo::{
-    evaluate_slo, DiagnosticEvent, ModelSlo, SloComplianceStatus, SloEvaluation, SloMetricSample,
-    SloSuggestion,
+    evaluate_slo, evaluate_slo_with_pools, DiagnosticEvent, ModelSlo, PdPoolTelemetry,
+    SloComplianceStatus, SloEvaluation, SloMetricSample, SloSuggestion,
 };
 pub use tenant::{
     admit_static, estimate_cost, summarize_usage, usage_window_start_ms, AdmitDecision,

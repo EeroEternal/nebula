@@ -324,6 +324,11 @@ pub fn merge_model_config(
                 .tokenizer_mode
                 .clone()
                 .or_else(|| b.tokenizer_mode.clone()),
+            enable_prefix_caching: o.enable_prefix_caching.or(b.enable_prefix_caching),
+            speculative_config: o
+                .speculative_config
+                .clone()
+                .or_else(|| b.speculative_config.clone()),
         }),
     }
 }

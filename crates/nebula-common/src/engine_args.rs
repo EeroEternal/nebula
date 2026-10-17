@@ -82,11 +82,61 @@ fn build_vllm_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
             args.push(mods.join(" "));
         }
     }
+    match cfg.enable_prefix_caching {
+        Some(true) => args.push("--enable-prefix-caching".to_string()),
+        Some(false) => args.push("--no-enable-prefix-caching".to_string()),
+        None => {}
+    }
+    if let Some(spec) = cfg.speculative_config.as_ref() {
+        if let Some(spec_json) = encode_vllm_speculative_json(spec) {
+            args.push("--speculative-config".to_string());
+            args.push(spec_json);
+        }
+    }
 
     if args.is_empty() {
         None
     } else {
         Some(args)
+    }
+}
+
+fn encode_vllm_speculative_json(spec: &crate::model_request::SpeculativeConfig) -> Option<String> {
+    let mut map = serde_json::Map::new();
+    if let Some(method) = spec.method {
+        map.insert(
+            "method".to_string(),
+            serde_json::Value::String(method.as_vllm_method().to_string()),
+        );
+    }
+    if let Some(ref model) = spec.draft_model {
+        map.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.clone()),
+        );
+    }
+    if let Some(k) = spec.num_speculative_tokens {
+        map.insert(
+            "num_speculative_tokens".to_string(),
+            serde_json::Value::Number(k.into()),
+        );
+    }
+    if let Some(max_l) = spec.prompt_lookup_max {
+        map.insert(
+            "prompt_lookup_max".to_string(),
+            serde_json::Value::Number(max_l.into()),
+        );
+    }
+    if let Some(min_l) = spec.prompt_lookup_min {
+        map.insert(
+            "prompt_lookup_min".to_string(),
+            serde_json::Value::Number(min_l.into()),
+        );
+    }
+    if map.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&serde_json::Value::Object(map)).ok()
     }
 }
 
@@ -113,6 +163,31 @@ fn build_sglang_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
             args.push(mods.join(" "));
         }
     }
+    if cfg.enable_prefix_caching == Some(false) {
+        args.push("--disable-radix-cache".to_string());
+    }
+    if let Some(spec) = cfg.speculative_config.as_ref() {
+        if let Some(method) = spec.method {
+            args.push("--speculative-algorithm".to_string());
+            args.push(method.as_sglang_algorithm().to_string());
+        }
+        if let Some(ref draft) = spec.draft_model {
+            args.push("--speculative-draft-model-path".to_string());
+            args.push(draft.clone());
+        }
+        if let Some(k) = spec.num_speculative_tokens {
+            args.push("--speculative-num-draft-tokens".to_string());
+            args.push(k.to_string());
+        }
+        if let Some(max_l) = spec.prompt_lookup_max {
+            args.push("--prompt-lookup-max".to_string());
+            args.push(max_l.to_string());
+        }
+        if let Some(min_l) = spec.prompt_lookup_min {
+            args.push("--prompt-lookup-min".to_string());
+            args.push(min_l.to_string());
+        }
+    }
 
     if args.is_empty() {
         None
@@ -124,6 +199,7 @@ fn build_sglang_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_request::{SpeculativeConfig, SpeculativeMethod};
 
     fn sample_cfg() -> ModelConfig {
         ModelConfig {
@@ -138,6 +214,8 @@ mod tests {
             enable_expert_parallel: None,
             block_size: None,
             tokenizer_mode: None,
+            enable_prefix_caching: None,
+            speculative_config: None,
         }
     }
 
@@ -208,5 +286,49 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--tokenizer-mode" && w[1] == "deepseek_v4"));
+    }
+
+    #[test]
+    fn encodes_speculative_dflash2_and_prefix_caching_for_vllm_and_sglang() {
+        let cfg = ModelConfig {
+            enable_prefix_caching: Some(true),
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Dflash2),
+                draft_model: Some("Qwen/Qwen3.8-27B-DFlash2".into()),
+                num_speculative_tokens: Some(16),
+                prompt_lookup_max: Some(8),
+                prompt_lookup_min: Some(2),
+            }),
+            ..sample_cfg()
+        };
+        let vllm_args = build_engine_extra_args(Some("vllm"), &cfg)
+            .unwrap()
+            .unwrap();
+        assert!(vllm_args.iter().any(|a| a == "--enable-prefix-caching"));
+        let spec_pair = vllm_args
+            .windows(2)
+            .find(|w| w[0] == "--speculative-config")
+            .expect("vllm --speculative-config");
+        let parsed: serde_json::Value = serde_json::from_str(&spec_pair[1]).unwrap();
+        assert_eq!(parsed["method"], "dflash2");
+        assert_eq!(parsed["model"], "Qwen/Qwen3.8-27B-DFlash2");
+        assert_eq!(parsed["num_speculative_tokens"], 16);
+        assert_eq!(parsed["prompt_lookup_max"], 8);
+
+        let sg_args = build_engine_extra_args(Some("sglang"), &cfg)
+            .unwrap()
+            .unwrap();
+        assert!(sg_args
+            .windows(2)
+            .any(|w| w[0] == "--speculative-algorithm" && w[1] == "DFLASH2"));
+        assert!(sg_args.windows(2).any(
+            |w| w[0] == "--speculative-draft-model-path" && w[1] == "Qwen/Qwen3.8-27B-DFlash2"
+        ));
+        assert!(sg_args
+            .windows(2)
+            .any(|w| w[0] == "--speculative-num-draft-tokens" && w[1] == "16"));
+        assert!(sg_args
+            .windows(2)
+            .any(|w| w[0] == "--prompt-lookup-max" && w[1] == "8"));
     }
 }

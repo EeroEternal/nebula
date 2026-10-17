@@ -413,6 +413,34 @@ async fn ensure_replica_running(
                             replica_id,
                             now,
                         );
+                        let diag = nebula_common::parse_engine_scrape_diagnostics(
+                            Some(engine_type),
+                            &text,
+                        );
+                        if let Some(tau) = diag.spec_decode_mean_acceptance_length {
+                            tracing::debug!(
+                                model_uid = %model_uid,
+                                replica_id,
+                                spec_decode_mean_acceptance_length = tau,
+                                "scraped speculative decoding acceptance length"
+                            );
+                        }
+                        if let Some(ev) = nebula_common::diagnose_hybrid_prefix_cache(
+                            model_uid,
+                            replica_id,
+                            true,
+                            stats.pending_requests > 0,
+                            stats.prefix_cache_hit_rate,
+                            diag.prefix_cache_queries_total,
+                            now,
+                        ) {
+                            tracing::warn!(
+                                model_uid = %model_uid,
+                                replica_id,
+                                summary = %ev.summary,
+                                "engine scrape diagnostic"
+                            );
+                        }
                         if let Ok(v) = serde_json::to_vec(&stats) {
                             let stats_key = format!("/stats/{model_uid}/{replica_id}");
                             store.put(&stats_key, v, Some(15000)).await?;

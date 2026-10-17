@@ -198,6 +198,11 @@ pub struct EngineCapability {
     #[serde(default)]
     pub tool_calling: SupportLevel,
 
+    /// Whether the engine exposes `/v1/score` single-pass prefill probability scoring
+    /// (Batch 5.4: SGLang native `/v1/score` + JEV compaction gating).
+    #[serde(default)]
+    pub score_api: SupportLevel,
+
     /// Topologies this engine release can participate in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topologies: Vec<ServingTopologyKind>,
@@ -258,6 +263,7 @@ pub fn static_capability_vllm() -> EngineCapability {
         kv_connector: Some(true),
         grpc: Some(false),
         tool_calling: SupportLevel::Supported,
+        score_api: SupportLevel::Unknown,
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
@@ -287,6 +293,7 @@ pub fn static_capability_sglang() -> EngineCapability {
         kv_connector: Some(true),
         grpc: Some(false),
         tool_calling: SupportLevel::Supported,
+        score_api: SupportLevel::Supported,
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
@@ -311,6 +318,17 @@ pub fn tool_calling_for_engine(engine_type: Option<&str>) -> SupportLevel {
     };
     static_capability(&et.to_ascii_lowercase())
         .map(|c| c.tool_calling)
+        .unwrap_or(SupportLevel::Unknown)
+}
+
+/// Resolve `score_api` (`/v1/score`) from the static table for a known engine type.
+/// SGLang → `Supported`; vLLM / unknown → `Unknown` (allow + warn at Gateway).
+pub fn score_api_for_engine(engine_type: Option<&str>) -> SupportLevel {
+    let Some(et) = engine_type.map(str::trim).filter(|s| !s.is_empty()) else {
+        return SupportLevel::Unknown;
+    };
+    static_capability(&et.to_ascii_lowercase())
+        .map(|c| c.score_api)
         .unwrap_or(SupportLevel::Unknown)
 }
 
@@ -356,6 +374,15 @@ pub fn validate_model_config(
             return Err(format!(
                 "engine '{engine_type}' does not support LoRA modules"
             ));
+        }
+    }
+
+    if let Some(ref spec) = config.speculative_config {
+        if spec.num_speculative_tokens == Some(0) {
+            return Err("speculative_config.num_speculative_tokens must be >= 1".into());
+        }
+        if spec.prompt_lookup_max == Some(0) {
+            return Err("speculative_config.prompt_lookup_max must be >= 1".into());
         }
     }
 

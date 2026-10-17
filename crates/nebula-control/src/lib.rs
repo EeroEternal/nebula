@@ -37,7 +37,10 @@ pub use pool::{
     create_pool, delete_pool, get_pool, list_pools, update_pool, CreatePoolRequest,
     UpdatePoolRequest,
 };
-pub use router_metrics::evaluate_slo_from_router_metrics;
+pub use router_metrics::{
+    evaluate_slo_from_router_metrics, evaluate_slo_from_router_metrics_with_pools,
+    load_pd_pool_telemetry,
+};
 pub use store::{
     get_model_deployment, get_model_spec, infer_model_source, is_valid_model_uid, now_ms,
     put_model_deployment, put_model_spec,
