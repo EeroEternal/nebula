@@ -259,6 +259,20 @@ curl -N http://127.0.0.1:8081/v1/responses \
   }'
 ```
 
+### 奖励模型打分（Score API，SGLang 后端）
+
+```bash
+curl -s http://127.0.0.1:8081/v1/score \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "reward-model-uid",
+    "query": "What is 2+2?",
+    "items": ["4", "5"]
+  }' | python3 -m json.tool
+```
+
+> 说明：`POST /v1/score` 受引擎能力矩阵 `score_api` 门控（`sglang` 原生支持；`vllm` 返回 `400 score_api_unsupported`，重排场景请使用 `POST /v1/rerank`）。
+
 ## 7. 端口汇总
 
 | 服务 | 默认端口 | 说明 |
@@ -284,27 +298,37 @@ curl -N http://127.0.0.1:8081/v1/responses \
 
 > **升级纪律**：先在测试环境过门禁 → 再改生产 pin。禁止跳门禁直接升。
 
-## 7.6 P1c 前缀亲和部署矩阵（真机验证过的配置）
+## 7.6 P1c 前缀亲和与 `pd_split` / 阶段感知部署矩阵
 
-按角色查表；全部可选（不设 = 现状行为，亲和不生效但零影响）：
+按角色查表；除 `pd_split` 拓扑下的 `NEBULA_APPROVED_PD_IMAGES` 外全部可选（不设 = 现状行为）：
 
-| 变量 | 设在谁 | 作用 | 真机验证值 |
+| 变量 | 设在谁 | 作用 | 默认值 / 真机验证值 |
 |------|--------|------|------------|
 | `NEBULA_ROUTER_STRATEGY` 或 `--routing-strategy` | Router | `prefix_affinity` | ✅ +74% rps 实测 |
 | `NEBULA_ROUTER_KV_EVENTS_BIND` | Router / indexd | 引擎 PUB 连过来的 SUB 端点 | `tcp://0.0.0.0:5557` |
 | `NEBULA_ROUTER_TOKENIZER_DIR` | Router | tokenizer 目录（`<dir>/<model_name>/tokenizer.json` + `tokenizer_config.json`） | ✅ chat 哈希必需 |
 | `NEBULA_KV_HASH_SEED` | Router **和** 执行面（同值！） | block-hash 种子，进引擎 `PYTHONHASHSEED` | `42`（不一致=永不命中，可见回落） |
 | `NEBULA_KV_EVENTS_ENDPOINT` | k8s-controller / node | 引擎侧注入 `--kv-events-config` 等 | Router 的 SUB 地址 |
-| `NEBULA_ROUTER_PREFIX_TTL_MS` | Router / indexd | 索引 TTL | 300000 |
+| `NEBULA_ROUTER_PREFIX_TTL_MS` | Router / indexd | 索引 TTL | `300000` |
 | `NEBULA_INDEXD_BIND` | indexd | 引擎唯一稳定端点（Batch 2） | 同 5557 语义 |
 | `NEBULA_INDEXD_SINKS` | indexd | 逗号分隔 Router sink 列表 | `tcp://host:5583,...` |
-| `NEBULA_INDEXD_SNAPSHOT_SECS` | indexd | 快照周期（Router 重启自愈） | 60 |
+| `NEBULA_INDEXD_SNAPSHOT_SECS` | indexd | 快照周期（Router 重启自愈） | `60` |
 | `NEBULA_ROUTER_KV_EVENTS_SINK_BIND` | 副本 Router | 收 indexd/对端推送 | `tcp://0.0.0.0:5583` |
 | `NEBULA_ROUTER_KV_EVENTS_PUSH_TO` | 采集 Router | HA 扇出（不用 indexd 时） | 对端 sink 列表 |
+| `NEBULA_APPROVED_PD_IMAGES` | BFF / Scheduler / Node / k8s-controller | `topology=pd_split` 允许运行的精确镜像引用白名单（逗号分隔，禁止 `:latest`） | `pd_split` 必填（如 `nebula/vllm:0.23.0-lmcache0.5.5`） |
+| `NEBULA_PD_BYPASS_TOKENS` | Router | `pd_split` 短请求直通 Decode 池的 prompt token 阈值（需 Decode 副本有新鲜 `/stats/` 且 `pending_requests == 0` 或 `<= min_prefill_pending`） | `256`（设为 `0` 关闭） |
+| `NEBULA_PD_PREFILL_SPILLOVER_PENDING` | Router | `pd_split` 冷请求在 Prefill 池全忙且某 Decode 副本有新鲜 `/stats/` 且 `pending_requests == 0` 时溢出直跑 Decode 的阈值 | `0`（默认关闭；显式设 `>0` 开启） |
+| `NEBULA_TOOL_PAUSE_TTL_MS` | Router | Agentic tool-call 暂停窗口内租户级 `(tenant_id, x-session-id)` 续接租约 TTL（毫秒） | `60000` |
 
 **运维三件套（缺一则亲和永不命中，但安全回落可见）**：引擎 `PYTHONHASHSEED` 固定 + `--prefix-caching-hash-algo sha256_cbor`（执行面设 `NEBULA_KV_EVENTS_ENDPOINT` 后自动注入）+ Router tokenizer 目录。
 
-**排障第一指标**：Router `/metrics` 的 `nebula_router_strategy_fallback_total{reason="no_signal"}`——持续增长 = 亲和没生效（查三件套）；`nebula_router_prefix_index_entries` = 索引规模。
+**排障核心指标**：
+- `nebula_router_strategy_fallback_total{reason="no_signal"}`：持续增长 = 亲和没生效（查三件套）；
+- `nebula_router_strategy_fallback_total{reason="owner_congested"}`：前缀命中的 owner 副本过载或排队过深，已触发多 owner 次优回退或负载感知回落；
+- `nebula_router_prefix_index_entries`：当前前缀索引规模；
+- `nebula_router_pd_decode_local_hit_total`：`pd_split` 命中 Decode 池本地显存（Tier-1 跳过 Prefill 与远端 KV 拉取）计数；
+- `nebula_router_pd_short_bypass_total`：`pd_split` 短请求直通空闲 Decode 副本计数；
+- `nebula_router_stage_prefill_spillover_total`：`pd_split` Prefill 池饱和时溢出至空闲 Decode 副本计数。
 
 ## 7.7 etcd 备份与恢复
 

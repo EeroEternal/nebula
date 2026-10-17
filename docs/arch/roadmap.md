@@ -269,7 +269,7 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
    | digest 白名单 | `validate_pd_split_image` + `NEBULA_APPROVED_PD_IMAGES`；空名单即禁用 pd_split |
    | 控制台 UI | `deploy-dialog.tsx`（replicas/topology/角色/共享 KV），接入 models 与 model-detail；zh/en |
    | API 路径 e2e | 真机走 BFF `/api/v2/models/{uid}/start`：拒绝原因精确、白名单生效、有效部署创建带角色 pod |
-   | 多 owner 索引 | ✅ v1.1（评审 #5 + Batch 5.2）：`OwnerMap` 多 owner 驻留 + Decode 池内本地优先 + 联合代价打分 |
+   | 多 owner 索引 | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收，见 v1.1 评审 #5 + Batch 5.2）：`OwnerMap` 多 owner 驻留 + Decode 池内本地优先 + 联合代价打分 |
 
 ### 可信性收敛批次（assessment REWORK 后插队，2026-10-12；详见 [`../dev/assessment.md`](../dev/assessment.md)）
 
@@ -292,17 +292,17 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 
 - benchmark/canary 调度到空闲副本（`/stats/` 忙闲信号 + 准入队列低优先级）；Phase 3 Selection 联动前置。
 
-### Batch 5：Workload-Aware 路由与控制面演进（基于 2026 推理趋势参照，见 [`../dev/direction.md` §11](../dev/direction.md#11-2026-llm-serving-技术趋势参照与-nebula-落点映射)）✅ 2026-10-17
+### Batch 5：Workload-Aware 路由与控制面演进（基于 2026 推理趋势参照，见 [`../dev/direction.md` §11](../dev/direction.md#11-2026-llm-serving-技术趋势参照与-nebula-落点映射)）✅ 代码与单测已合入（⏳ 待真机 A/B 验收）
 
 | # | 任务 | 参照来源 | 触点与状态 |
 |---|------|----------|------------|
-| 5.1 | **`pd_split` 短请求智能旁路（Short-Prompt Bypass）**：`prompt_tokens < NEBULA_PD_BYPASS_TOKENS`（默认 256）且 Decode 池未饱和时跳过 `/lookup` 直走 Decode 池原地计算 | `llm-d` / `Dynamo` Threshold Gating + LMCache 256-token chunk 边界 | ✅ 2026-10-17 [`crates/nebula-router/src/lib.rs`](../../crates/nebula-router/src/lib.rs) |
-| 5.2 | **多 Owner 前缀索引 + 联合代价打分（`SavedPrefill - QueueWait`）**：合并 `pd_split v1.1` 评审 #5（Decode 池内本地命中优先）与热点前缀防拥塞溢流 | `Dynamo` KV Router / `sgl-router` / `AIBrix` | ✅ 2026-10-17 [`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs), [`strategy.rs`](../../crates/nebula-router/src/strategy.rs) |
-| 5.3 | **Coding Agent `Tool-Pause` 感知会话亲和与准入保护**：识别 `finish_reason="tool_calls"` 挂起窗口（TTL ~60s），对 `role="tool"` 续接请求提供高优准入与强副本锚定 | UC Berkeley **Continuum** / **Autellix (PLAS)** | ✅ 2026-10-17 `nebula-gateway`, [`queue.rs`](../../crates/nebula-common/src/queue.rs), `nebula-router` |
-| 5.4 | **SGLang `/v1/score` L1 能力声明与前缀亲和透传**：支持单次 Prefill 候选词概率打分（配合 JEV 毫秒级路由/上下文压缩门控） | SGLang `/v1/score` + `fast-jev-compaction` | ✅ 2026-10-17 [`capability.rs`](../../crates/nebula-common/src/capability.rs), `nebula-gateway`, [`lib.rs`](../../crates/nebula-router/src/lib.rs) |
-| 5.5 | **L3 并发感知量化选型定律**：编码 `Batch=1`（4-bit +27%）到 `Batch>=16`（FP8 与 4-bit 差距 <0.2%，且无 Prefill 解包损耗）的 Roofline 拐点 | DGX Spark Qwen3.8-27B 实测对照 | ✅ 2026-10-17 [`selection.rs`](../../crates/nebula-common/src/selection.rs) |
-| 5.6 | **L2 投机采样套件（DSpark / DFlash2 + Context Lookup）参数化 + Hybrid 模型 Prefix Cache 静默禁用体检** | DSpark（比 MTP 快 46%）、DFlash2+Lookup（381 tok/s）、Beam 成套发布、`is_hybrid` 陷阱 | ✅ 2026-10-17 [`model_request.rs`](../../crates/nebula-common/src/model_request.rs), [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs), [`engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs) |
-| 5.7 | **L4 二元曲面（TTFT vs TPOT/KV 水位）驱动 `pd_split` 池配比建议**：替代失真的 Decode 期 GPU `SM_UTIL` | `Dynamo Planner` / `llm-d SLO Autoscaler` | ✅ 2026-10-17 [`slo.rs`](../../crates/nebula-common/src/slo.rs), [`capacity.rs`](../../crates/nebula-common/src/capacity.rs) |
+| 5.1 | **`pd_split` 短请求智能旁路（Short-Prompt Bypass）**：`prompt_tokens < NEBULA_PD_BYPASS_TOKENS`（默认 256）且 Decode 池有新鲜 `/stats/` 并未饱和时跳过 `/lookup` 直走 Decode 池原地计算 | `llm-d` / `Dynamo` Threshold Gating + LMCache 256-token chunk 边界 | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`crates/nebula-router/src/lib.rs`](../../crates/nebula-router/src/lib.rs) |
+| 5.2 | **多 Owner 前缀索引 + 联合代价打分（`SavedPrefill - QueueWait`）**：合并 `pd_split v1.1` 评审 #5（Decode 池内本地命中优先）与热点前缀防拥塞溢流 | `Dynamo` KV Router / `sgl-router` / `AIBrix` | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs), [`strategy.rs`](../../crates/nebula-router/src/strategy.rs) |
+| 5.3 | **Coding Agent `Tool-Pause` 感知会话亲和与准入保护**：服务端观测到 `finish_reason="tool_calls"` 后登记 `(tenant, session)` 挂起租约（默认 60s），对有效租约内的续接请求提供高优准入唤醒与强副本锚定 | UC Berkeley **Continuum** / **Autellix (PLAS)** | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） `nebula-gateway`, [`queue.rs`](../../crates/nebula-common/src/queue.rs), `nebula-router` |
+| 5.4 | **SGLang `/v1/score` L1 能力声明与前缀亲和透传**：支持单次 Prefill 候选词概率打分（vLLM 静态拒绝 `400 score_api_unsupported`，SGLang 放行并复用前缀哈希） | SGLang `/v1/score` + Prefill 门控打分 | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`capability.rs`](../../crates/nebula-common/src/capability.rs), `nebula-gateway`, [`lib.rs`](../../crates/nebula-router/src/lib.rs) |
+| 5.5 | **L3 并发感知量化选型定律**：在延迟/吞吐偏好下编码 `Batch<=4`（4-bit 带宽受限加速）到 `Batch>=16`（FP8 算力受限反超）的 Roofline 拐点，成本偏好保持原序并附解释原因 | 内部实测对照（DGX Spark / Blackwell 并发扫描） | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`selection.rs`](../../crates/nebula-common/src/selection.rs) |
+| 5.6 | **L2 投机采样套件参数化 + Hybrid 模型 Prefix Cache 静默禁用体检**：vLLM 映射合法 `draft_model`/`mtp`/`ngram`，SGLang 拒绝不支持的 `ngram`/`prompt_lookup_*`；仅在 `vllm:prefix_cache_queries_total == 0` 时产生诊断事件 | 投机采样 draft/EAGLE/MTP 工程实践、vLLM `is_hybrid` 陷阱 | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`model_request.rs`](../../crates/nebula-common/src/model_request.rs), [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs), [`engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs) |
+| 5.7 | **L4 二元曲面（TTFT vs TPOT/KV 水位）驱动 `pd_split` 池配比建议**：从 Router Prometheus 直方图解析 TPOT，区分容量建议（KV>0.85）与 SLO 违约 | `Dynamo Planner` / `llm-d SLO Autoscaler` | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`slo.rs`](../../crates/nebula-common/src/slo.rs), [`router_metrics.rs`](../../crates/nebula-control/src/router_metrics.rs), [`capacity.rs`](../../crates/nebula-common/src/capacity.rs) |
 
 ### 顺手卫生项（夹带做）
 

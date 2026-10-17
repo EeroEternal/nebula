@@ -92,7 +92,7 @@ Router 只读 endpoints；不知「池」也可选路
 
 ## `pd_split` 拓扑与角色化放置（P2c-pd 设计稿 v1.1，2026-10-12，经独立评审 REWORK 修订）
 
-> 依据：[`../dev/engines.md`](../dev/engines.md) §7（无 NIXL 共享 KV 形态已在 8×5090 实证：producer Stored 681/681 → `lm://` TCP → decoder Retrieved 512/512）。**代码未实现**；字段名即实现契约。v1.1 修订吸收独立评审（1 blocker + 5 major）：重新定位 v1 语义、补生命周期/故障验证/产物绑定/多 owner 索引/seed 契约。
+> 依据：[`../dev/engines.md`](../dev/engines.md) §7（无 NIXL 共享 KV 形态已在 8×5090 实证：producer Stored 681/681 → `lm://` TCP → decoder Retrieved 512/512）。**v1/v1.1 代码已合入（见下文各节实证与单测说明）**；字段名即实现契约。v1.1 修订吸收独立评审（1 blocker + 5 major）：重新定位 v1 语义、补生命周期/故障验证/产物绑定/多 owner 索引/seed 契约。
 
 ### v1 定位（评审 #1 修正）：角色化完整请求路由，**不是**单请求 PD
 
@@ -161,7 +161,7 @@ stage = warm → decode 池（便宜地 retrieve）
 池内选择 v1 = least_pending
 ```
 
-**实现修正（2026-10-12，rig 验证时发现）**：初版实现只看 session affinity，导致冷流量进 prefill 后被锚定、**decode 池永不可达**。正确信号是前缀索引命中——它回答的是"共享存储里有没有这个前缀"（store-level 事实），而不是"哪个 decode 副本本地持有"（review #5 的问题，仍需多 owner 索引，v1.1）。
+**实现修正（2026-10-12，rig 验证时发现）**：初版实现只看 session affinity，导致冷流量进 prefill 后被锚定、**decode 池永不可达**。正确信号是前缀索引命中——它回答的是"共享存储里有没有这个前缀"（store-level 事实），而 Decode 池内"哪个 decode 副本本地持有"（review #5 的问题）已由 v1.1 多 owner 索引 `OwnerMap` 解决（见第 194 行）。
 
 **⚠️ rig 阻断（2026-10-12，必须解决的 v1 前置）**：启用 `LMCacheConnectorV1` 后，引擎日志明确输出 **`LMCache INFO: KV events are disabled.`**（`cache_engine.py:188`）——**LMCache 接管 KV 路径后停用了 vLLM 的 kv-events 发布**。实测：569-token prompt 只产生 1 条索引条目、`prefix_hit_total=0`，两条请求都落 prefill（`prefix_lookup_total=2` 证明哈希/查表已在跑）。因此**P1c 索引在 pd_split 形态下不能充当 warm 信号**。
 
@@ -191,8 +191,8 @@ stage = warm → decode 池（便宜地 retrieve）
 **已实证的部分（不受此阻断影响）**：角色注入（prefill `kv_producer`+`SAVE_UNFULL_CHUNK` / decode `kv_both`+`RETRIEVE_LOCATIONS`，同 seed=42）、scheduler 投影、EndpointInfo.role 注册、共享存储写入与取回（prefill 副本二次请求 **Retrieved 569/569 tokens**）、stage 过滤逻辑与计数器（单测全绿）。
 
 - session affinity 的锚定域限制在 decode 池内（首次命中 prefill 不锚定 prefill）。
-- **两级局部性（v1.1 多 owner 索引，MapReduce Locality 分级）**：`PrefixIndex` 存储 `(model_uid, block_hash) → {replica_id: (last_seen_ms, generation)}` 多持有者映射（带 per-replica 墓碑与代际水位），并提供限定候选集的 `lookup_in(model, hashes, allowed_replicas)`。路由判暖先看全局（Store-local 共享 KV 命中），阶段过滤缩小到 Decode 池后再做池内 `lookup_in`（Node-local 显存命中）：若某 Decode 副本本地 GPU 显存已持有该前缀且未过载（`pending <= min_pool_pending`），优先直连该 Decode 副本（省去 TCP `lm://` Shuffle，计数 `nebula_router_pd_decode_local_hit_total`），否则再退化为池内 `least_pending` 从 `LMCacheServer` 远端拉取。
-- **冷启动单 Mapper 瓶颈溢出保护（Prefill Spillover）**：当冷请求进入 Prefill 池且所有 Prefill 副本均处于忙碌（`min_prefill_pending >= NEBULA_PD_PREFILL_SPILLOVER_PENDING`，默认 `1`），而 Decode 池中存在负载更低的空闲副本（Decode 以 `kv_both` 运行，具备完整自 prefill + 写回共享存储能力）时，自动将冷请求溢出到空闲 Decode 副本（计数 `nebula_router_stage_prefill_spillover_total`），避免宽前缀冷启动并发被单 Prefill 副本串行卡死。
+- **两级局部性（v1.1 多 owner 索引，MapReduce Locality 分级）**：`PrefixIndex` 存储 `(model_uid, block_hash) → {replica_id: (last_seen_ms, epoch, generation)}` 多持有者映射（带 per-replica 墓碑与 `(epoch, generation)` 水位），并提供限定候选集的 `lookup_in(model, hashes, allowed_replicas)`。路由判暖先看全局（Store-local 共享 KV 命中），阶段过滤缩小到 Decode 池后再做池内 `lookup_in`（Node-local 显存命中）：若某 Decode 副本本地 GPU 显存已持有该前缀且未过载（`pending <= min_pool_pending`），优先直连该 Decode 副本（省去 TCP `lm://` Shuffle，计数 `nebula_router_pd_decode_local_hit_total`），否则再退化为池内 `least_pending` 从 `LMCacheServer` 远端拉取。
+- **冷启动单 Mapper 瓶颈溢出保护（Prefill Spillover，可选开启）**：默认关闭（`NEBULA_PD_PREFILL_SPILLOVER_PENDING=0`），确保冷请求优先经 Prefill 副本（`kv_producer`）填充共享存储；当算子显式配置 `NEBULA_PD_PREFILL_SPILLOVER_PENDING >= 1` 且所有 Prefill 副本均处于高积压、而 Decode 池中存在有新鲜 `/stats/` 且负载更低的空闲副本时，允许将冷请求溢出到空闲 Decode 副本（计数 `nebula_router_stage_prefill_spillover_total`）。
 - 不引入 vLLM disagg proxy；分发协调由 nebula 承担（v1/v1.1 即本节规则）。
 
 ### 校验规则（共享控制逻辑，BFF/CLI 共用；不只覆盖 BFF——评审 #4）
