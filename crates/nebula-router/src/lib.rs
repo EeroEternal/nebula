@@ -163,8 +163,9 @@ pub struct Router {
     endpoints: DashMap<(String, u32), EndpointInfo>,
     stats: DashMap<(String, u32), EndpointStats>,
     session_affinity: DashMap<SessionKey, (String, u32)>,
-    /// Batch 5.3: bounded Tool-Pause session leases `(tenant_id, session_id) -> (model_uid, replica_id, expires_at_ms)`.
-    tool_pause_leases: DashMap<SessionKey, (String, u32, u64)>,
+    /// Batch 5.3: bounded single-use Tool-Pause session leases
+    /// `(tenant_id, session_id) -> (model_uid, replica_id, expires_at_ms, queue_admitted)`.
+    tool_pause_leases: DashMap<SessionKey, (String, u32, u64, bool)>,
     tool_pause_ttl_ms: u64,
     tool_pause_marked_total: AtomicU64,
     tool_continuation_hit_total: AtomicU64,
@@ -476,17 +477,23 @@ impl Router {
         if self.session_affinity.len() >= SESSION_AFFINITY_MAX_ENTRIES
             && !self.session_affinity.contains_key(&key)
         {
-            if let Some(evict_key) = self.session_affinity.iter().next().map(|e| e.key().clone()) {
+            // Bind `evict_key` in a standalone `let` statement so the temporary
+            // `DashMap::iter()` guard is dropped BEFORE `remove(&evict_key)`
+            // acquires a write lock on the same shard (Rust 2021 temporary
+            // lifetime rule inside `if let` scrutinees).
+            let evict_key = self.session_affinity.iter().next().map(|e| e.key().clone());
+            if let Some(evict_key) = evict_key {
                 self.session_affinity.remove(&evict_key);
             }
         }
         self.session_affinity.insert(key, (model_uid, replica_id));
     }
 
-    /// Record a Coding Agent `Tool-Pause` session lease (`finish_reason == "tool_calls"`,
-    /// Batch 5.3) scoped to `(tenant_id, session_id)` so when the same tenant's
-    /// session returns within the lease window (`NEBULA_TOOL_PAUSE_TTL_MS`,
-    /// default 60s), it gets priority queue admission and strong replica anchoring.
+    /// Record a single-use Coding Agent `Tool-Pause` session lease
+    /// (`finish_reason == "tool_calls"`, Batch 5.3) scoped to `(tenant_id, session_id)`
+    /// so when the same tenant's session returns within the lease window
+    /// (`NEBULA_TOOL_PAUSE_TTL_MS`, default 60s), it gets one priority queue
+    /// admission and strong replica anchoring before the lease is consumed.
     pub fn mark_tool_pause(&self, session_id: &str, model_uid: &str, replica_id: u32) {
         self.mark_tool_pause_for_tenant_at(None, session_id, model_uid, replica_id, now_ms());
     }
@@ -527,22 +534,25 @@ impl Router {
         if self.tool_pause_leases.len() >= TOOL_PAUSE_MAX_ENTRIES
             && !self.tool_pause_leases.contains_key(&key)
         {
-            self.tool_pause_leases.retain(|_, (_, _, exp)| *exp > now);
+            self.tool_pause_leases
+                .retain(|_, (_, _, exp, _)| *exp > now);
             while self.tool_pause_leases.len() >= TOOL_PAUSE_MAX_ENTRIES {
-                let Some(oldest_key) = self
+                let oldest_key = self
                     .tool_pause_leases
                     .iter()
                     .min_by_key(|e| e.value().2)
-                    .map(|e| e.key().clone())
-                else {
+                    .map(|e| e.key().clone());
+                let Some(oldest_key) = oldest_key else {
                     break;
                 };
                 self.tool_pause_leases.remove(&oldest_key);
             }
         }
         let expires_at = now.saturating_add(self.tool_pause_ttl_ms);
-        self.tool_pause_leases
-            .insert(key.clone(), (model_uid.to_string(), replica_id, expires_at));
+        self.tool_pause_leases.insert(
+            key.clone(),
+            (model_uid.to_string(), replica_id, expires_at, false),
+        );
         self.insert_session_affinity(key, model_uid.to_string(), replica_id);
         self.tool_pause_marked_total.fetch_add(1, Ordering::Relaxed);
     }
@@ -576,17 +586,18 @@ impl Router {
         }
         let key = session_key(tenant_id, session_id);
         self.tool_pause_leases
-            .remove_if(&key, |_, (_, _, exp)| *exp <= now);
+            .remove_if(&key, |_, (_, _, exp, _)| *exp <= now);
         self.tool_pause_leases
             .get(&key)
             .map(|entry| entry.value().2 > now)
             .unwrap_or(false)
     }
 
-    /// True when the request holds a valid server-recorded `Tool-Pause` session
-    /// lease for `(tenant_id, session_id)`. Client-supplied request bodies
-    /// (`role == "tool"`) are never trusted on their own to prevent privilege
-    /// spoofing and cross-tenant session hijacking.
+    /// Atomically claim the single-use queue-admission continuation privilege
+    /// for `(tenant_id, session_id)`. Returns `true` at most once per
+    /// server-recorded `Tool-Pause` lease (`finish_reason == "tool_calls"`).
+    /// Client-supplied request bodies (`role == "tool"`) are never trusted on
+    /// their own to prevent privilege spoofing and cross-tenant session hijacking.
     pub fn is_tool_continuation(&self, session_id: Option<&str>) -> bool {
         self.is_tool_continuation_for_tenant(None, session_id)
     }
@@ -596,9 +607,20 @@ impl Router {
         tenant_id: Option<&str>,
         session_id: Option<&str>,
     ) -> bool {
-        session_id
-            .map(|sid| self.has_active_tool_pause_for_tenant(tenant_id, sid))
-            .unwrap_or(false)
+        let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return false;
+        };
+        let now = now_ms();
+        let key = session_key(tenant_id, sid);
+        self.tool_pause_leases
+            .remove_if(&key, |_, (_, _, exp, _)| *exp <= now);
+        if let Some(mut entry) = self.tool_pause_leases.get_mut(&key) {
+            if entry.value().2 > now && !entry.value().3 {
+                entry.value_mut().3 = true;
+                return true;
+            }
+        }
+        false
     }
 
     /// Ask the LMCache controller whether the shared store holds this
@@ -1080,8 +1102,13 @@ impl Router {
         // warm turns must evaluate stage routing to land on a Decode replica).
         if let Some(session_id) = ctx.session_id.as_deref() {
             let key = session_key(ctx.tenant_id.as_deref(), session_id);
-            let tool_pause_active =
-                self.has_active_tool_pause_for_tenant_at(ctx.tenant_id.as_deref(), session_id, now);
+            let _ = self
+                .tool_pause_leases
+                .remove_if(&key, |_, (_, _, exp, _)| *exp <= now);
+            let tool_pause_consumed = self
+                .tool_pause_leases
+                .remove_if(&key, |_, (_, _, exp, _)| *exp > now)
+                .is_some();
             if let Some(aff) = self.session_affinity.get(&key) {
                 let (aff_model_uid, aff_replica_id) = aff.value();
                 if aff_model_uid == model_uid {
@@ -1101,7 +1128,7 @@ impl Router {
                             && !self.is_endpoint_circuit_open(&ep.model_uid, ep.replica_id)
                             && ep.role != ReplicaRole::Prefill
                         {
-                            if tool_pause_active {
+                            if tool_pause_consumed {
                                 self.tool_continuation_hit_total
                                     .fetch_add(1, Ordering::Relaxed);
                             }
@@ -1434,7 +1461,11 @@ impl Router {
             self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
         };
 
-        if is_pd_split && pd_warm_stage && scoped_prefix_owner == Some(selected.replica_id) {
+        if is_pd_split
+            && pd_warm_stage
+            && selected.role == ReplicaRole::Decode
+            && scoped_prefix_owner == Some(selected.replica_id)
+        {
             self.pd_decode_local_hit_total
                 .fetch_add(1, Ordering::Relaxed);
         }
@@ -2303,6 +2334,54 @@ mod plan_version_tests {
     }
 
     #[test]
+    fn session_affinity_eviction_does_not_deadlock_over_max_entries() {
+        let router = Router::new();
+        router.upsert_endpoint(ready_ep("m1", 0, 1));
+        for i in 0..=SESSION_AFFINITY_MAX_ENTRIES {
+            let sid = format!("sess-{i}");
+            let ep = router
+                .route(&ctx_with_session(Some(&sid)), "m1", None, false)
+                .unwrap();
+            assert_eq!(ep.replica_id, 0);
+        }
+        assert_eq!(router.session_affinity.len(), SESSION_AFFINITY_MAX_ENTRIES);
+    }
+
+    #[test]
+    fn pd_split_empty_decode_pool_fallback_does_not_count_decode_local_hit() {
+        let router = Router::new();
+        // Only a Prefill replica is Ready; Decode pool is empty.
+        router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
+        let h: [u8; 32] = [0x99; 32];
+        router.prefix_index().apply(
+            "m1",
+            0,
+            &[kv_events::KvEvent::Stored {
+                block_hashes: vec![h.to_vec()],
+                medium: None,
+            }],
+            1,
+        );
+
+        let ep = router
+            .route(
+                &ctx_with_session(None),
+                "m1",
+                Some(std::slice::from_ref(&h)),
+                true,
+            )
+            .unwrap();
+        assert_eq!(ep.replica_id, 0);
+        assert_eq!(ep.role, ReplicaRole::Prefill);
+        assert_eq!(router.stage_fallback_total("decode"), 1);
+        assert_eq!(
+            router.pd_decode_local_hit_total(),
+            0,
+            "falling back to a Prefill replica when Decode pool is empty must not count as a Decode local hit"
+        );
+    }
+
+    #[test]
     fn tool_pause_lease_marks_and_isolates_by_tenant_without_body_spoofing() {
         let router = Router::new();
         router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
@@ -2320,16 +2399,31 @@ mod plan_version_tests {
         // Server records a tool-pause lease for (tenant-a, agent-sess-1) on Decode replica 2.
         router.mark_tool_pause_for_tenant_at(Some("tenant-a"), "agent-sess-1", "m1", 2, now_ms());
         assert_eq!(router.tool_pause_marked_total(), 1);
-        assert!(router.is_tool_continuation_for_tenant(Some("tenant-a"), Some("agent-sess-1")));
         // Tenant B reusing the same x-session-id does NOT inherit Tenant A's
         // continuation privilege or replica affinity.
         assert!(!router.is_tool_continuation_for_tenant(Some("tenant-b"), Some("agent-sess-1")));
         assert!(!router.is_tool_continuation_for_tenant(None, Some("agent-sess-1")));
 
+        // Tenant A claims queue continuation priority once; a second claim
+        // without a new `tool_calls` response is rejected (single-use lease).
+        assert!(router.is_tool_continuation_for_tenant(Some("tenant-a"), Some("agent-sess-1")));
+        assert!(!router.is_tool_continuation_for_tenant(Some("tenant-a"), Some("agent-sess-1")));
+
         let mut ctx_a = ctx_with_session(Some("agent-sess-1"));
         ctx_a.tenant_id = Some("tenant-a".into());
         let ep_a = router.route(&ctx_a, "m1", None, false).unwrap();
         assert_eq!(ep_a.replica_id, 2);
+        assert_eq!(router.tool_continuation_hit_total(), 1);
+        assert!(
+            !router.has_active_tool_pause_for_tenant(Some("tenant-a"), "agent-sess-1"),
+            "lease is invalidated after being used once"
+        );
+
+        // Subsequent request on the same session still enjoys normal session
+        // affinity on Decode replica 2, but does NOT count as a second tool
+        // continuation hit unless a new tool_calls response marks a fresh lease.
+        let ep_a2 = router.route(&ctx_a, "m1", None, false).unwrap();
+        assert_eq!(ep_a2.replica_id, 2);
         assert_eq!(router.tool_continuation_hit_total(), 1);
 
         let mut ctx_b = ctx_with_session(Some("agent-sess-1"));

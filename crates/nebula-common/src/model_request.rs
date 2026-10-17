@@ -67,26 +67,25 @@ pub enum SpeculativeMethod {
 
 impl SpeculativeMethod {
     /// Known vLLM `--speculative-config.method` values (`"mtp"`, `"draft_model"`, `"ngram"`).
-    /// Draft-model families (`DraftModel`, `Dspark`, `Dflash2`) map to `"draft_model"` in vLLM
-    /// (paired with `"model": "<draft_model>"`), never raw `"dspark"`/`"dflash2"` which vLLM
-    /// rejects at startup.
-    pub fn as_vllm_method(&self) -> &'static str {
+    /// Note: `Dspark` and `Dflash2` are rejected at [`crate::capability::validate_model_config`]
+    /// admission until their exact CLI flags are verified on live engines.
+    pub fn as_vllm_method(&self) -> Option<&'static str> {
         match self {
-            Self::Mtp => "mtp",
-            Self::DraftModel | Self::Dspark | Self::Dflash2 => "draft_model",
-            Self::Ngram => "ngram",
+            Self::Mtp => Some("mtp"),
+            Self::DraftModel => Some("draft_model"),
+            Self::Ngram => Some("ngram"),
+            Self::Dspark | Self::Dflash2 => None,
         }
     }
 
-    /// Known SGLang `--speculative-algorithm` values (`"NEXTN"` for MTP, `"STANDALONE"` /
-    /// `"EAGLE"` for draft-model families). `Ngram` is unsupported on SGLang CLI and
-    /// rejected by [`crate::capability::validate_model_config`].
+    /// Known SGLang `--speculative-algorithm` values (`"NEXTN"` for MTP, `"STANDALONE"` for
+    /// `DraftModel`). `Ngram`, `Dspark`, and `Dflash2` are rejected by
+    /// [`crate::capability::validate_model_config`].
     pub fn as_sglang_algorithm(&self) -> Option<&'static str> {
         match self {
             Self::Mtp => Some("NEXTN"),
-            Self::DraftModel | Self::Dspark => Some("STANDALONE"),
-            Self::Dflash2 => Some("EAGLE"),
-            Self::Ngram => None,
+            Self::DraftModel => Some("STANDALONE"),
+            Self::Ngram | Self::Dspark | Self::Dflash2 => None,
         }
     }
 }

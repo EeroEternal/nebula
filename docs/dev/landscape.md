@@ -22,7 +22,7 @@
 |---|---|---|
 | `kv-router` | `nebula-router` + [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) | ✅ 已落地（P1c + Batch 2 全局索引扇出） |
 | `kv-hashing` | [`nebula_router::kv_hash`](../../crates/nebula-router/src/kv_hash.rs) + [`prompt_hash`](../../crates/nebula-router/src/prompt_hash.rs) | ✅ 已落地（`sha256_cbor` + `chat_template` token 级对齐） |
-| `kvbm-*`（KV Block Manager） | `lmcache_server` + `lmcache_controller`（由 [`nebula-stack.sh`](../../scripts/nebula-stack.sh) 编排，Router [`controller_warm`](../../crates/nebula-router/src/lib.rs#L614) 查询） | ✅ 已落地 `pd_split` v1（借力外部 S3 组件，KV 字节旁路 Nebula） |
+| `kvbm-*`（KV Block Manager） | `lmcache_server` + `lmcache_controller`（由 [`nebula-stack.sh`](../../scripts/nebula-stack.sh) 编排，Router [`controller_warm`](../../crates/nebula-router/src/lib.rs#L635) 查询） | ✅ 已落地 `pd_split` v1（借力外部 S3 组件，KV 字节旁路 Nebula） |
 | `router-plugins` | [`RoutingStrategy`](../../crates/nebula-router/src/strategy.rs) trait | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收）：多 owner 联合代价打分（[`direction.md` §11.2](direction.md#2-多-owner-前缀索引--节省-prefill-vs-排队等待联合代价打分joint-cost-function)） |
 | `runtime` / `sidecar` | `nebula-scheduler` / `nebula-node` / `nebula-k8s-controller` | ✅ 已落地（含 `ReplicaRole` 注入与配置指纹重建） |
 | `rl` / `gpu_memory_service` / `memory` | （无） | ⏸ 非当前范围 |

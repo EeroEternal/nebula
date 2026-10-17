@@ -91,7 +91,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
    - **做法**：独立二进制 [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) 作为引擎 KV 事件的唯一稳定汇聚点，维护权威索引并通过“原始帧增量转发 + 周期快照（`!reset` / `!snapshot`）”扇出给多个 Router / 嵌入式 Gateway。
    - **收益**：Router 热路径 100% 查本地内存（零外部 RPC），重启可在单个快照周期内自愈，indexd 挂掉只退化为本地存量，不阻塞推理。
 3. **`pd_split` v1：基于共享 KV 的角色化放置与路由（见 [`../arch/pool.md` §pd_split](../arch/pool.md#pd_split-拓扑与角色化放置p2c-pd-设计稿-v112026-10-12经独立评审-rework-修订)、[`engines.md` §7](engines.md#7-pd-分离传输选型与引擎版本钉死batch-3-第一步2026-10-11)）**
-   - **做法**：不绑 NVIDIA 专属的 NIXL / `p2p_nccl`，选型硬件无关的 **LMCache（`lm://` 纯 TCP 共享 KV 存储 + `lmcache_controller`）**。副本按角色划分为 `prefill`（`kv_producer`，负责算冷前缀并写入共享存储）和 `decode`（`kv_both`，命中暖前缀直接从共享存储 Retrieve）。Router 通过查询 controller `/lookup` 判断冷暖（[`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L614)）：**冷流量进 Prefill 池生产 KV，暖流量进 Decode 池消费 KV**。
+   - **做法**：不绑 NVIDIA 专属的 NIXL / `p2p_nccl`，选型硬件无关的 **LMCache（`lm://` 纯 TCP 共享 KV 存储 + `lmcache_controller`）**。副本按角色划分为 `prefill`（`kv_producer`，负责算冷前缀并写入共享存储）和 `decode`（`kv_both`，命中暖前缀直接从共享存储 Retrieve）。Router 通过查询 controller `/lookup` 判断冷暖（[`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L635)）：**冷流量进 Prefill 池生产 KV，暖流量进 Decode 池消费 KV**。
    - **收益**：消除了重度冷 Prefill 对稳态请求尾延迟的阻塞，暖态下客户端 **TTFT p99 降低 21%、e2e p99 降低 18%**。
 
 ---
@@ -238,8 +238,8 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
 - **Nebula 现状与对应代码触点**：
   - **触点**：Gateway 流式/非流式响应解析（[`crates/nebula-gateway/src/proxy_common.rs`](../../crates/nebula-gateway/src/proxy_common.rs)）、有界公平准入队列（[`crates/nebula-common/src/queue.rs`](../../crates/nebula-common/src/queue.rs)）、Router 会话亲和（[`crates/nebula-router/src/lib.rs`](../../crates/nebula-router/src/lib.rs)）。
   - **设计（Zone C 纯网关/路由层实现，零引擎侵入，防客户端伪造）**：
-    1. **服务端租户隔离 Tool-Pause 租约**：仅当 Gateway / Router 在上游响应中真实观测到 `finish_reason == "tool_calls"`（或流式 `delta.tool_calls`）时，才以 `(tenant_id, session_id)` 为键记录服务端 `ToolPaused` 租约（默认 TTL `NEBULA_TOOL_PAUSE_TTL_MS=60000`，容量上限 `4096`）；**绝不信任客户端单方面在请求体中构造的 `role: "tool"` 字段**，杜绝跨租户借用或客户端伪造提权；
-    2. **续接请求准入优先与副本锚定**：当同一 `(tenant_id, session_id)` 在有效租约窗口内发起续接请求时，在 [`EngineQueue::acquire_with_priority`（`QueueMode::Fair`）](../../crates/nebula-common/src/queue.rs) 中赋予优先唤醒队列（`priority_waiters`）、+25% 突发水位与 2× 等待预算，并在 Router 中强锚定原持有副本。
+    1. **服务端租户隔离单次 Tool-Pause 租约**：仅当 Gateway / Router 在上游响应中真实观测到 `finish_reason == "tool_calls"`（或流式 `delta.tool_calls`）时，才以 `(tenant_id, session_id)` 为键记录服务端 `ToolPaused` 租约（默认 TTL `NEBULA_TOOL_PAUSE_TTL_MS=60000`，容量上限 `4096`，且每条租约仅允许消费一次）；**绝不信任客户端单方面在请求体中构造的 `role: "tool"` 字段**，杜绝跨租户借用或客户端伪造提权；
+    2. **续接请求有界准入优先与副本锚定**：当同一 `(tenant_id, session_id)` 在有效租约窗口内发起单次续接请求时，在 [`EngineQueue::acquire_with_priority`（`QueueMode::Fair`）](../../crates/nebula-common/src/queue.rs) 中赋予优先唤醒队列（`priority_waiters`，连续优先交接上限 `MAX_CONSECUTIVE_PRIORITY_HANDOFFS=4`，每满 4 次让出一个槽位给普通冷请求防饿死）、+25% 突发水位与 2× 等待预算，并在 Router 中强锚定原持有副本。
 
 #### 4. SGLang `/v1/score` 极速打分端点的 L1 能力声明与前缀亲和透传
 
@@ -259,7 +259,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
 
 #### 1. L3 智能选型定律：4-bit vs FP8 的并发拐点（Batch Size Roofline 衰减定律）
 
-- **内部实测对照规律（DGX Spark，27B Dense 模型并发扫描笔记）**：
+- **未经验证的外部数据（外部公开参考数据，未经本仓真机复测，待真机 A/B 校准）**：
 
   | 并发请求数 (Batch Size) | 4-bit 相比原生 FP8 的解码提速 | 物理瓶颈状态（Roofline 模型） |
   |---|---|---|
@@ -280,7 +280,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
   1. **廉价草稿模型与真指标 $\tau$**：相比大词表串行投影，轻量独立草稿模型或 EAGLE/MTP 树验证能以更低草稿开销换取更高的**单次前向平均接受 Token 数 $\tau = 1 + \text{accepted}/\text{drafts}$**；
   2. **Hybrid Attention 模型的 Prefix Caching 静默关闭陷阱**：部分混合注意力模型在 vLLM 中若未显式声明 `--enable-prefix-caching`，可能出现请求正常服务但 `vllm:prefix_cache_queries_total` 恒为 0 的静默未启用状态。
 - **Nebula L2/L4 对应触点**：
-  - [`crates/nebula-common/src/model_request.rs`](../../crates/nebula-common/src/model_request.rs) / [`crates/nebula-common/src/engine_args.rs`](../../crates/nebula-common/src/engine_args.rs) / [`crates/nebula-common/src/capability.rs`](../../crates/nebula-common/src/capability.rs)：在 `ModelConfig` 中支持声明式 `speculative_config` 与显式 `enable_prefix_caching`。vLLM 下将伴生草稿模型映射为标准 `"method": "draft_model"` + `"model"` JSON；SGLang 下仅下发受支持的 `--speculative-algorithm`（`NEXTN` / `STANDALONE` / `EAGLE`），并在 [`validate_model_config`](../../crates/nebula-common/src/capability.rs) 中显式拒绝 SGLang 不支持的 `ngram` 与 `prompt_lookup_*` 参数；
+  - [`crates/nebula-common/src/model_request.rs`](../../crates/nebula-common/src/model_request.rs) / [`crates/nebula-common/src/engine_args.rs`](../../crates/nebula-common/src/engine_args.rs) / [`crates/nebula-common/src/capability.rs`](../../crates/nebula-common/src/capability.rs)：在 `ModelConfig` 中支持声明式 `speculative_config` 与显式 `enable_prefix_caching`。vLLM 下支持 `"mtp"`、`"draft_model"`（搭配 `"model"`）与 `"ngram"`（搭配 `prompt_lookup_max` / `prompt_lookup_min`）；SGLang 下仅下发受支持的 `--speculative-algorithm`（`NEXTN` / `STANDALONE`）；在 [`validate_model_config`](../../crates/nebula-common/src/capability.rs) 中显式拒绝尚未经真机核实的 `dspark` / `dflash2`、拒绝非 `ngram` 方法下的 `prompt_lookup_*` 参数，并拒绝 SGLang 不支持的 `ngram`；
   - [`crates/nebula-common/src/engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs) + [`compat_slo.rs`](../../crates/nebula-bff/src/compat_slo.rs)：解析引擎暴露的 $\tau$，并在 vLLM 模型期望开启前缀缓存（综合检查 `ModelSpec.config` 与 `ModelDeployment.config_overrides`）、存在活跃流量且引擎明确上报 `vllm:prefix_cache_queries_total == 0` 时通过 `diagnose_hybrid_prefix_cache` 生成 `DiagnosticEvent`（对于不暴露该计数器的引擎如 SGLang 绝不误报）。
 
 #### 3. L4 SLO 闭环：以 `ISL/OSL + TTFT/TPOT` 二元曲面指导 `pd_split` 弹性配比

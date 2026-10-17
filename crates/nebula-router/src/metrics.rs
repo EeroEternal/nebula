@@ -99,6 +99,8 @@ pub struct Metrics {
     pub e2e_latency: DashMap<String, Histogram>,
     /// Per-model TTFT histogram (seconds) — only for SSE streaming responses.
     pub ttft: DashMap<String, Histogram>,
+    /// Per-model TPOT (time per output token, seconds) histogram — SSE streaming responses.
+    pub tpot: DashMap<String, Histogram>,
     /// Per-model request counters.
     pub model_counters: DashMap<String, ModelCounter>,
 }
@@ -113,6 +115,13 @@ impl Metrics {
 
     pub fn observe_ttft(&self, model_uid: &str, seconds: f64) {
         self.ttft
+            .entry(model_uid.to_string())
+            .or_insert_with(|| Histogram::new(HISTOGRAM_BUCKETS))
+            .observe(seconds);
+    }
+
+    pub fn observe_tpot(&self, model_uid: &str, seconds: f64) {
+        self.tpot
             .entry(model_uid.to_string())
             .or_insert_with(|| Histogram::new(HISTOGRAM_BUCKETS))
             .observe(seconds);
@@ -417,6 +426,16 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
             &entry
                 .value()
                 .format_prometheus("nebula_route_ttft_seconds", entry.key()),
+        );
+    }
+
+    // TPOT histograms
+    body.push_str("# HELP nebula_route_tpot_seconds Time per output token (streaming only).\n# TYPE nebula_route_tpot_seconds histogram\n");
+    for entry in st.metrics.tpot.iter() {
+        body.push_str(
+            &entry
+                .value()
+                .format_prometheus("nebula_route_tpot_seconds", entry.key()),
         );
     }
 

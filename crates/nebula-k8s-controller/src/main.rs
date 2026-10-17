@@ -42,14 +42,23 @@ async fn main() -> anyhow::Result<()> {
     let store = Arc::new(EtcdMetaStore::connect(std::slice::from_ref(&args.etcd_endpoint)).await?);
     let namespace = args.namespace.clone();
     let gpu_node = args.gpu_node.clone();
+    let metrics = Arc::new(ControllerMetrics::default());
 
     // 1. Reconcile loop
     loop {
-        if let Err(e) = reconcile_once(&store, &namespace, &gpu_node).await {
+        if let Err(e) = reconcile_once(&store, &namespace, &gpu_node, &metrics).await {
             tracing::warn!(error=%e, "reconcile loop warning");
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
+}
+
+#[derive(Debug, Default)]
+pub struct ControllerMetrics {
+    pub deployment_parse_errors_total: std::sync::atomic::AtomicU64,
+    pub spec_load_errors_total: std::sync::atomic::AtomicU64,
+    pub model_reconcile_errors_total: std::sync::atomic::AtomicU64,
+    pub replica_reconcile_errors_total: std::sync::atomic::AtomicU64,
 }
 
 async fn load_model_spec(
@@ -66,14 +75,46 @@ async fn load_model_spec(
     }
 }
 
+/// Renew existing `/endpoints/{model_uid}/{replica_id}` (and `/stats/`) TTLs
+/// without reconciling or recreating Pods when `/models/{model_uid}/spec`
+/// fails to load, preventing already-healthy Pods from dropping out of Router.
+async fn refresh_existing_model_endpoints(store: &dyn MetaStore, dep: &ModelDeployment) {
+    if dep.desired_state != DesiredState::Running {
+        return;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let replicas = dep.replicas.max(1);
+    for replica_id in 0..replicas {
+        let ep_key = format!("/endpoints/{}/{replica_id}", dep.model_uid);
+        if let Ok(Some((raw, _))) = store.get(&ep_key).await {
+            let refreshed = if let Ok(mut ep) = serde_json::from_slice::<EndpointInfo>(&raw) {
+                ep.last_heartbeat_ms = now_ms;
+                serde_json::to_vec(&ep).unwrap_or(raw)
+            } else {
+                raw
+            };
+            let _ = store.put(&ep_key, refreshed, Some(15000)).await;
+        }
+        let stats_key = format!("/stats/{}/{replica_id}", dep.model_uid);
+        if let Ok(Some((raw, _))) = store.get(&stats_key).await {
+            let _ = store.put(&stats_key, raw, Some(15000)).await;
+        }
+    }
+}
+
 async fn reconcile_deployments_with<F, Fut>(
     store: &dyn MetaStore,
+    metrics: &ControllerMetrics,
     mut step: F,
 ) -> anyhow::Result<()>
 where
     F: FnMut(ModelDeployment, Option<ModelSpec>) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<()>>,
 {
+    use std::sync::atomic::Ordering;
     let deps = store.list_prefix("/deployments/").await?;
 
     for (_k, v, _rev) in deps {
@@ -83,6 +124,9 @@ where
                 // Never skip silently: an unparseable deployment means this
                 // agent manages nothing for that model (see the pd_split
                 // snake_case wire-format incident, 2026-10-12).
+                metrics
+                    .deployment_parse_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(key = %_k, error = %e, "deployment spec unparseable; skipping");
                 continue;
             }
@@ -94,16 +138,25 @@ where
             Err(e) => {
                 // Never fall back to spec=None on store/parse errors: that would
                 // change config_fingerprint and delete healthy running pods.
+                // Instead, renew existing endpoint TTLs so healthy pods stay in
+                // routing while skipping Pod reconciliation this tick.
+                metrics
+                    .spec_load_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     model_uid = %model_uid,
                     error = %e,
-                    "failed to load model spec; skipping model this reconcile tick"
+                    "failed to load model spec; refreshing existing endpoints without reconciling pods"
                 );
+                refresh_existing_model_endpoints(store, &dep).await;
                 continue;
             }
         };
 
         if let Err(e) = step(dep, spec).await {
+            metrics
+                .model_reconcile_errors_total
+                .fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 model_uid = %model_uid,
                 error = %e,
@@ -119,16 +172,26 @@ async fn reconcile_once(
     store: &Arc<EtcdMetaStore>,
     namespace: &str,
     gpu_node: &str,
+    metrics: &Arc<ControllerMetrics>,
 ) -> anyhow::Result<()> {
-    reconcile_deployments_with(store.as_ref(), |dep, spec| {
+    let metrics_for_step = Arc::clone(metrics);
+    reconcile_deployments_with(store.as_ref(), metrics.as_ref(), |dep, spec| {
         let store = Arc::clone(store);
         let namespace = namespace.to_string();
         let gpu_node = gpu_node.to_string();
+        let metrics = Arc::clone(&metrics_for_step);
         async move {
             match dep.desired_state {
                 DesiredState::Running => {
-                    ensure_model_running(&store, &namespace, &gpu_node, &dep, spec.as_ref())
-                        .await?;
+                    ensure_model_running(
+                        &store,
+                        &namespace,
+                        &gpu_node,
+                        &dep,
+                        spec.as_ref(),
+                        &metrics,
+                    )
+                    .await?;
                 }
                 DesiredState::Stopped => {
                     ensure_model_stopped(&store, &namespace, &dep).await?;
@@ -146,6 +209,7 @@ async fn ensure_model_running(
     gpu_node: &str,
     dep: &ModelDeployment,
     spec: Option<&ModelSpec>,
+    metrics: &ControllerMetrics,
 ) -> anyhow::Result<()> {
     let replicas = dep.replicas.max(1);
     for replica_id in 0..replicas {
@@ -156,6 +220,9 @@ async fn ensure_model_running(
         if let Err(e) =
             ensure_replica_running(store, namespace, gpu_node, dep, spec, replica_id).await
         {
+            metrics
+                .replica_reconcile_errors_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 model_uid = %dep.model_uid,
                 replica_id,
@@ -928,7 +995,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Corrupt /models/b-corrupt-spec/spec: must NOT fall back to spec=None
+        // Corrupt /models/b-corrupt-spec/spec: must NOT fall back to spec=None,
+        // and must renew existing /endpoints/b-corrupt-spec/0 heartbeat.
         store
             .put(
                 "/models/b-corrupt-spec/spec",
@@ -937,10 +1005,34 @@ mod tests {
             )
             .await
             .unwrap();
+        let existing_ep = EndpointInfo {
+            model_uid: "b-corrupt-spec".into(),
+            replica_id: 0,
+            plan_version: 1,
+            node_id: "node-1".into(),
+            endpoint_kind: EndpointKind::NativeHttp,
+            api_flavor: "openai".into(),
+            status: EndpointStatus::Ready,
+            last_heartbeat_ms: 42,
+            status_detail: None,
+            grpc_target: None,
+            base_url: Some("http://127.0.0.1:43537".into()),
+            engine_type: Some("vllm".into()),
+            role: nebula_common::ReplicaRole::Mixed,
+        };
+        store
+            .put(
+                "/endpoints/b-corrupt-spec/0",
+                serde_json::to_vec(&existing_ep).unwrap(),
+                Some(15000),
+            )
+            .await
+            .unwrap();
 
+        let metrics = ControllerMetrics::default();
         let visited = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let visited_clone = std::sync::Arc::clone(&visited);
-        reconcile_deployments_with(&store, move |dep, _spec| {
+        reconcile_deployments_with(&store, &metrics, move |dep, _spec| {
             let visited = std::sync::Arc::clone(&visited_clone);
             async move {
                 visited.lock().unwrap().push(dep.model_uid.clone());
@@ -955,11 +1047,33 @@ mod tests {
 
         let visited = visited.lock().unwrap().clone();
         // Model A failed with an error, Model B had a corrupted spec and was skipped
-        // before running `step` (preventing a bogus spec=None fingerprint), and
-        // Model C still ran to completion in the same reconcile tick.
+        // before running `step` (preventing a bogus spec=None fingerprint) while its
+        // existing endpoint was refreshed, and Model C still ran to completion.
         assert_eq!(
             visited,
             vec!["a-broken-pd".to_string(), "c-healthy".to_string()]
+        );
+        assert_eq!(
+            metrics
+                .spec_load_errors_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .model_reconcile_errors_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        let (ep_raw, _) = store
+            .get("/endpoints/b-corrupt-spec/0")
+            .await
+            .unwrap()
+            .expect("existing endpoint kept alive");
+        let refreshed_ep: EndpointInfo = serde_json::from_slice(&ep_raw).unwrap();
+        assert!(
+            refreshed_ep.last_heartbeat_ms > 42,
+            "existing endpoint heartbeat must be refreshed when spec load fails"
         );
     }
 }

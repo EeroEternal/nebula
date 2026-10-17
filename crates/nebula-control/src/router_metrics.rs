@@ -162,20 +162,19 @@ pub fn evaluate_slo_from_router_metrics_with_pools(
             None
         }
     };
-    let tpot_from_metrics = [
-        "nebula_route_tpot_seconds",
-        "nebula_router_tpot_seconds",
-        "nebula_route_itl_seconds",
-    ]
-    .into_iter()
-    .find_map(|metric| {
-        let s = parse_histogram_quantile_filtered(metrics_text, metric, 0.95, model);
+    let tpot_from_metrics = {
+        let s = parse_histogram_quantile_filtered(
+            metrics_text,
+            "nebula_route_tpot_seconds",
+            0.95,
+            model,
+        );
         if s > 0.0 {
             Some(normalize_zero(s * 1000.0))
         } else {
             None
         }
-    });
+    };
     let mut effective_pool_telemetry = pool_telemetry.clone();
     if effective_pool_telemetry.tpot_p95_ms.is_none() {
         effective_pool_telemetry.tpot_p95_ms = tpot_from_metrics;

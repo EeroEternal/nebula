@@ -315,10 +315,10 @@ curl -s http://127.0.0.1:8081/v1/score \
 | `NEBULA_INDEXD_SNAPSHOT_SECS` | indexd | 快照周期（Router 重启自愈） | `60` |
 | `NEBULA_ROUTER_KV_EVENTS_SINK_BIND` | 副本 Router | 收 indexd/对端推送 | `tcp://0.0.0.0:5583` |
 | `NEBULA_ROUTER_KV_EVENTS_PUSH_TO` | 采集 Router | HA 扇出（不用 indexd 时） | 对端 sink 列表 |
-| `NEBULA_APPROVED_PD_IMAGES` | BFF / Scheduler / Node / k8s-controller | `topology=pd_split` 允许运行的精确镜像引用白名单（逗号分隔，禁止 `:latest`） | `pd_split` 必填（如 `nebula/vllm:0.23.0-lmcache0.5.5`） |
+| `NEBULA_APPROVED_PD_IMAGES` | BFF / CLI / Scheduler / k8s-controller | `topology=pd_split` 允许运行的精确镜像字符串白名单（逗号分隔精确匹配，建议仅填入经过门禁的固定版本/digest 镜像而非浮动 tag） | `pd_split` 必填（如 `nebula/vllm:0.23.0-lmcache0.5.5`） |
 | `NEBULA_PD_BYPASS_TOKENS` | Router | `pd_split` 短请求直通 Decode 池的 prompt token 阈值（需 Decode 副本有新鲜 `/stats/` 且 `pending_requests == 0` 或 `<= min_prefill_pending`） | `256`（设为 `0` 关闭） |
-| `NEBULA_PD_PREFILL_SPILLOVER_PENDING` | Router | `pd_split` 冷请求在 Prefill 池全忙且某 Decode 副本有新鲜 `/stats/` 且 `pending_requests == 0` 时溢出直跑 Decode 的阈值 | `0`（默认关闭；显式设 `>0` 开启） |
-| `NEBULA_TOOL_PAUSE_TTL_MS` | Router | Agentic tool-call 暂停窗口内租户级 `(tenant_id, x-session-id)` 续接租约 TTL（毫秒） | `60000` |
+| `NEBULA_PD_PREFILL_SPILLOVER_PENDING` | Router | `pd_split` 冷请求在 Prefill 池积压达阈值（`min_prefill_pending >= 阈值`）且某 Decode 副本有新鲜 `/stats/` 且 `pending_requests < min_prefill_pending` 时溢出直跑 Decode 的阈值 | `0`（默认关闭；显式设 `>0` 开启） |
+| `NEBULA_TOOL_PAUSE_TTL_MS` | Router | Agentic tool-call 暂停窗口内租户级 `(tenant_id, x-session-id)` 单次续接租约 TTL（毫秒） | `60000` |
 
 **运维三件套（缺一则亲和永不命中，但安全回落可见）**：引擎 `PYTHONHASHSEED` 固定 + `--prefix-caching-hash-algo sha256_cbor`（执行面设 `NEBULA_KV_EVENTS_ENDPOINT` 后自动注入）+ Router tokenizer 目录。
 

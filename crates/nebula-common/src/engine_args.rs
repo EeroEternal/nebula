@@ -103,10 +103,10 @@ fn build_vllm_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
 
 fn encode_vllm_speculative_json(spec: &crate::model_request::SpeculativeConfig) -> Option<String> {
     let mut map = serde_json::Map::new();
-    if let Some(method) = spec.method {
+    if let Some(method_str) = spec.method.and_then(|m| m.as_vllm_method()) {
         map.insert(
             "method".to_string(),
-            serde_json::Value::String(method.as_vllm_method().to_string()),
+            serde_json::Value::String(method_str.to_string()),
         );
     }
     if let Some(ref model) = spec.draft_model {
@@ -121,17 +121,19 @@ fn encode_vllm_speculative_json(spec: &crate::model_request::SpeculativeConfig) 
             serde_json::Value::Number(k.into()),
         );
     }
-    if let Some(max_l) = spec.prompt_lookup_max {
-        map.insert(
-            "prompt_lookup_max".to_string(),
-            serde_json::Value::Number(max_l.into()),
-        );
-    }
-    if let Some(min_l) = spec.prompt_lookup_min {
-        map.insert(
-            "prompt_lookup_min".to_string(),
-            serde_json::Value::Number(min_l.into()),
-        );
+    if spec.method == Some(crate::model_request::SpeculativeMethod::Ngram) {
+        if let Some(max_l) = spec.prompt_lookup_max {
+            map.insert(
+                "prompt_lookup_max".to_string(),
+                serde_json::Value::Number(max_l.into()),
+            );
+        }
+        if let Some(min_l) = spec.prompt_lookup_min {
+            map.insert(
+                "prompt_lookup_min".to_string(),
+                serde_json::Value::Number(min_l.into()),
+            );
+        }
     }
     if map.is_empty() {
         None
@@ -281,13 +283,13 @@ mod tests {
     }
 
     #[test]
-    fn encodes_speculative_dflash2_and_prefix_caching_for_vllm_and_sglang() {
+    fn encodes_speculative_draft_model_and_ngram_for_vllm_and_sglang() {
         let cfg = ModelConfig {
             enable_prefix_caching: Some(true),
             speculative_config: Some(SpeculativeConfig {
-                method: Some(SpeculativeMethod::Dflash2),
-                draft_model: Some("Qwen/Qwen3.8-27B-DFlash2".into()),
-                num_speculative_tokens: Some(16),
+                method: Some(SpeculativeMethod::DraftModel),
+                draft_model: Some("Qwen/Qwen2.5-0.5B-Instruct".into()),
+                num_speculative_tokens: Some(8),
                 prompt_lookup_max: Some(8),
                 prompt_lookup_min: Some(2),
             }),
@@ -303,16 +305,38 @@ mod tests {
             .expect("vllm --speculative-config");
         let parsed: serde_json::Value = serde_json::from_str(&spec_pair[1]).unwrap();
         assert_eq!(parsed["method"], "draft_model");
-        assert_eq!(parsed["model"], "Qwen/Qwen3.8-27B-DFlash2");
-        assert_eq!(parsed["num_speculative_tokens"], 16);
-        assert_eq!(parsed["prompt_lookup_max"], 8);
+        assert_eq!(parsed["model"], "Qwen/Qwen2.5-0.5B-Instruct");
+        assert_eq!(parsed["num_speculative_tokens"], 8);
+        assert!(parsed.get("prompt_lookup_max").is_none());
+
+        let ngram_cfg = ModelConfig {
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Ngram),
+                draft_model: None,
+                num_speculative_tokens: Some(5),
+                prompt_lookup_max: Some(8),
+                prompt_lookup_min: Some(2),
+            }),
+            ..sample_cfg()
+        };
+        let ngram_args = build_engine_extra_args(Some("vllm"), &ngram_cfg)
+            .unwrap()
+            .unwrap();
+        let ngram_pair = ngram_args
+            .windows(2)
+            .find(|w| w[0] == "--speculative-config")
+            .expect("vllm ngram --speculative-config");
+        let ngram_parsed: serde_json::Value = serde_json::from_str(&ngram_pair[1]).unwrap();
+        assert_eq!(ngram_parsed["method"], "ngram");
+        assert_eq!(ngram_parsed["prompt_lookup_max"], 8);
+        assert_eq!(ngram_parsed["prompt_lookup_min"], 2);
 
         let sg_cfg = ModelConfig {
             enable_prefix_caching: Some(false),
             speculative_config: Some(SpeculativeConfig {
-                method: Some(SpeculativeMethod::Dflash2),
-                draft_model: Some("Qwen/Qwen3.8-27B-DFlash2".into()),
-                num_speculative_tokens: Some(16),
+                method: Some(SpeculativeMethod::DraftModel),
+                draft_model: Some("Qwen/Qwen2.5-0.5B-Instruct".into()),
+                num_speculative_tokens: Some(8),
                 prompt_lookup_max: None,
                 prompt_lookup_min: None,
             }),
@@ -324,13 +348,14 @@ mod tests {
         assert!(sg_args.iter().any(|a| a == "--disable-radix-cache"));
         assert!(sg_args
             .windows(2)
-            .any(|w| w[0] == "--speculative-algorithm" && w[1] == "EAGLE"));
-        assert!(sg_args.windows(2).any(
-            |w| w[0] == "--speculative-draft-model-path" && w[1] == "Qwen/Qwen3.8-27B-DFlash2"
-        ));
+            .any(|w| w[0] == "--speculative-algorithm" && w[1] == "STANDALONE"));
         assert!(sg_args
             .windows(2)
-            .any(|w| w[0] == "--speculative-num-draft-tokens" && w[1] == "16"));
+            .any(|w| w[0] == "--speculative-draft-model-path"
+                && w[1] == "Qwen/Qwen2.5-0.5B-Instruct"));
+        assert!(sg_args
+            .windows(2)
+            .any(|w| w[0] == "--speculative-num-draft-tokens" && w[1] == "8"));
         assert!(!sg_args.iter().any(|a| a == "--prompt-lookup-max"));
     }
 }

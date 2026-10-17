@@ -378,43 +378,48 @@ pub fn validate_model_config(
     }
 
     if let Some(ref spec) = config.speculative_config {
+        if matches!(
+            spec.method,
+            Some(
+                crate::model_request::SpeculativeMethod::Dspark
+                    | crate::model_request::SpeculativeMethod::Dflash2
+            )
+        ) {
+            return Err(
+                "speculative_config.method 'dspark' / 'dflash2' is rejected until verified on live engines; use 'draft_model', 'mtp', or 'ngram'"
+                    .into(),
+            );
+        }
         if spec.num_speculative_tokens == Some(0) {
             return Err("speculative_config.num_speculative_tokens must be >= 1".into());
         }
         if spec.prompt_lookup_max == Some(0) {
             return Err("speculative_config.prompt_lookup_max must be >= 1".into());
         }
-        if matches!(
-            spec.method,
-            Some(
-                crate::model_request::SpeculativeMethod::DraftModel
-                    | crate::model_request::SpeculativeMethod::Dspark
-                    | crate::model_request::SpeculativeMethod::Dflash2
-            )
-        ) && spec
-            .draft_model
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("")
-            .is_empty()
+        if (spec.prompt_lookup_max.is_some() || spec.prompt_lookup_min.is_some())
+            && spec.method != Some(crate::model_request::SpeculativeMethod::Ngram)
         {
             return Err(
-                "speculative_config.draft_model is required for draft_model / dspark / dflash2"
+                "speculative_config.prompt_lookup_max / prompt_lookup_min are only supported when speculative_config.method = ngram"
                     .into(),
             );
         }
-        if engine_type == "sglang" {
-            if spec.method == Some(crate::model_request::SpeculativeMethod::Ngram) {
-                return Err(
-                    "engine 'sglang' does not support speculative_config.method = ngram".into(),
-                );
-            }
-            if spec.prompt_lookup_max.is_some() || spec.prompt_lookup_min.is_some() {
-                return Err(
-                    "engine 'sglang' does not support prompt_lookup_max / prompt_lookup_min CLI flags"
-                        .into(),
-                );
-            }
+        if spec.method == Some(crate::model_request::SpeculativeMethod::DraftModel)
+            && spec
+                .draft_model
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err("speculative_config.draft_model is required for draft_model".into());
+        }
+        if engine_type == "sglang"
+            && spec.method == Some(crate::model_request::SpeculativeMethod::Ngram)
+        {
+            return Err(
+                "engine 'sglang' does not support speculative_config.method = ngram".into(),
+            );
         }
     }
 
@@ -486,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_sglang_ngram_and_prompt_lookup_and_missing_draft_model() {
+    fn rejects_unverified_methods_non_ngram_prompt_lookup_and_missing_draft_model() {
         let sg_ngram = ModelConfig {
             speculative_config: Some(SpeculativeConfig {
                 method: Some(SpeculativeMethod::Ngram),
@@ -498,21 +503,39 @@ mod tests {
             .unwrap_err()
             .contains("ngram"));
 
-        let sg_lookup = ModelConfig {
+        for unverified in [SpeculativeMethod::Dspark, SpeculativeMethod::Dflash2] {
+            let cfg = ModelConfig {
+                speculative_config: Some(SpeculativeConfig {
+                    method: Some(unverified),
+                    draft_model: Some("draft".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(validate_model_config("vllm", &cfg)
+                .unwrap_err()
+                .contains("rejected until verified on live engines"));
+            assert!(validate_model_config("sglang", &cfg)
+                .unwrap_err()
+                .contains("rejected until verified on live engines"));
+        }
+
+        let non_ngram_lookup = ModelConfig {
             speculative_config: Some(SpeculativeConfig {
-                method: Some(SpeculativeMethod::Mtp),
+                method: Some(SpeculativeMethod::DraftModel),
+                draft_model: Some("Qwen/Qwen2.5-0.5B".into()),
                 prompt_lookup_max: Some(8),
                 ..Default::default()
             }),
             ..Default::default()
         };
-        assert!(validate_model_config("sglang", &sg_lookup)
+        assert!(validate_model_config("vllm", &non_ngram_lookup)
             .unwrap_err()
-            .contains("prompt_lookup"));
+            .contains("method = ngram"));
 
         let missing_draft = ModelConfig {
             speculative_config: Some(SpeculativeConfig {
-                method: Some(SpeculativeMethod::Dflash2),
+                method: Some(SpeculativeMethod::DraftModel),
                 draft_model: None,
                 ..Default::default()
             }),

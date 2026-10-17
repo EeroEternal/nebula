@@ -93,7 +93,18 @@ struct WaitState {
 
 const DEFAULT_TENANT: &str = "__default__";
 
-type PriorityWaiterQueue = Arc<Mutex<VecDeque<oneshot::Sender<OwnedSemaphorePermit>>>>;
+/// Maximum consecutive priority continuation handoffs before yielding a slot
+/// back to `self.sem` so a queued cold FIFO waiter makes progress (prevents
+/// cold-request starvation under sustained continuation traffic).
+const MAX_CONSECUTIVE_PRIORITY_HANDOFFS: usize = 4;
+
+#[derive(Default)]
+struct PriorityWaiterState {
+    waiters: VecDeque<oneshot::Sender<OwnedSemaphorePermit>>,
+    consecutive_handoffs: usize,
+}
+
+type PriorityWaiterQueue = Arc<Mutex<PriorityWaiterState>>;
 
 /// One engine's (model's) bounded fair queue.
 pub struct EngineQueue {
@@ -112,7 +123,8 @@ pub struct EngineQueue {
 
 /// Held for the request lifetime (including the streamed response). Dropping it
 /// releases the concurrency slot, handing off directly to any queued
-/// continuation waiter before falling back to the cold FIFO semaphore.
+/// continuation waiter (up to `MAX_CONSECUTIVE_PRIORITY_HANDOFFS` consecutive
+/// times) before falling back to the cold FIFO semaphore.
 pub struct EnginePermit {
     permit: Option<OwnedSemaphorePermit>,
     priority_waiters: PriorityWaiterQueue,
@@ -123,20 +135,32 @@ impl Drop for EnginePermit {
     fn drop(&mut self) {
         self.inflight.fetch_sub(1, Ordering::Relaxed);
         if let Some(permit) = self.permit.take() {
-            let mut q = self
+            let mut st = self
                 .priority_waiters
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
+            if st.consecutive_handoffs >= MAX_CONSECUTIVE_PRIORITY_HANDOFFS {
+                // Yield one slot back to `self.sem` so the head cold FIFO waiter
+                // wakes up; reset the consecutive priority counter.
+                st.consecutive_handoffs = 0;
+                return;
+            }
             let mut handoff = Some(permit);
-            while let Some(tx) = q.pop_front() {
+            while let Some(tx) = st.waiters.pop_front() {
                 match tx.send(handoff.take().unwrap()) {
-                    Ok(()) => break,
+                    Ok(()) => {
+                        st.consecutive_handoffs += 1;
+                        break;
+                    }
                     Err(returned_permit) => {
                         // That priority waiter already timed out or acquired via
                         // semaphore; try the next priority waiter.
                         handoff = Some(returned_permit);
                     }
                 }
+            }
+            if handoff.is_some() {
+                st.consecutive_handoffs = 0;
             }
             // If `handoff` is still `Some`, dropping it here returns the slot to
             // `self.sem` for cold FIFO waiters.
@@ -176,7 +200,7 @@ impl EngineQueue {
         Arc::new(Self {
             cfg,
             sem: Arc::new(Semaphore::new(max)),
-            priority_waiters: Arc::new(Mutex::new(VecDeque::new())),
+            priority_waiters: Arc::new(Mutex::new(PriorityWaiterState::default())),
             waiting: Mutex::new(WaitState::default()),
             inflight: Arc::new(AtomicUsize::new(0)),
             admitted: AtomicUsize::new(0),
@@ -319,7 +343,7 @@ impl EngineQueue {
                     .priority_waiters
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                q.push_back(tx);
+                q.waiters.push_back(tx);
             }
             let sem = self.sem.clone();
             tokio::time::timeout(effective_wait, async move {
@@ -532,5 +556,50 @@ mod tests {
         let p2 = h2.await.unwrap().unwrap();
         drop(p2);
         assert_eq!(q.admitted_continuation_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn priority_continuation_handoffs_are_capped_to_prevent_cold_starvation() {
+        let q = EngineQueue::new(cfg(QueueMode::Fair, 1, 20, 2000));
+        let mut cur = q.acquire(Some("cold")).await.expect("initial");
+
+        // Enqueue 1 cold waiter first, followed by 5 priority continuation waiters.
+        let q_cold = q.clone();
+        let cold_waiter = tokio::spawn(async move { q_cold.acquire(Some("cold")).await });
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        let mut prio_waiters = Vec::new();
+        for _ in 0..5 {
+            let qp = q.clone();
+            prio_waiters.push(tokio::spawn(async move {
+                qp.acquire_with_priority(Some("prio"), true).await
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+
+        // First MAX_CONSECUTIVE_PRIORITY_HANDOFFS (4) releases wake the first 4 priority waiters.
+        for pw in prio_waiters.drain(..MAX_CONSECUTIVE_PRIORITY_HANDOFFS) {
+            drop(cur);
+            cur = pw.await.unwrap().expect("priority waiter admitted");
+            assert!(
+                !cold_waiter.is_finished(),
+                "cold waiter still waiting during first 4 priority handoffs"
+            );
+        }
+
+        // On the 5th release, the cap yields back to `self.sem`, waking `cold_waiter`
+        // ahead of the 5th priority waiter.
+        drop(cur);
+        let p_cold = cold_waiter
+            .await
+            .unwrap()
+            .expect("cold waiter must wake after cap");
+        assert!(
+            !prio_waiters[0].is_finished(),
+            "5th priority waiter yields to cold waiter on 5th release"
+        );
+        drop(p_cold);
+        let p_last = prio_waiters.pop().unwrap().await.unwrap().unwrap();
+        drop(p_last);
     }
 }
