@@ -328,6 +328,27 @@ pub fn render_router_metrics(router: &nebula_router::Router) -> String {
         router.hint_expired_total(),
         router.hint_stale_degraded_total()
     );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_pd_short_bypass_total Short prompts bypassed directly to Decode pool.\n\
+         # TYPE nebula_router_pd_short_bypass_total counter\n\
+         nebula_router_pd_short_bypass_total {}",
+        router.pd_short_bypass_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_tool_pause_marked_total Sessions marked in tool-pause after tool_calls.\n\
+         # TYPE nebula_router_tool_pause_marked_total counter\n\
+         nebula_router_tool_pause_marked_total {}",
+        router.tool_pause_marked_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_tool_continuation_hit_total Tool-continuation turns matched against active tool-pause leases.\n\
+         # TYPE nebula_router_tool_continuation_hit_total counter\n\
+         nebula_router_tool_continuation_hit_total {}",
+        router.tool_continuation_hit_total()
+    );
     body
 }
 /// Per-model engine-queue gauges when queue admission is enabled.
@@ -344,6 +365,11 @@ fn render_queue_metrics(queues: &nebula_common::queue::EngineQueues) -> String {
         "# HELP nebula_gateway_queue_depth Waiting requests per model (engine queue).\n\
          # TYPE nebula_gateway_queue_depth gauge"
     );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_gateway_queue_admitted_continuation_total Tool-continuation requests admitted with priority headroom.\n\
+         # TYPE nebula_gateway_queue_admitted_continuation_total counter"
+    );
     for (model, q) in queues.snapshot() {
         let _ = writeln!(
             body,
@@ -354,6 +380,11 @@ fn render_queue_metrics(queues: &nebula_common::queue::EngineQueues) -> String {
             body,
             "nebula_gateway_queue_depth{{model=\"{model}\"}} {}",
             q.depth()
+        );
+        let _ = writeln!(
+            body,
+            "nebula_gateway_queue_admitted_continuation_total{{model=\"{model}\"}} {}",
+            q.admitted_continuation_total()
         );
     }
     body

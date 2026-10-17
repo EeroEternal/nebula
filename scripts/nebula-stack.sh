@@ -19,6 +19,7 @@ LOG_DIR="${LOG_DIR:-$HOME/nebula-stack-logs}"
 ETCD_CONTAINER="${ETCD_CONTAINER:-nebula-etcd}"
 # pd_split shared-KV components (optional; only needed for topology=pd_split)
 LMCACHE_IMAGE="${LMCACHE_IMAGE:-}"            # e.g. nebula/vllm:0.23.0-lmcache0.5.5
+export NEBULA_APPROVED_PD_IMAGES="${NEBULA_APPROVED_PD_IMAGES-${LMCACHE_IMAGE}}"
 LMCACHE_SERVER_CONTAINER="${LMCACHE_SERVER_CONTAINER:-nebula-lmcache}"
 LMCACHE_CTRL_CONTAINER="${LMCACHE_CTRL_CONTAINER:-nebula-lmcache-ctrl}"
 LMCACHE_REMOTE_PORT="${LMCACHE_REMOTE_PORT:-6800}"
@@ -57,39 +58,45 @@ ensure_etcd_up() {
   return 1
 }
 
-start_procs() {
+start_one_proc() {
+  local p="$1"
   mkdir -p "$LOG_DIR"
-  if proc_running nebula-router; then
-    log "router already running"
-  else
-    log "starting router :$ROUTER_PORT"
-    nohup "$BIN_DIR/nebula-router" --listen-addr "0.0.0.0:$ROUTER_PORT" \
-      --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/router.log" 2>&1 &
+  if proc_running "$p"; then
+    log "$p already running"
+    return 0
   fi
+  case "$p" in
+    nebula-router)
+      log "starting router :$ROUTER_PORT"
+      nohup "$BIN_DIR/nebula-router" --listen-addr "0.0.0.0:$ROUTER_PORT" \
+        --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/router.log" 2>&1 &
+      ;;
+    nebula-gateway)
+      log "starting gateway :$GATEWAY_PORT"
+      nohup "$BIN_DIR/nebula-gateway" --listen-addr "0.0.0.0:$GATEWAY_PORT" \
+        --router-url "http://127.0.0.1:$ROUTER_PORT" \
+        --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/gateway.log" 2>&1 &
+      ;;
+    nebula-bff)
+      log "starting bff :$BFF_PORT"
+      nohup "$BIN_DIR/nebula-bff" --listen-addr "0.0.0.0:$BFF_PORT" \
+        --etcd-endpoint "$ETCD_ENDPOINT" \
+        --database-url "$BFF_DATABASE_URL" >"$LOG_DIR/bff.log" 2>&1 &
+      ;;
+    nebula-k8s-controller)
+      log "starting k8s-controller (namespace=$K8S_NAMESPACE gpu-node=$GPU_NODE)"
+      nohup "$BIN_DIR/nebula-k8s-controller" --etcd-endpoint "$ETCD_ENDPOINT" \
+        --namespace "$K8S_NAMESPACE" --gpu-node "$GPU_NODE" >"$LOG_DIR/k8s-controller.log" 2>&1 &
+      ;;
+  esac
+}
+
+start_procs() {
+  start_one_proc nebula-router
   sleep 1
-  if proc_running nebula-gateway; then
-    log "gateway already running"
-  else
-    log "starting gateway :$GATEWAY_PORT"
-    nohup "$BIN_DIR/nebula-gateway" --listen-addr "0.0.0.0:$GATEWAY_PORT" \
-      --router-url "http://127.0.0.1:$ROUTER_PORT" \
-      --etcd-endpoint "$ETCD_ENDPOINT" >"$LOG_DIR/gateway.log" 2>&1 &
-  fi
-  if proc_running nebula-bff; then
-    log "bff already running"
-  else
-    log "starting bff :$BFF_PORT"
-    nohup "$BIN_DIR/nebula-bff" --listen-addr "0.0.0.0:$BFF_PORT" \
-      --etcd-endpoint "$ETCD_ENDPOINT" \
-      --database-url "$BFF_DATABASE_URL" >"$LOG_DIR/bff.log" 2>&1 &
-  fi
-  if proc_running nebula-k8s-controller; then
-    log "k8s-controller already running"
-  else
-    log "starting k8s-controller (namespace=$K8S_NAMESPACE gpu-node=$GPU_NODE)"
-    nohup "$BIN_DIR/nebula-k8s-controller" --etcd-endpoint "$ETCD_ENDPOINT" \
-      --namespace "$K8S_NAMESPACE" --gpu-node "$GPU_NODE" >"$LOG_DIR/k8s-controller.log" 2>&1 &
-  fi
+  start_one_proc nebula-gateway
+  start_one_proc nebula-bff
+  start_one_proc nebula-k8s-controller
   sleep 2
 }
 
@@ -141,16 +148,72 @@ ensure_lmcache_up() {
         --host 0.0.0.0 --port "$port" --monitor-port "$((port + 1))" >/dev/null
     fi
   done
-  return 0
+
+  # Deployment ordering constraint (pool.md §pd_split): engines crash-loop if
+  # lmcache_controller is unreachable at boot, and restart if lmcache_server is
+  # not yet listening. Wait for both to report ready before starting controller.
+  local i srv_ok=0 ctrl_ok=0
+  for i in $(seq 1 30); do
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$LMCACHE_SERVER_CONTAINER" && \
+       (docker logs "$LMCACHE_SERVER_CONTAINER" 2>&1 | grep -q "Server started" || \
+        bash -c "</dev/tcp/127.0.0.1/$LMCACHE_REMOTE_PORT" >/dev/null 2>&1); then
+      srv_ok=1
+    fi
+    if curl -sf --max-time 2 -X POST "http://127.0.0.1:${LMCACHE_CTRL_PORT}/lookup" \
+         -H 'Content-Type: application/json' -d '{"tokens":[1]}' >/dev/null 2>&1; then
+      ctrl_ok=1
+    fi
+    if [ "$srv_ok" = "1" ] && [ "$ctrl_ok" = "1" ]; then
+      log "lmcache_server (:$LMCACHE_REMOTE_PORT) and lmcache_controller (:$LMCACHE_CTRL_PORT) ready"
+      return 0
+    fi
+    sleep 1
+  done
+  log "ERROR: lmcache components did not become ready within 30s (srv_ok=$srv_ok ctrl_ok=$ctrl_ok)"
+  return 1
 }
 
 cmd_start() {
   ensure_etcd_up
   ensure_lmcache_up
   start_procs
-  log "restoring deployment expectation /deployments/$MODEL_UID"
-  etcdctl_ put "/deployments/$MODEL_UID" "$DEPLOYMENT_JSON" >/dev/null
-  log "done — k8s-controller will (re)create pod $MODEL_POD"
+  local existing=""
+  existing="$(etcdctl_ get "/deployments/$MODEL_UID" --print-value-only 2>/dev/null || true)"
+  if [ -n "$existing" ] && [ "${FORCE_DEPLOYMENT_RESET:-0}" != "1" ]; then
+    log "preserving existing deployment expectation /deployments/$MODEL_UID (set FORCE_DEPLOYMENT_RESET=1 to overwrite)"
+  else
+    log "seeding default deployment expectation /deployments/$MODEL_UID"
+    etcdctl_ put "/deployments/$MODEL_UID" "$DEPLOYMENT_JSON" >/dev/null
+  fi
+  log "done — k8s-controller will reconcile pod(s) for $MODEL_UID"
+  cmd_status
+}
+
+# Rolling control-plane binary restart: restarts each binary one at a time,
+# waiting for the old process to release its listening port before starting the
+# new binary, while keeping etcd, /deployments/$MODEL_UID, lmcache containers,
+# and running engine Pods untouched.
+cmd_restart_control_plane() {
+  ensure_etcd_up
+  local p i
+  for p in nebula-router nebula-gateway nebula-bff nebula-k8s-controller; do
+    if proc_running "$p"; then
+      log "stopping $p for binary upgrade"
+      pkill -f "$BIN_DIR/$p" || true
+      for i in $(seq 1 20); do
+        proc_running "$p" || break
+        sleep 0.5
+      done
+      if proc_running "$p"; then
+        log "WARN: $p did not exit within 10s; sending SIGKILL"
+        pkill -9 -f "$BIN_DIR/$p" || true
+        sleep 0.5
+      fi
+    fi
+    start_one_proc "$p"
+    sleep 1
+  done
+  log "control plane restarted (deployments and engine pods untouched)"
   cmd_status
 }
 
@@ -193,10 +256,11 @@ cmd_stop() {
 
 case "${1:-status}" in
   start) cmd_start ;;
+  restart-control-plane) cmd_restart_control_plane ;;
   stop) cmd_stop ;;
   status) cmd_status ;;
   *)
-    echo "usage: $0 {start|stop|status}"
+    echo "usage: $0 {start|restart-control-plane|stop|status}"
     exit 1
     ;;
 esac

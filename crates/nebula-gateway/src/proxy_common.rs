@@ -26,6 +26,9 @@ pub struct PreparedUpstream {
     pub ctx: nebula_common::ExecutionContext,
     /// Held for the request lifetime when multi-tenant admission is active.
     pub _conc_guard: Option<nebula_common::admission::ConcurrencyGuard>,
+    /// Populated by embedded router with `(model_uid, replica_id)` so response
+    /// handlers can anchor Coding Agent `Tool-Pause` leases on `tool_calls`.
+    pub routed_endpoint: std::sync::Arc<std::sync::Mutex<Option<(String, u32)>>>,
 }
 
 pub async fn prepare_upstream(
@@ -133,6 +136,7 @@ pub async fn prepare_upstream(
         headers: req_headers,
         ctx,
         _conc_guard,
+        routed_endpoint: std::sync::Arc::new(std::sync::Mutex::new(None)),
     })
 }
 
@@ -267,6 +271,7 @@ pub fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
 }
 
 /// Forward a non-SSE or SSE upstream response to the client (shared by proxy_post).
+#[allow(clippy::too_many_arguments)]
 pub async fn forward_upstream_response(
     st: &AppState,
     resp: reqwest::Response,
@@ -275,6 +280,9 @@ pub async fn forward_upstream_response(
     permit: Option<nebula_common::queue::EnginePermit>,
     queue_wait_ms: u64,
     upstream_ttft_ms: u64,
+    tenant_id: Option<&str>,
+    session_id: Option<&str>,
+    routed_endpoint: Option<(String, u32)>,
 ) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
@@ -293,6 +301,10 @@ pub async fn forward_upstream_response(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
+        let router_for_stream = st.router.clone();
+        let tenant_for_stream = tenant_id.map(|s| s.to_string());
+        let session_for_stream = session_id.map(|s| s.to_string());
+        let routed_for_stream = routed_endpoint.clone();
         let stage_timing = st.stage_timing;
         let t_upstream = std::time::Instant::now();
         let request_id_owned = request_id.map(|s| s.to_string());
@@ -300,6 +312,7 @@ pub async fn forward_upstream_response(
             // Engine queue permit is held for the whole streamed response.
             let _permit = permit;
             let mut first = true;
+            let mut tool_pause_marked = false;
             loop {
                 tokio::select! {
                     biased;
@@ -323,6 +336,23 @@ pub async fn forward_upstream_response(
                                             recv_to_first_chunk_us = req_start.map(|t| t.elapsed().as_micros() as u64).unwrap_or(0),
                                             "stage timing (first chunk)"
                                         );
+                                    }
+                                }
+                                if !tool_pause_marked {
+                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                        router_for_stream.as_ref(),
+                                        session_for_stream.as_deref(),
+                                        routed_for_stream.as_ref(),
+                                    ) {
+                                        if nebula_router::response_has_tool_calls(&b) {
+                                            router.mark_tool_pause_for_tenant(
+                                                tenant_for_stream.as_deref(),
+                                                sid,
+                                                m,
+                                                *r,
+                                            );
+                                            tool_pause_marked = true;
+                                        }
                                     }
                                 }
                                 if tx.send(Ok(b)).await.is_err() {
@@ -359,6 +389,13 @@ pub async fn forward_upstream_response(
             Bytes::new()
         }
     };
+    if let (Some(router), Some(sid), Some((m, r))) =
+        (st.router.as_ref(), session_id, routed_endpoint.as_ref())
+    {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            router.mark_tool_pause_for_tenant(tenant_id, sid, m, *r);
+        }
+    }
     if let Some(normalized) = maybe_normalize_router_error(status, &bytes) {
         return normalized;
     }
@@ -398,12 +435,6 @@ fn inject_ttft_split(out: &mut Response, queue_wait_ms: u64, upstream_ttft_ms: u
     }
 }
 
-/// Embedded-router resolution.
-///
-/// When `AppState.router` is set (`NEBULA_ROUTER_MODE=embedded`), resolve the
-/// model, select a ready endpoint in-process, and return the engine URL plus a
-/// body whose `model` field is rewritten to the engine's served name. Returns
-/// `Ok(None)` in remote mode (caller forwards to a standalone router).
 /// Embedded-router forwarding.
 ///
 /// Selects an engine in-process and sends the request straight to it, retrying
@@ -538,6 +569,11 @@ pub async fn forward_embedded(
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
+                *prepared
+                    .routed_endpoint
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) =
+                    Some((ep.model_uid.clone(), ep.replica_id));
                 return Ok(resp);
             }
             Err(e) => {

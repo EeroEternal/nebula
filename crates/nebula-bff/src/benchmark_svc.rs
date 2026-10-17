@@ -196,16 +196,49 @@ pub async fn create_canary(
         ));
     }
     // Model must exist — recommend failure must not block manual deploy, but canary needs a model.
-    if store
+    let Some((spec_data, _)) = store
         .get(&format!("/models/{}/spec", req.model_uid))
         .await?
-        .is_none()
-    {
+    else {
         return Err(ServiceError::NotFound(format!(
             "model {} not found",
             req.model_uid
         )));
+    };
+    let spec_docker_image = serde_json::from_slice::<nebula_common::ModelSpec>(&spec_data)
+        .ok()
+        .and_then(|s| s.docker_image);
+
+    // If the target deployment uses pd_split, validate candidate_image_id (and
+    // stable_image_id when provided) against NEBULA_APPROVED_PD_IMAGES up front.
+    if let Some((dep_data, _)) = store
+        .get(&format!("/deployments/{}", req.model_uid))
+        .await?
+    {
+        if let Ok(dep) = serde_json::from_slice::<nebula_common::ModelDeployment>(&dep_data) {
+            if dep.topology == Some(nebula_common::DeploymentTopology::PdSplit) {
+                let mut candidate_dep = dep.clone();
+                candidate_dep.image_id = Some(req.candidate_image_id.clone());
+                nebula_control::validate_pd_split_deployment_images(
+                    store,
+                    &candidate_dep,
+                    spec_docker_image.as_deref(),
+                )
+                .await?;
+                if let Some(ref stable) = req.stable_image_id {
+                    let mut stable_dep = dep;
+                    stable_dep.image_id = Some(stable.clone());
+                    nebula_control::validate_pd_split_deployment_images(
+                        store,
+                        &stable_dep,
+                        spec_docker_image.as_deref(),
+                    )
+                    .await?;
+                }
+            }
+        }
     }
+
     let now = now_ms();
     let canary = CanaryRelease {
         canary_id: req
@@ -271,9 +304,22 @@ pub async fn evaluate_canary(
                 if let Ok(mut dep) =
                     serde_json::from_slice::<nebula_common::ModelDeployment>(&dep_data)
                 {
+                    let spec_docker_image = store
+                        .get(&format!("/models/{}/spec", canary.model_uid))
+                        .await?
+                        .and_then(|(s, _)| {
+                            serde_json::from_slice::<nebula_common::ModelSpec>(&s).ok()
+                        })
+                        .and_then(|s| s.docker_image);
                     dep.image_id = Some(stable.clone());
                     dep.image_override_reason =
                         Some(format!("canary {} rollback", canary.canary_id));
+                    nebula_control::validate_pd_split_deployment_images(
+                        store,
+                        &dep,
+                        spec_docker_image.as_deref(),
+                    )
+                    .await?;
                     dep.version = dep.version.saturating_add(1);
                     dep.updated_at_ms = now_ms();
                     store
@@ -324,8 +370,19 @@ pub async fn promote_canary(
         .await?
     {
         if let Ok(mut dep) = serde_json::from_slice::<nebula_common::ModelDeployment>(&dep_data) {
+            let spec_docker_image = store
+                .get(&format!("/models/{}/spec", canary.model_uid))
+                .await?
+                .and_then(|(s, _)| serde_json::from_slice::<nebula_common::ModelSpec>(&s).ok())
+                .and_then(|s| s.docker_image);
             dep.image_id = Some(canary.candidate_image_id.clone());
             dep.image_override_reason = Some(format!("canary {} promote", canary.canary_id));
+            nebula_control::validate_pd_split_deployment_images(
+                store,
+                &dep,
+                spec_docker_image.as_deref(),
+            )
+            .await?;
             dep.version = dep.version.saturating_add(1);
             dep.updated_at_ms = now_ms();
             store
@@ -364,4 +421,114 @@ pub async fn rollback_canary(
             .await?;
     }
     Ok(canary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nebula_common::{
+        DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment, ModelSource, ModelSpec,
+        ReplicaPlacementSpec, ReplicaRole,
+    };
+    use nebula_meta::MemoryMetaStore;
+
+    #[tokio::test]
+    async fn pd_split_canary_rejects_unapproved_candidate_and_promotion() {
+        let store = MemoryMetaStore::new();
+        std::env::set_var(
+            "NEBULA_APPROVED_PD_IMAGES",
+            "nebula/vllm:0.23.0-lmcache0.5.5",
+        );
+
+        let spec = ModelSpec {
+            model_uid: "m1".into(),
+            model_name: "Qwen/Qwen2.5-0.5B".into(),
+            model_source: ModelSource::Local,
+            model_path: Some("/models/qwen".into()),
+            engine_type: Some("vllm".into()),
+            docker_image: Some("nebula/vllm:0.23.0-lmcache0.5.5".into()),
+            config: None,
+            labels: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            created_by: None,
+        };
+        store
+            .put("/models/m1/spec", serde_json::to_vec(&spec).unwrap(), None)
+            .await
+            .unwrap();
+
+        let dep = ModelDeployment {
+            model_uid: "m1".into(),
+            desired_state: DesiredState::Running,
+            replicas: 2,
+            min_replicas: None,
+            max_replicas: None,
+            node_affinity: None,
+            gpu_affinity: None,
+            replica_specs: Some(vec![
+                ReplicaPlacementSpec {
+                    role: Some(ReplicaRole::Prefill),
+                    ..Default::default()
+                },
+                ReplicaPlacementSpec {
+                    role: Some(ReplicaRole::Decode),
+                    ..Default::default()
+                },
+            ]),
+            config_overrides: None,
+            image_id: Some("nebula/vllm:0.23.0-lmcache0.5.5".into()),
+            allowed_pools: None,
+            image_override_reason: None,
+            compat_rule_ids: vec![],
+            topology: Some(DeploymentTopology::PdSplit),
+            kv_sharing: Some(KvSharingSpec {
+                remote_url: "lm://127.0.0.1:6800".into(),
+                serde: "naive".into(),
+            }),
+            version: 1,
+            updated_at_ms: 1,
+        };
+        store
+            .put("/deployments/m1", serde_json::to_vec(&dep).unwrap(), None)
+            .await
+            .unwrap();
+
+        // Creating a canary with an unapproved candidate image must be rejected.
+        let err = create_canary(
+            &store,
+            CreateCanaryRequest {
+                model_uid: "m1".into(),
+                candidate_image_id: "unapproved/vllm:rogue".into(),
+                stable_image_id: None,
+                traffic_weight_percent: Some(10),
+                workload_id: None,
+                canary_id: Some("c-bad".into()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::BadRequest(m) if m.contains("approved list")),
+            "expected unapproved canary candidate to be rejected, got: {err:?}"
+        );
+
+        // Creating and promoting an approved candidate image succeeds.
+        create_canary(
+            &store,
+            CreateCanaryRequest {
+                model_uid: "m1".into(),
+                candidate_image_id: "nebula/vllm:0.23.0-lmcache0.5.5".into(),
+                stable_image_id: Some("nebula/vllm:0.23.0-lmcache0.5.5".into()),
+                traffic_weight_percent: Some(10),
+                workload_id: None,
+                canary_id: Some("c-ok".into()),
+            },
+        )
+        .await
+        .expect("approved canary should succeed");
+        promote_canary(&store, "c-ok")
+            .await
+            .expect("promoting approved canary should succeed");
+    }
 }

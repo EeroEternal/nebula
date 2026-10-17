@@ -46,6 +46,65 @@ async fn load_image(
     Ok(None)
 }
 
+/// Resolve an image_id or docker_image string to the concrete container image
+/// reference (`EngineImage.image` when registered in `/images/`, else the
+/// raw reference itself).
+pub async fn resolve_concrete_image_ref(
+    store: &dyn MetaStore,
+    image_ref: Option<&str>,
+) -> Result<Option<String>, ServiceError> {
+    let Some(raw) = image_ref.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if let Some(img) = load_image(store, Some(raw), None).await? {
+        return Ok(Some(img.image));
+    }
+    Ok(Some(raw.to_string()))
+}
+
+async fn load_node_status(
+    store: &dyn MetaStore,
+    node_id: &str,
+) -> Result<Option<NodeStatus>, ServiceError> {
+    let status_key = format!("/nodes/{node_id}/status");
+    if let Some((data, _)) = store.get(&status_key).await? {
+        if let Ok(node) = serde_json::from_slice::<NodeStatus>(&data) {
+            return Ok(Some(node));
+        }
+    }
+    let legacy_key = format!("/nodes/{node_id}");
+    if let Some((data, _)) = store.get(&legacy_key).await? {
+        if let Ok(node) = serde_json::from_slice::<NodeStatus>(&data) {
+            return Ok(Some(node));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve the target platform string for a replica from its target node (when
+/// known in `/nodes/{id}/status`) or its registered `EngineImage` platforms.
+pub async fn resolve_replica_platform(
+    store: &dyn MetaStore,
+    image_ref: Option<&str>,
+    node_id: Option<&str>,
+) -> Result<Option<String>, ServiceError> {
+    if let Some(nid) = node_id {
+        if let Some(node) = load_node_status(store, nid).await? {
+            return Ok(Some(nebula_common::resolve_node_platform(&node)));
+        }
+    }
+    if let Some(img) = load_image(store, image_ref, None).await? {
+        if let Some(p) = img
+            .platforms
+            .iter()
+            .find(|p| !p.eq_ignore_ascii_case("any") && !p.trim().is_empty())
+        {
+            return Ok(Some(p.clone()));
+        }
+    }
+    Ok(None)
+}
+
 /// Validate deploy intent against compatibility matrix (+ optional target node).
 pub async fn validate_deploy_compat(
     store: &dyn MetaStore,
@@ -64,10 +123,7 @@ pub async fn validate_deploy_compat(
         .unwrap_or_default();
 
     let node = if let Some(nid) = node_id {
-        store
-            .get(&format!("/nodes/{nid}"))
-            .await?
-            .and_then(|(data, _)| serde_json::from_slice::<NodeStatus>(&data).ok())
+        load_node_status(store, nid).await?
     } else {
         None
     };

@@ -99,6 +99,8 @@ pub struct Metrics {
     pub e2e_latency: DashMap<String, Histogram>,
     /// Per-model TTFT histogram (seconds) — only for SSE streaming responses.
     pub ttft: DashMap<String, Histogram>,
+    /// Per-model TPOT (time per output token, seconds) histogram — SSE streaming responses.
+    pub tpot: DashMap<String, Histogram>,
     /// Per-model request counters.
     pub model_counters: DashMap<String, ModelCounter>,
 }
@@ -113,6 +115,13 @@ impl Metrics {
 
     pub fn observe_ttft(&self, model_uid: &str, seconds: f64) {
         self.ttft
+            .entry(model_uid.to_string())
+            .or_insert_with(|| Histogram::new(HISTOGRAM_BUCKETS))
+            .observe(seconds);
+    }
+
+    pub fn observe_tpot(&self, model_uid: &str, seconds: f64) {
+        self.tpot
             .entry(model_uid.to_string())
             .or_insert_with(|| Histogram::new(HISTOGRAM_BUCKETS))
             .observe(seconds);
@@ -281,8 +290,12 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     body.push_str(&format!(
         "# HELP nebula_router_prefix_index_entries Live prefix-index entries (KV-event routing hints).\n\
          # TYPE nebula_router_prefix_index_entries gauge\n\
-         nebula_router_prefix_index_entries {}\n",
+         nebula_router_prefix_index_entries {}\n\
+         # HELP nebula_router_prefix_index_stale_dropped_total Stale snapshot or delta events dropped by watermark protection.\n\
+         # TYPE nebula_router_prefix_index_stale_dropped_total counter\n\
+         nebula_router_prefix_index_stale_dropped_total {}\n",
         st.router.prefix_index_entries(),
+        st.router.prefix_index_stale_dropped_total(),
     ));
     body.push_str(
         "# HELP nebula_router_prefix_lookup_total Prefix-index lookups by model.\n\
@@ -334,8 +347,41 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
             st.router.stage_fallback_total(stage),
         ));
     }
+    body.push_str(&format!(
+        "# HELP nebula_router_stage_prefill_spillover_total pd_split cold requests spilled over to idle Decode replicas when Prefill pool is saturated.\n\
+         # TYPE nebula_router_stage_prefill_spillover_total counter\n\
+         nebula_router_stage_prefill_spillover_total {}\n",
+        st.router.stage_prefill_spillover_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_pd_decode_local_hit_total pd_split warm requests routed to a Decode replica holding the prefix in local GPU VRAM.\n\
+         # TYPE nebula_router_pd_decode_local_hit_total counter\n\
+         nebula_router_pd_decode_local_hit_total {}\n",
+        st.router.pd_decode_local_hit_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_pd_short_bypass_total pd_split short cold requests bypassing controller lookup and prefill pool to unsaturated decode pool.\n\
+         # TYPE nebula_router_pd_short_bypass_total counter\n\
+         nebula_router_pd_short_bypass_total {}\n",
+        st.router.pd_short_bypass_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_tool_pause_marked_total Coding agent sessions marked as ToolPaused on tool_calls finish_reason.\n\
+         # TYPE nebula_router_tool_pause_marked_total counter\n\
+         nebula_router_tool_pause_marked_total {}\n\
+         # HELP nebula_router_tool_continuation_hit_total Coding agent continuation turns routed to anchored replica under active Tool-Pause lease.\n\
+         # TYPE nebula_router_tool_continuation_hit_total counter\n\
+         nebula_router_tool_continuation_hit_total {}\n",
+        st.router.tool_pause_marked_total(),
+        st.router.tool_continuation_hit_total(),
+    ));
     let strategy = st.router.strategy_name();
-    for reason in ["no_signal", "below_threshold", "owner_unavailable"] {
+    for reason in [
+        "no_signal",
+        "below_threshold",
+        "owner_unavailable",
+        "owner_congested",
+    ] {
         body.push_str(&format!(
             "nebula_router_strategy_fallback_total{{strategy=\"{strategy}\",reason=\"{reason}\"}} {}\n",
             st.router.strategy_fallback_total(strategy, reason),
@@ -380,6 +426,16 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
             &entry
                 .value()
                 .format_prometheus("nebula_route_ttft_seconds", entry.key()),
+        );
+    }
+
+    // TPOT histograms
+    body.push_str("# HELP nebula_route_tpot_seconds Time per output token (streaming only).\n# TYPE nebula_route_tpot_seconds histogram\n");
+    for entry in st.metrics.tpot.iter() {
+        body.push_str(
+            &entry
+                .value()
+                .format_prometheus("nebula_route_tpot_seconds", entry.key()),
         );
     }
 

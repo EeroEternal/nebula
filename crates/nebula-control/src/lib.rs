@@ -14,7 +14,8 @@ pub mod store;
 pub use compat::{list_compat_rules, validate_deploy_compat};
 pub use deploy::{
     callback_url_from_scale, callback_url_from_start, load_model, scale_model, start_model,
-    stop_model, validate_callback_url, ScaleDeploymentRequest, StartDeploymentRequest,
+    stop_model, validate_callback_url, validate_pd_split_deployment_images, ScaleDeploymentRequest,
+    StartDeploymentRequest,
 };
 pub use error::ServiceError;
 pub use governance::{filter_canaries_by_model, get_canary, get_slo, list_canaries, list_slos};
@@ -36,7 +37,10 @@ pub use pool::{
     create_pool, delete_pool, get_pool, list_pools, update_pool, CreatePoolRequest,
     UpdatePoolRequest,
 };
-pub use router_metrics::evaluate_slo_from_router_metrics;
+pub use router_metrics::{
+    evaluate_slo_from_router_metrics, evaluate_slo_from_router_metrics_with_pools,
+    load_pd_pool_telemetry,
+};
 pub use store::{
     get_model_deployment, get_model_spec, infer_model_source, is_valid_model_uid, now_ms,
     put_model_deployment, put_model_spec,

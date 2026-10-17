@@ -22,13 +22,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use nebula_control::{
     callback_url_from_scale, callback_url_from_start, cluster_counts, create_async_operation,
     create_model, create_operation, create_pool, delete_pool, drain_node, drain_replica,
-    etcd_health, evaluate_slo_from_router_metrics, filter_canaries_by_model, get_canary,
-    get_cluster_status, get_model, get_model_deployment, get_operation, get_pool, get_slo,
-    list_canaries, list_models, list_nodes, list_pools, list_replicas, load_model, scale_model,
-    start_model, stop_model, update_pool, ComponentHealth, ComponentStatus, CreateModelRequest,
-    CreatePoolRequest, DrainReplicaRequest, HealthSummary, OperationKind, OperationOptions,
-    OperationStatus, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
-    UpdatePoolRequest,
+    etcd_health, filter_canaries_by_model, get_canary, get_cluster_status, get_model,
+    get_model_deployment, get_operation, get_pool, get_slo, list_canaries, list_models, list_nodes,
+    list_pools, list_replicas, load_model, scale_model, start_model, stop_model, update_pool,
+    ComponentHealth, ComponentStatus, CreateModelRequest, CreatePoolRequest, DrainReplicaRequest,
+    HealthSummary, OperationKind, OperationOptions, OperationStatus, ScaleDeploymentRequest,
+    ServiceError, StartDeploymentRequest, UpdatePoolRequest,
 };
 
 use crate::audit::{fetch_audit_logs, AuditLogQuery};
@@ -700,7 +699,12 @@ pub async fn platform_evaluate_slo(
         Err(e) => return control_error(e),
     };
     let metrics = fetch_router_metrics(&st).await;
-    let evaluation = evaluate_slo_from_router_metrics(&slo, &metrics);
+    let pool_telemetry = nebula_control::load_pd_pool_telemetry(&*st.store, &model_uid).await;
+    let evaluation = nebula_control::evaluate_slo_from_router_metrics_with_pools(
+        &slo,
+        &metrics,
+        &pool_telemetry,
+    );
     (StatusCode::OK, Json(evaluation)).into_response()
 }
 

@@ -55,6 +55,59 @@ fn default_replicas() -> u32 {
     1
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeculativeMethod {
+    Mtp,
+    DraftModel,
+    Dspark,
+    Dflash2,
+    Ngram,
+}
+
+impl SpeculativeMethod {
+    /// Known vLLM `--speculative-config.method` values (`"mtp"`, `"draft_model"`, `"ngram"`).
+    /// Note: `Dspark` and `Dflash2` are rejected at [`crate::capability::validate_model_config`]
+    /// admission until their exact CLI flags are verified on live engines.
+    pub fn as_vllm_method(&self) -> Option<&'static str> {
+        match self {
+            Self::Mtp => Some("mtp"),
+            Self::DraftModel => Some("draft_model"),
+            Self::Ngram => Some("ngram"),
+            Self::Dspark | Self::Dflash2 => None,
+        }
+    }
+
+    /// Known SGLang `--speculative-algorithm` values (`"NEXTN"` for MTP, `"STANDALONE"` for
+    /// `DraftModel`). `Ngram`, `Dspark`, and `Dflash2` are rejected by
+    /// [`crate::capability::validate_model_config`].
+    pub fn as_sglang_algorithm(&self) -> Option<&'static str> {
+        match self {
+            Self::Mtp => Some("NEXTN"),
+            Self::DraftModel => Some("STANDALONE"),
+            Self::Ngram | Self::Dspark | Self::Dflash2 => None,
+        }
+    }
+}
+
+/// Declarative speculative decoding configuration (Batch 5.6: DSpark / DFlash2 + Context Lookup).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SpeculativeConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<SpeculativeMethod>,
+    /// Companion draft model HF id or local path (e.g. DSpark-1B or DFlash2 drafter).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_model: Option<String>,
+    /// Verification block size (`k`, e.g. 7, 14, or 16 tokens per forward pass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_speculative_tokens: Option<u32>,
+    /// Context lookup augmentation window (`prompt_lookup_max` for n-gram / DFlash2 suffix fill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_lookup_max: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_lookup_min: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ModelConfig {
     pub tensor_parallel_size: Option<u32>,
@@ -86,6 +139,15 @@ pub struct ModelConfig {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokenizer_mode: Option<String>,
+
+    /// Explicit prefix-caching toggle (`--enable-prefix-caching` on vLLM, guarding
+    /// against silent disable on hybrid-attention models such as Qwen3.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_prefix_caching: Option<bool>,
+
+    /// Declarative speculative decoding kit (DSpark / DFlash2 / MTP + Context Lookup).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speculative_config: Option<SpeculativeConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

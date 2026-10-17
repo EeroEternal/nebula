@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::endpoint::{EndpointInfo, EndpointStats, EndpointStatus};
-use crate::model_deployment::{DesiredState, ModelDeployment};
+use crate::model_deployment::{DeploymentTopology, DesiredState, ModelDeployment, ReplicaRole};
 
 /// One model's desired vs observed serving capacity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -109,6 +109,35 @@ pub fn build_capacity_snapshot(
                 hints.push(format!(
                     "avg_kv_usage={kv:.2}: KV near saturation — capacity tight even if replica count matches"
                 ));
+            }
+        }
+        let is_pd_split = matches!(dep.topology, Some(DeploymentTopology::PdSplit))
+            || eps.iter().any(|e| e.role != ReplicaRole::Mixed);
+        if is_pd_split {
+            let prefill_pending: u64 = eps
+                .iter()
+                .filter(|e| e.role == ReplicaRole::Prefill)
+                .filter_map(|e| model_stats.iter().find(|s| s.replica_id == e.replica_id))
+                .map(|s| s.pending_requests)
+                .sum();
+            if prefill_pending >= 4 {
+                hints.push(format!(
+                    "scale_prefill_pool: prefill_pending_total={prefill_pending} (ISL/TTFT compute-bound; consider adding Prefill replicas)"
+                ));
+            }
+            let decode_kvs: Vec<f64> = eps
+                .iter()
+                .filter(|e| e.role == ReplicaRole::Decode)
+                .filter_map(|e| model_stats.iter().find(|s| s.replica_id == e.replica_id))
+                .filter_map(|s| s.kv_cache_usage)
+                .collect();
+            if !decode_kvs.is_empty() {
+                let decode_avg_kv = decode_kvs.iter().sum::<f64>() / decode_kvs.len() as f64;
+                if decode_avg_kv > 0.85 {
+                    hints.push(format!(
+                        "scale_decode_pool: decode_avg_kv_usage={decode_avg_kv:.2} > 0.85 (OSL/TPOT memory-bound; consider adding Decode replicas)"
+                    ));
+                }
             }
         }
         if dep.desired_state == DesiredState::Running && replica_gap > 0 && gpu_free == 0 {
@@ -230,6 +259,7 @@ mod tests {
             last_updated_ms: 1,
             pending_requests: 12,
             prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.9),
         };
@@ -250,5 +280,44 @@ mod tests {
             .hints
             .iter()
             .any(|h| h.starts_with("avg_kv_usage=")));
+    }
+
+    #[test]
+    fn pd_split_emits_role_pool_scaling_hints() {
+        let mut d = dep("m1", 2);
+        d.topology = Some(DeploymentTopology::PdSplit);
+        let mut ep0 = ep("m1", 0, EndpointStatus::Ready);
+        ep0.role = ReplicaRole::Prefill;
+        let mut ep1 = ep("m1", 1, EndpointStatus::Ready);
+        ep1.role = ReplicaRole::Decode;
+        let s0 = EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 0,
+            last_updated_ms: 1,
+            pending_requests: 6,
+            prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.30),
+        };
+        let s1 = EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 1,
+            last_updated_ms: 1,
+            pending_requests: 1,
+            prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.90),
+        };
+        let snap = build_capacity_snapshot(&[d], &[ep0, ep1], &[s0, s1], 4, 2, 10);
+        assert!(snap.models[0]
+            .hints
+            .iter()
+            .any(|h| h.starts_with("scale_prefill_pool:")));
+        assert!(snap.models[0]
+            .hints
+            .iter()
+            .any(|h| h.starts_with("scale_decode_pool:")));
     }
 }

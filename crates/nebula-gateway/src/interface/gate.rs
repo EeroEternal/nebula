@@ -1,7 +1,7 @@
-//! C5 tooling capability gate.
+//! C5 tooling and `/v1/score` capability gates.
 
 use axum::{http::StatusCode, response::Response};
-use nebula_common::{tool_calling_for_engine, ModelSpec, SupportLevel};
+use nebula_common::{score_api_for_engine, tool_calling_for_engine, ModelSpec, SupportLevel};
 use nebula_meta::MetaStore;
 use serde_json::Value;
 
@@ -59,7 +59,24 @@ pub fn unsupported_tooling_response(engine_type: Option<&str>) -> Response {
     )
 }
 
-/// Look up model spec engine_type from etcd (`/models/{uid}/spec`).
+/// Stable OpenAI-shaped 400 for unsupported `/v1/score`.
+pub fn unsupported_score_response(engine_type: Option<&str>) -> Response {
+    let detail = match engine_type {
+        Some(et) if !et.is_empty() => {
+            format!("engine '{et}' does not support /v1/score")
+        }
+        _ => "/v1/score is not supported for this model".to_string(),
+    };
+    openai_error_response(
+        StatusCode::BAD_REQUEST,
+        "unsupported",
+        "score_api_unsupported",
+        detail,
+    )
+}
+
+/// Look up model spec engine_type from etcd (`/models/{uid}/spec`), resolving
+/// an omitted `engine_type` on an existing `ModelSpec` to `DEFAULT_ENGINE_TYPE` (`"vllm"`).
 pub async fn resolve_engine_type_for_model(
     store: &dyn MetaStore,
     model: Option<&str>,
@@ -72,9 +89,9 @@ pub async fn resolve_engine_type_for_model(
     match store.get(&key).await {
         Ok(Some((data, _))) => {
             let spec: ModelSpec = serde_json::from_slice(&data).ok()?;
-            spec.engine_type
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| s.to_ascii_lowercase())
+            Some(nebula_common::resolve_engine_type(
+                spec.engine_type.as_deref(),
+            ))
         }
         _ => None,
     }
@@ -103,6 +120,24 @@ pub async fn check_tooling_gate(
             None
         }
         ToolingGate::Deny => Some(unsupported_tooling_response(engine_type.as_deref())),
+    }
+}
+
+/// Enforce `score_api` capability on `POST /v1/score` (Batch 5.4).
+pub async fn check_score_gate(store: &dyn MetaStore, model: Option<&str>) -> Option<Response> {
+    let engine_type = resolve_engine_type_for_model(store, model).await;
+    let level = score_api_for_engine(engine_type.as_deref());
+    match tooling_gate_decision(level) {
+        ToolingGate::Allow => None,
+        ToolingGate::AllowWithWarn => {
+            tracing::warn!(
+                model = model.unwrap_or(""),
+                engine_type = engine_type.as_deref().unwrap_or(""),
+                "score_api capability unknown; allowing request"
+            );
+            None
+        }
+        ToolingGate::Deny => Some(unsupported_score_response(engine_type.as_deref())),
     }
 }
 
@@ -142,5 +177,7 @@ mod tests {
     fn unsupported_response_type_stable() {
         let resp = unsupported_tooling_response(Some("mock"));
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let score_resp = unsupported_score_response(Some("mock"));
+        assert_eq!(score_resp.status(), StatusCode::BAD_REQUEST);
     }
 }

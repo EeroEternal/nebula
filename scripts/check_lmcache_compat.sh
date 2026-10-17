@@ -13,18 +13,23 @@
 #   ./scripts/check_lmcache_compat.sh --full     # + 2-GPU store/retrieve proof
 #
 # Env:
-#   VLLM_IMAGE   engine image under test (default vllm/vllm-openai:v0.23.0)
-#   LMCACHE_PIN  lmcache version the deployment pins (default 0.5.5)
-#   MODEL_PATH   host model dir for --full (default /home/bodesi/models/Qwen2.5-7B-Instruct)
-#
-# Runs `pip install lmcache==$LMCACHE_PIN` inside the container — exactly what
-# a deployment does on top of the base image (which ships an older lmcache).
+#   VLLM_IMAGE         baked engine image/digest under test (default nebula/vllm:0.23.0-lmcache0.5.5)
+#   LMCACHE_PIN        lmcache version the deployment pins (default 0.5.5)
+#   ALLOW_RUNTIME_PIP  set to 1 ONLY when probing an unbaked upstream base image;
+#                      default 0 verifies the immutable image artifact as-is (pool.md §pd_split)
+#   MODEL_PATH         host model dir for --full (default /home/bodesi/models/Qwen2.5-7B-Instruct)
 set -euo pipefail
 
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:v0.23.0}"
+VLLM_IMAGE="${VLLM_IMAGE:-nebula/vllm:0.23.0-lmcache0.5.5}"
 LMCACHE_PIN="${LMCACHE_PIN:-0.5.5}"
+ALLOW_RUNTIME_PIP="${ALLOW_RUNTIME_PIP:-0}"
 MODEL_PATH="${MODEL_PATH:-/home/bodesi/models/Qwen2.5-7B-Instruct}"
 MODE="quick"; [ "${1:-}" = "--full" ] && MODE="full"
+
+PIP_STEP=":"
+if [ "$ALLOW_RUNTIME_PIP" = "1" ]; then
+  PIP_STEP="pip install -q lmcache==$LMCACHE_PIN"
+fi
 
 PASS=0; FAIL=0
 ok()   { echo "  ✔ $1"; PASS=$((PASS+1)); }
@@ -35,10 +40,11 @@ WORK="$(mktemp -d /tmp/lmcache-gate.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "== lmcache compat gate ($MODE) =="
-echo "   image=$VLLM_IMAGE pin=lmcache-$LMCACHE_PIN"
+echo "   image=$VLLM_IMAGE pin=lmcache-$LMCACHE_PIN allow_runtime_pip=$ALLOW_RUNTIME_PIP"
 
 # ---- quick checks (no GPU) ---------------------------------------------------
 cat > "$WORK/quick.py" <<'PY'
+import shutil
 import sys
 checks = []
 def check(name, fn):
@@ -58,7 +64,11 @@ def version_ok():
     return lmcache.__version__
 check(f"version >= pin {sys.argv[1]}", version_ok)
 
-check("lmcache_server binary", lambda: __import__("shutil").which("lmcache_server") or "missing")
+def binary_ok():
+    p = shutil.which("lmcache_server")
+    assert p is not None, "lmcache_server binary missing from PATH"
+    return p
+check("lmcache_server binary", binary_ok)
 
 from lmcache.v1.config import LMCacheEngineConfig
 check("config from_defaults", lambda: f"chunk_size={LMCacheEngineConfig.from_defaults().chunk_size}")
@@ -90,10 +100,14 @@ sys.exit(1 if any(not g for g, _, _ in checks) else 0)
 PY
 
 echo "-- quick battery:"
+QUICK_RC=0
 docker run --rm --runtime=runc -v "$WORK:/work" --entrypoint bash "$VLLM_IMAGE" \
-  -c "pip install -q lmcache==$LMCACHE_PIN 2>/dev/null; python3 /work/quick.py $LMCACHE_PIN" \
-  > "$WORK/quick.out" 2>&1 || true
-if grep -q "^FAIL" "$WORK/quick.out"; then
+  -c "$PIP_STEP && python3 /work/quick.py $LMCACHE_PIN" \
+  > "$WORK/quick.out" 2>&1 || QUICK_RC=$?
+if [ "$QUICK_RC" -ne 0 ]; then
+  bad "quick battery exited with non-zero status ($QUICK_RC)"
+  grep "^FAIL" "$WORK/quick.out" || grep -vE "^INFO|WARNING" "$WORK/quick.out" | tail -15 || true
+elif grep -q "^FAIL" "$WORK/quick.out"; then
   bad "quick battery (see below)"; grep "^FAIL" "$WORK/quick.out"
 elif grep -q "^PASS" "$WORK/quick.out"; then
   P=$(grep -c "^PASS" "$WORK/quick.out"); PASS=$((PASS+P))
@@ -104,12 +118,14 @@ fi
 
 # ---- lmcache_server boot check (no GPU) --------------------------------------
 echo "-- lmcache_server boot:"
-if docker run --rm --runtime=runc --entrypoint bash "$VLLM_IMAGE" \
-     -c "pip install -q lmcache==$LMCACHE_PIN 2>/dev/null; lmcache_server 127.0.0.1 6899 cpu > /tmp/srv.log 2>&1 & sleep 4; grep -q 'Server started' /tmp/srv.log && echo BOOT-OK; kill %1 2>/dev/null || true" \
-     2>/dev/null | grep -q BOOT-OK; then
+BOOT_RC=0
+BOOT_OUT=$(docker run --rm --runtime=runc --entrypoint bash "$VLLM_IMAGE" \
+  -c "$PIP_STEP && lmcache_server 127.0.0.1 6899 cpu > /tmp/srv.log 2>&1 & srv=\$!; sleep 4; grep -q 'Server started' /tmp/srv.log && echo BOOT-OK; kill \$srv 2>/dev/null || true" \
+  2>/dev/null) || BOOT_RC=$?
+if [ "$BOOT_RC" -eq 0 ] && printf '%s\n' "$BOOT_OUT" | grep -q BOOT-OK; then
   ok "lmcache_server boots on plain TCP"
 else
-  bad "lmcache_server failed to boot"
+  bad "lmcache_server failed to boot (rc=$BOOT_RC)"
 fi
 
 # ---- full: 2-GPU cross-engine store/retrieve ---------------------------------
@@ -132,7 +148,10 @@ retrieve_locations: ["RemoteBackend"]
 YAML
   cat > "$WORK/run.sh" <<'EOS'
 #!/bin/bash
-pip install -q lmcache==PIN 2>/dev/null
+set -euo pipefail
+if [ "ALLOW_PIP" = "1" ]; then
+  pip install -q lmcache==PIN 2>/dev/null
+fi
 lmcache_server 127.0.0.1 6800 cpu > /work/remote.log 2>&1 &
 sleep 2
 export PYTHONHASHSEED=123 LMCACHE_USE_EXPERIMENTAL=True VLLM_ENABLE_V1_MULTIPROCESSING=1 VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -170,11 +189,11 @@ curl -s --max-time 180 -o /dev/null http://127.0.0.1:8200/v1/completions -H "Con
 sleep 3
 curl -s --max-time 180 -o /dev/null http://127.0.0.1:8200/v1/completions -H "Content-Type: application/json" -d @/work/req.json
 sleep 3
-grep -a "Stored" /work/prefill.log | tail -1
-grep -aE "Retrieved" /work/decode.log | tail -1
-grep -aqE "Retrieved [1-9][0-9]* out of" /work/decode.log && echo TRANSFER-OK || echo TRANSFER-FAIL
+grep -a "Stored" /work/prefill.log | tail -1 || true
+grep -aE "Retrieved" /work/decode.log | tail -1 || true
+grep -aqE "Retrieved [1-9][0-9]* out of" /work/decode.log && echo TRANSFER-OK || { echo TRANSFER-FAIL; exit 1; }
 EOS
-  sed -i "s|PIN|$LMCACHE_PIN|; s|MODEL|$MODEL_PATH|" "$WORK/run.sh"
+  sed -i "s|PIN|$LMCACHE_PIN|; s|MODEL|$MODEL_PATH|; s|ALLOW_PIP|$ALLOW_RUNTIME_PIP|" "$WORK/run.sh"
   docker rm -f lmcache-gate >/dev/null 2>&1 || true
   docker run -d --name lmcache-gate --gpus all -v "$MODEL_PATH:$MODEL_PATH:ro" \
     -v "$WORK:/work" --network host --entrypoint bash "$VLLM_IMAGE" /work/run.sh >/dev/null
@@ -183,13 +202,16 @@ EOS
     sleep 10
     OUT=$(docker logs lmcache-gate 2>&1 | tail -4 || true)
     echo "$OUT" | grep -qE "TRANSFER-(OK|FAIL)|ENGINES-UP-FAIL" && break
+    [ "$(docker inspect -f '{{.State.Running}}' lmcache-gate 2>/dev/null || echo false)" = "false" ] && break
   done
+  OUT=$(docker logs lmcache-gate 2>&1 | tail -8 || true)
+  FULL_RC=$(docker inspect -f '{{.State.ExitCode}}' lmcache-gate 2>/dev/null || echo 1)
   docker rm -f lmcache-gate >/dev/null 2>&1 || true
-  if echo "$OUT" | grep -q TRANSFER-OK; then
+  if [ "$FULL_RC" = "0" ] && echo "$OUT" | grep -q TRANSFER-OK; then
     ok "cross-engine store→retrieve over lm:// TCP ($(echo "$OUT" | grep -a Stored | tail -1 | grep -oE '[0-9]+/[0-9]+ tokens' | head -1))"
     note "$(echo "$OUT" | grep -a Retrieved | tail -1 | cut -c1-160)"
   else
-    bad "cross-engine transfer (last: $(echo "$OUT" | tail -1 | cut -c1-140))"
+    bad "cross-engine transfer (rc=$FULL_RC, last: $(echo "$OUT" | tail -1 | cut -c1-140))"
   fi
 fi
 

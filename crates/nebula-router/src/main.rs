@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/completions", post(proxy_chat_completions))
         .route("/v1/embeddings", post(proxy_chat_completions))
         .route("/v1/rerank", post(proxy_chat_completions))
+        .route("/v1/score", post(proxy_chat_completions))
         .route(
             "/v1/models",
             post(proxy_chat_completions).get(proxy_chat_completions),

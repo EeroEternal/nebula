@@ -198,6 +198,11 @@ pub struct EngineCapability {
     #[serde(default)]
     pub tool_calling: SupportLevel,
 
+    /// Whether the engine exposes `/v1/score` single-pass prefill probability scoring
+    /// (Batch 5.4: SGLang native `/v1/score` + JEV compaction gating).
+    #[serde(default)]
+    pub score_api: SupportLevel,
+
     /// Topologies this engine release can participate in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub topologies: Vec<ServingTopologyKind>,
@@ -258,6 +263,7 @@ pub fn static_capability_vllm() -> EngineCapability {
         kv_connector: Some(true),
         grpc: Some(false),
         tool_calling: SupportLevel::Supported,
+        score_api: SupportLevel::Unsupported,
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
@@ -287,6 +293,7 @@ pub fn static_capability_sglang() -> EngineCapability {
         kv_connector: Some(true),
         grpc: Some(false),
         tool_calling: SupportLevel::Supported,
+        score_api: SupportLevel::Supported,
         topologies: vec![
             ServingTopologyKind::Standalone,
             ServingTopologyKind::Replicated,
@@ -311,6 +318,17 @@ pub fn tool_calling_for_engine(engine_type: Option<&str>) -> SupportLevel {
     };
     static_capability(&et.to_ascii_lowercase())
         .map(|c| c.tool_calling)
+        .unwrap_or(SupportLevel::Unknown)
+}
+
+/// Resolve `score_api` (`/v1/score`) from the static table for a known engine type.
+/// SGLang → `Supported`; vLLM → `Unsupported`; unknown engine → `Unknown`.
+pub fn score_api_for_engine(engine_type: Option<&str>) -> SupportLevel {
+    let Some(et) = engine_type.map(str::trim).filter(|s| !s.is_empty()) else {
+        return SupportLevel::Unknown;
+    };
+    static_capability(&et.to_ascii_lowercase())
+        .map(|c| c.score_api)
         .unwrap_or(SupportLevel::Unknown)
 }
 
@@ -359,6 +377,52 @@ pub fn validate_model_config(
         }
     }
 
+    if let Some(ref spec) = config.speculative_config {
+        if matches!(
+            spec.method,
+            Some(
+                crate::model_request::SpeculativeMethod::Dspark
+                    | crate::model_request::SpeculativeMethod::Dflash2
+            )
+        ) {
+            return Err(
+                "speculative_config.method 'dspark' / 'dflash2' is rejected until verified on live engines; use 'draft_model', 'mtp', or 'ngram'"
+                    .into(),
+            );
+        }
+        if spec.num_speculative_tokens == Some(0) {
+            return Err("speculative_config.num_speculative_tokens must be >= 1".into());
+        }
+        if spec.prompt_lookup_max == Some(0) {
+            return Err("speculative_config.prompt_lookup_max must be >= 1".into());
+        }
+        if (spec.prompt_lookup_max.is_some() || spec.prompt_lookup_min.is_some())
+            && spec.method != Some(crate::model_request::SpeculativeMethod::Ngram)
+        {
+            return Err(
+                "speculative_config.prompt_lookup_max / prompt_lookup_min are only supported when speculative_config.method = ngram"
+                    .into(),
+            );
+        }
+        if spec.method == Some(crate::model_request::SpeculativeMethod::DraftModel)
+            && spec
+                .draft_model
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            return Err("speculative_config.draft_model is required for draft_model".into());
+        }
+        if engine_type == "sglang"
+            && spec.method == Some(crate::model_request::SpeculativeMethod::Ngram)
+        {
+            return Err(
+                "engine 'sglang' does not support speculative_config.method = ngram".into(),
+            );
+        }
+    }
+
     Ok(())
 }
 
@@ -377,7 +441,7 @@ pub fn validate_engine_and_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model_request::ModelConfig;
+    use crate::model_request::{ModelConfig, SpeculativeConfig, SpeculativeMethod};
 
     #[test]
     fn support_level_roundtrip() {
@@ -427,6 +491,62 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unverified_methods_non_ngram_prompt_lookup_and_missing_draft_model() {
+        let sg_ngram = ModelConfig {
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Ngram),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_model_config("sglang", &sg_ngram)
+            .unwrap_err()
+            .contains("ngram"));
+
+        for unverified in [SpeculativeMethod::Dspark, SpeculativeMethod::Dflash2] {
+            let cfg = ModelConfig {
+                speculative_config: Some(SpeculativeConfig {
+                    method: Some(unverified),
+                    draft_model: Some("draft".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert!(validate_model_config("vllm", &cfg)
+                .unwrap_err()
+                .contains("rejected until verified on live engines"));
+            assert!(validate_model_config("sglang", &cfg)
+                .unwrap_err()
+                .contains("rejected until verified on live engines"));
+        }
+
+        let non_ngram_lookup = ModelConfig {
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::DraftModel),
+                draft_model: Some("Qwen/Qwen2.5-0.5B".into()),
+                prompt_lookup_max: Some(8),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_model_config("vllm", &non_ngram_lookup)
+            .unwrap_err()
+            .contains("method = ngram"));
+
+        let missing_draft = ModelConfig {
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::DraftModel),
+                draft_model: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(validate_model_config("vllm", &missing_draft)
+            .unwrap_err()
+            .contains("draft_model"));
+    }
+
+    #[test]
     fn static_tables_mark_source_and_obs_levels() {
         let v = static_capability_vllm();
         assert_eq!(v.source, CapabilitySource::StaticTable);
@@ -436,6 +556,7 @@ mod tests {
             SupportLevel::Unsupported
         );
         assert_eq!(v.tool_calling, SupportLevel::Supported);
+        assert_eq!(v.score_api, SupportLevel::Unsupported);
 
         let s = static_capability_sglang();
         assert_eq!(
@@ -443,6 +564,7 @@ mod tests {
             SupportLevel::Unsupported
         );
         assert_eq!(s.tool_calling, SupportLevel::Supported);
+        assert_eq!(s.score_api, SupportLevel::Supported);
     }
 
     #[test]
@@ -455,6 +577,14 @@ mod tests {
         );
         assert_eq!(
             tool_calling_for_engine(Some("vllm")),
+            SupportLevel::Supported
+        );
+        assert_eq!(
+            score_api_for_engine(Some("vllm")),
+            SupportLevel::Unsupported
+        );
+        assert_eq!(
+            score_api_for_engine(Some("sglang")),
             SupportLevel::Supported
         );
     }

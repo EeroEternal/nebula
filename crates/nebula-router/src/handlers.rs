@@ -305,12 +305,19 @@ pub async fn proxy_chat_completions(
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
         let dual = st.dual_write.clone();
+        let router_for_stream = st.router.clone();
+        let tenant_for_stream = ctx.tenant_id.clone();
+        let session_for_stream = ctx.session_id.clone();
+        let replica_for_stream = _selected_ep.replica_id;
         let model_uid_for_stream = model_uid.clone();
         let status_code = status.as_u16();
         let request_id_for_task = request_id.clone();
         tokio::spawn(async move {
             let mut first_chunk = true;
+            let mut first_token_at: Option<std::time::Instant> = None;
+            let mut decode_chunks: u32 = 0;
             let mut aborted = false;
+            let mut tool_pause_marked = false;
             loop {
                 tokio::select! {
                     biased;
@@ -323,9 +330,26 @@ pub async fn proxy_chat_completions(
                             Some(Ok(b)) => {
                                 if first_chunk {
                                     first_chunk = false;
+                                    first_token_at = Some(std::time::Instant::now());
                                     let ttft = request_start.elapsed().as_secs_f64();
                                     metrics.observe_ttft(&model_uid_for_stream, ttft);
                                     dual.emit_ttft("nebula_router", &model_uid_for_stream, ttft);
+                                } else {
+                                    decode_chunks =
+                                        decode_chunks.saturating_add(count_sse_token_chunks(&b));
+                                }
+                                if !tool_pause_marked {
+                                    if let Some(ref sid) = session_for_stream {
+                                        if nebula_router::response_has_tool_calls(&b) {
+                                            router_for_stream.mark_tool_pause_for_tenant(
+                                                tenant_for_stream.as_deref(),
+                                                sid,
+                                                &model_uid_for_stream,
+                                                replica_for_stream,
+                                            );
+                                            tool_pause_marked = true;
+                                        }
+                                    }
                                 }
                                 if tx.send(Ok(b)).await.is_err() {
                                     aborted = true;
@@ -339,6 +363,13 @@ pub async fn proxy_chat_completions(
             }
             let e2e = request_start.elapsed().as_secs_f64();
             metrics.observe_e2e_latency(&model_uid_for_stream, e2e);
+            if !aborted && decode_chunks > 0 {
+                if let Some(first_at) = first_token_at {
+                    let decode_secs = first_at.elapsed().as_secs_f64();
+                    metrics
+                        .observe_tpot(&model_uid_for_stream, decode_secs / (decode_chunks as f64));
+                }
+            }
             if aborted {
                 metrics
                     .requests_aborted_total
@@ -384,6 +415,16 @@ pub async fn proxy_chat_completions(
         Ok(b) => b,
         Err(_) => Bytes::new(),
     };
+    if let Some(ref sid) = ctx.session_id {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            st.router.mark_tool_pause_for_tenant(
+                ctx.tenant_id.as_deref(),
+                sid,
+                &model_uid,
+                _selected_ep.replica_id,
+            );
+        }
+    }
 
     let e2e = request_start.elapsed().as_secs_f64();
     st.metrics.observe_e2e_latency(&model_uid, e2e);
@@ -416,4 +457,21 @@ fn inject_router_echo_headers(out: &mut Response, request_id: &str, replica_id: 
         out.headers_mut()
             .insert(HeaderName::from_static(HEADER_REPLICA_ID), v);
     }
+}
+
+fn count_sse_token_chunks(bytes: &[u8]) -> u32 {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    let mut n = 0u32;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("data:") {
+            let payload = rest.trim();
+            if !payload.is_empty() && payload != "[DONE]" {
+                n = n.saturating_add(1);
+            }
+        }
+    }
+    n
 }
