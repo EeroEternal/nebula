@@ -19,6 +19,7 @@ LOG_DIR="${LOG_DIR:-$HOME/nebula-stack-logs}"
 ETCD_CONTAINER="${ETCD_CONTAINER:-nebula-etcd}"
 # pd_split shared-KV components (optional; only needed for topology=pd_split)
 LMCACHE_IMAGE="${LMCACHE_IMAGE:-}"            # e.g. nebula/vllm:0.23.0-lmcache0.5.5
+export NEBULA_APPROVED_PD_IMAGES="${NEBULA_APPROVED_PD_IMAGES:-${LMCACHE_IMAGE}}"
 LMCACHE_SERVER_CONTAINER="${LMCACHE_SERVER_CONTAINER:-nebula-lmcache}"
 LMCACHE_CTRL_CONTAINER="${LMCACHE_CTRL_CONTAINER:-nebula-lmcache-ctrl}"
 LMCACHE_REMOTE_PORT="${LMCACHE_REMOTE_PORT:-6800}"
