@@ -321,12 +321,15 @@ pub async fn heartbeat_loop(
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .or_else(|| Some(nebula_common::DEFAULT_NODE_PLATFORM.to_string()));
+        let (host_memory_total_mb, host_memory_available_mb) = host_memory_mb();
         let status = NodeStatus {
             node_id: node_id.clone(),
             last_heartbeat_ms: now_ms(),
             gpus,
             api_addr: Some(format!("http://0.0.0.0:{}", api_port)),
             platform,
+            host_memory_total_mb,
+            host_memory_available_mb,
         };
 
         let bytes = match serde_json::to_vec(&status) {
@@ -784,6 +787,23 @@ pub async fn heartbeat_loop(
 
         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
     }
+}
+
+/// `(total_mb, available_mb)` from `/proc/meminfo`; `(None, None)` when unavailable
+/// (non-Linux, restricted container). The KV L1 tier consumes host DRAM, so the node has
+/// to report it for the capacity snapshot to see oversubscription.
+fn host_memory_mb() -> (Option<u64>, Option<u64>) {
+    let Ok(text) = std::fs::read_to_string("/proc/meminfo") else {
+        return (None, None);
+    };
+    let field = |name: &str| -> Option<u64> {
+        text.lines()
+            .find(|l| l.starts_with(name))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|kb| kb.parse::<u64>().ok())
+            .map(|kb| kb / 1024)
+    };
+    (field("MemTotal:"), field("MemAvailable:"))
 }
 
 #[cfg(test)]

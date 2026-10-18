@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::endpoint::{EndpointInfo, EndpointStats, EndpointStatus};
 use crate::model_deployment::{DeploymentTopology, DesiredState, ModelDeployment, ReplicaRole};
+use crate::node_status::NodeStatus;
 
 /// One model's desired vs observed serving capacity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -41,6 +42,7 @@ pub fn build_capacity_snapshot(
     deployments: &[ModelDeployment],
     endpoints: &[EndpointInfo],
     stats: &[EndpointStats],
+    nodes: &[NodeStatus],
     gpu_total: u32,
     gpu_free: u32,
     now_ms: u64,
@@ -137,6 +139,37 @@ pub fn build_capacity_snapshot(
                     hints.push(format!(
                         "scale_decode_pool: decode_avg_kv_usage={decode_avg_kv:.2} > 0.85 (OSL/TPOT memory-bound; consider adding Decode replicas)"
                     ));
+                }
+            }
+        }
+        // KV L1 tier (Batch 6.1): each pd_split replica offloads KV to host DRAM. That
+        // reservation used to be an undeclared 5 GB per replica, so N replicas could
+        // silently overcommit a node's memory. Now the size is declared and checked
+        // against what the node reports.
+        if let Some(kv) = dep.kv_sharing.as_ref() {
+            let per_replica_gb = u64::from(kv.local_cpu_size_gb.unwrap_or(5));
+            let replicas = eps.len() as u64;
+            if replicas > 0 {
+                let mut declared_per_node: std::collections::HashMap<&str, u64> =
+                    std::collections::HashMap::new();
+                for ep in &eps {
+                    *declared_per_node.entry(ep.node_id.as_str()).or_insert(0) += per_replica_gb;
+                }
+                for (node_id, declared_gb) in declared_per_node {
+                    // Unknown host memory is not an alarm: stay silent rather than
+                    // emit noise for nodes that do not report it.
+                    if let Some(free_mb) = nodes
+                        .iter()
+                        .find(|n| n.node_id == node_id)
+                        .and_then(|n| n.host_memory_available_mb)
+                    {
+                        let declared_mb = declared_gb.saturating_mul(1024);
+                        if declared_mb > free_mb {
+                            hints.push(format!(
+                                "kv_l1_oversubscribed: node {node_id} declares {declared_gb} GB of KV L1 host DRAM but reports only {free_mb} MB available (undeclared default is 5 GB/replica; set kv_sharing.local_cpu_size_gb or lower replicas)"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -239,6 +272,7 @@ mod tests {
             &[dep("m1", 2)],
             &[ep("m1", 1, EndpointStatus::Ready)],
             &[],
+            &[],
             4,
             0,
             10,
@@ -267,6 +301,7 @@ mod tests {
             &[dep("m1", 1)],
             &[ep("m1", 1, EndpointStatus::Ready)],
             &[stats],
+            &[],
             2,
             1,
             10,
@@ -280,6 +315,55 @@ mod tests {
             .hints
             .iter()
             .any(|h| h.starts_with("avg_kv_usage=")));
+    }
+
+    #[test]
+    fn kv_l1_oversubscription_is_reported_per_node() {
+        use crate::node_status::NodeStatus;
+        let mut d = dep("m1", 2);
+        d.topology = Some(DeploymentTopology::PdSplit);
+        d.kv_sharing = Some(crate::model_deployment::KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(8),
+            ..Default::default()
+        });
+        let mut e0 = ep("m1", 0, EndpointStatus::Ready);
+        e0.node_id = "n1".into();
+        let mut e1 = ep("m1", 1, EndpointStatus::Ready);
+        e1.node_id = "n1".into();
+        // 2 replicas x 8 GB declared, node has 4 GB available.
+        let node = NodeStatus {
+            node_id: "n1".into(),
+            last_heartbeat_ms: 1,
+            host_memory_total_mb: Some(65536),
+            host_memory_available_mb: Some(4096),
+            ..Default::default()
+        };
+        let snap = build_capacity_snapshot(
+            &[d.clone()],
+            &[e0.clone(), e1.clone()],
+            &[],
+            &[node],
+            2,
+            2,
+            10,
+        );
+        assert!(
+            snap.models[0]
+                .hints
+                .iter()
+                .any(|h| h.starts_with("kv_l1_oversubscribed") && h.contains("16 GB")),
+            "hints: {:?}",
+            snap.models[0].hints
+        );
+
+        // Unknown host memory must not produce an alarm (no noise for non-reporting nodes).
+        let snap_unknown = build_capacity_snapshot(&[d], &[e0, e1], &[], &[], 2, 2, 10);
+        assert!(!snap_unknown.models[0]
+            .hints
+            .iter()
+            .any(|h| h.starts_with("kv_l1_oversubscribed")));
     }
 
     #[test]
@@ -310,7 +394,7 @@ mod tests {
             prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.90),
         };
-        let snap = build_capacity_snapshot(&[d], &[ep0, ep1], &[s0, s1], 4, 2, 10);
+        let snap = build_capacity_snapshot(&[d], &[ep0, ep1], &[s0, s1], &[], 4, 2, 10);
         assert!(snap.models[0]
             .hints
             .iter()

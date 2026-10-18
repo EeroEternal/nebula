@@ -485,6 +485,7 @@ mod tests {
             kv_sharing: Some(KvSharingSpec {
                 remote_url: "lm://127.0.0.1:6800".into(),
                 serde: "naive".into(),
+                ..Default::default()
             }),
             version: 1,
             updated_at_ms: 1,

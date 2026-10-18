@@ -343,6 +343,7 @@ mod tests {
             gpus: vec![],
             api_addr: None,
             platform: None,
+            ..Default::default()
         }
     }
 
@@ -405,6 +406,7 @@ mod tests {
             }],
             api_addr: None,
             platform: Some(platform.into()),
+            ..Default::default()
         }
     }
 

@@ -831,6 +831,7 @@ mod assignment_tests {
             kv_sharing: Some(KvSharingSpec {
                 remote_url: "lm://store:6800".into(),
                 serde: "naive".into(),
+                ..Default::default()
             }),
         }
     }
@@ -922,6 +923,7 @@ mod assignment_tests {
         let kv = KvSharingSpec {
             remote_url: "lm://store:6800".into(),
             serde: "naive".into(),
+            ..Default::default()
         };
         let dep = ModelDeployment {
             model_uid: "m".into(),
@@ -1002,6 +1004,7 @@ mod assignment_tests {
             }],
             platform: Some("cuda_x86".into()),
             api_addr: None,
+            ..Default::default()
         };
 
         assert!(node_eligible_for_placement(&base_node, now, true));

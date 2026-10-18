@@ -194,10 +194,22 @@ pub async fn capacity_snapshot(store: &dyn MetaStore) -> Result<CapacitySnapshot
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
+    // Host DRAM matters for the KV L1 tier: without it the snapshot cannot notice that
+    // N replicas x declared GB overcommit a node.
+    let mut nodes = Vec::new();
+    if let Ok(raw) = store.list_prefix("/nodes/").await {
+        for (_, v, _) in raw {
+            if let Ok(n) = serde_json::from_slice::<nebula_common::NodeStatus>(&v) {
+                nodes.push(n);
+            }
+        }
+    }
+
     Ok(build_capacity_snapshot(
         &deployments,
         &endpoints,
         &stats,
+        &nodes,
         gpu_total,
         gpu_free,
         now_ms,
