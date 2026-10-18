@@ -29,7 +29,7 @@
     <!-- Plane 2: L3 (Focal) -->
     <line x1="138" y1="168" x2="138" y2="348" stroke="#2563EB" stroke-width="2"/>
     <circle cx="138" cy="168" r="3" fill="#2563EB"/>
-    <circle cx="138" cy="348" r="3" fill="#2563EB"/>
+    <circle cx="138" cy="348" r="3" fill="#3B82F6"/>
     <text x="126" y="252" text-anchor="end" font-size="11" font-weight="700" fill="#1D4ED8">L3 · 状态与读写解耦</text>
     <text x="126" y="268" text-anchor="end" font-size="9.5" font-weight="600" fill="#2563EB">全局寻址与分池协同</text>
 
@@ -38,7 +38,7 @@
     <circle cx="138" cy="396" r="3" fill="#059669"/>
     <circle cx="138" cy="626" r="3" fill="#059669"/>
     <text x="126" y="430" text-anchor="end" font-size="11" font-weight="700" fill="#0F172A">L2 · 硬件契约与存储</text>
-    <text x="126" y="446" text-anchor="end" font-size="9.5" font-weight="500" fill="#64748B">能力准入与分级缓存</text>
+    <text x="126" y="446" text-anchor="end" font-size="9.5" font-weight="500" fill="#64748B">部署选型与同构池卸载</text>
 
     <text x="126" y="582" text-anchor="end" font-size="11" font-weight="700" fill="#065F46">L1 · 异构池与错峰经营</text>
     <text x="126" y="598" text-anchor="end" font-size="9.5" font-weight="600" fill="#059669">国产 NPU + GPU + 主存</text>
@@ -111,11 +111,11 @@
     <text x="474" y="256" font-size="12" font-weight="700" fill="#1E293B">多卡缓存地图与防拥塞</text>
     <text x="474" y="274" font-size="10.5" fill="#1D4ED8" font-weight="600">nebula-indexd 全局索引</text>
     <text x="474" y="294" font-size="10" fill="#475569">综合权衡省下算力与当前排队水位</text>
-    <text x="474" y="310" font-size="10" fill="#64748B">多卡显存拼成大池 · 热点自动分流</text>
+    <text x="474" y="310" font-size="10" fill="#64748B">同构显存拼成大池 · 热点自动分流</text>
 
     <!-- Block C (Highlighted Sub-block) -->
     <rect x="584" y="234" width="188" height="98" rx="6" fill="#FFFFFF" stroke="#60A5FA" stroke-width="1.6"/>
-    <text x="678" y="256" font-size="12" font-weight="700" fill="#1D4ED8">读写分离异构分池编排</text>
+    <text x="678" y="256" font-size="12" font-weight="700" fill="#1D4ED8">读写分离分池编排</text>
     <text x="678" y="274" font-size="10.5" fill="#2563EB" font-weight="600">pd_split（Prefill ↔ Decode）</text>
     <text x="678" y="294" font-size="10" fill="#475569">算力卡专职读长文 · 带宽卡专职吐字</text>
     <text x="678" y="310" font-size="10" fill="#64748B">消除长文阻塞 · 首字延迟 p99 降 21%</text>
@@ -136,37 +136,37 @@
     <path d="M 882 348 L 894 392"/>
   </g>
   <rect x="441" y="362" width="270" height="18" rx="4" fill="#DBEAFE"/>
-  <text x="576" y="374" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">声明式硬件契约映射 + lm:// 标准 TCP 传输</text>
+  <text x="576" y="374" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">部署期硬件/精度选型 + 同构池内分级缓存</text>
 
   <!-- ==================== LAYER 2 ==================== -->
   <g filter="url(#shadow)">
     <!-- Roofline Selection Contract -->
     <rect x="160" y="396" width="196" height="80" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="176" cy="417" r="4" fill="#10B981"/>
-    <text x="186" y="421" font-size="12.5" font-weight="700" fill="#0F172A">并发拐点动态适配</text>
-    <text x="174" y="441" font-size="10.5" fill="#475569">Roofline 算术强度选型</text>
-    <text x="174" y="458" font-size="9.5" fill="#64748B">低并发配4-bit带宽池·高并发切FP8算力池</text>
+    <text x="186" y="421" font-size="12.5" font-weight="700" fill="#0F172A">部署期负载定型与配卡</text>
+    <text x="174" y="441" font-size="10.5" fill="#475569">Roofline 并发拐点选型规划</text>
+    <text x="174" y="458" font-size="9.5" fill="#64748B">低并发服务配4-bit·高并发配原生FP8</text>
 
     <!-- Capability & Compat Gates -->
     <rect x="372" y="396" width="196" height="80" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="388" cy="417" r="4" fill="#10B981"/>
-    <text x="398" y="421" font-size="12.5" font-weight="700" fill="#0F172A">异构准入与防呆门禁</text>
-    <text x="386" y="441" font-size="10.5" fill="#475569">硬件证据与镜像白名单校验</text>
-    <text x="386" y="458" font-size="9.5" fill="#64748B">上线前核验卡型/镜像 · 巡检缓存失效</text>
+    <text x="398" y="421" font-size="12.5" font-weight="700" fill="#0F172A">异构兼容校验与巡检</text>
+    <text x="386" y="441" font-size="10.5" fill="#475569">上线前配置拦截 + 运行时体检</text>
+    <text x="386" y="458" font-size="9.5" fill="#64748B">拦截不兼容卡型/镜像·告警缓存失效</text>
 
     <!-- Tiered KV Storage Offload -->
     <rect x="584" y="396" width="196" height="80" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="600" cy="417" r="4" fill="#10B981"/>
-    <text x="610" y="421" font-size="12.5" font-weight="700" fill="#0F172A">三级存储以存代算</text>
+    <text x="610" y="421" font-size="12.5" font-weight="700" fill="#0F172A">同构域内三级缓存卸载</text>
     <text x="598" y="441" font-size="10.5" fill="#475569">L0 显存 → L1 主存 → L2 闪存</text>
-    <text x="598" y="458" font-size="9.5" fill="#64748B">用廉价主存/磁盘放大10x显存（二期）</text>
+    <text x="598" y="458" font-size="9.5" fill="#64748B">同模型/TP域内借主机内存扩10x容量</text>
 
     <!-- Hardware-Neutral lm:// & Tenant Isolation -->
     <rect x="796" y="396" width="196" height="80" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="812" cy="417" r="4" fill="#10B981"/>
-    <text x="822" y="421" font-size="12.5" font-weight="700" fill="#0F172A">跨商互通与租户隔离</text>
-    <text x="810" y="441" font-size="10.5" fill="#475569">LMCache lm:// · cache_salt</text>
-    <text x="810" y="458" font-size="9.5" fill="#64748B">标准TCP国产/GPU共网 · 租户缓存隔离</text>
+    <text x="822" y="421" font-size="12.5" font-weight="700" fill="#0F172A">池内 TCP 传输与网关隔离</text>
+    <text x="810" y="441" font-size="10.5" fill="#475569">lm:// 免专有网卡 + 网关租户隔离</text>
+    <text x="810" y="458" font-size="9.5" fill="#64748B">同构池内标准TCP传KV·网关注盐隔离</text>
   </g>
 
   <!-- L2 -> L1 Parallel Paths (Dashed Emerald Arrows) -->
@@ -198,7 +198,7 @@
     <!-- Silicon 3 -->
     <rect x="584" y="542" width="196" height="84" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
     <text x="682" y="564" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">主机内存与高速闪存池</text>
-    <text x="682" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">主机分级存储池（L1 / L2）</text>
+    <text x="682" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">单机/同构池分级存储（L1 / L2）</text>
     <text x="682" y="600" text-anchor="middle" font-size="9.5" fill="#065F46">数百GB空闲DDR5 + 本地高速NVMe</text>
     <text x="682" y="614" text-anchor="middle" font-size="9.5" fill="#047857">低成本驻留多轮会话与行业知识库缓存</text>
 
