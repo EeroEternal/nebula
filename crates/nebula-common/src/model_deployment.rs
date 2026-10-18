@@ -256,6 +256,56 @@ pub fn lmcache_controller_env(
     ]
 }
 
+/// Extract `host:port` from a controller URL (`http://h:9000`, `h:9001/`, `h:9000`).
+///
+/// The readiness gate below needs a socket address; the env var is documented as a URL.
+pub fn controller_addr(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host_port = without_scheme.split('/').next()?.trim();
+    if host_port.is_empty() {
+        return None;
+    }
+    Some(host_port.to_string())
+}
+
+/// Wait until `lmcache_controller` accepts a TCP connection, or `timeout` elapses.
+///
+/// Bring-up order matters and the failure is **sticky**: an engine that starts before the
+/// controller registers but never reports its KV keys, so `/lookup` answers cold for that
+/// engine's lifetime (measured, see `docs/dev/benefit-verification.md`
+/// §"暖信号启动顺序"). Waiting here turns that silent degradation into a retryable
+/// launch failure.
+///
+/// Returns `Ok(())` immediately when no controller URL is configured.
+pub async fn wait_for_lmcache_controller(
+    controller_url: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let Some(url) = controller_url.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(());
+    };
+    let Some(addr) = controller_addr(url) else {
+        return Err(format!("unparseable NEBULA_LMCACHE_CONTROLLER_URL: {url}"));
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "lmcache_controller not reachable at {addr} after {}s; starting an engine now would register but never report KV keys (pd_split would silently run as single-Prefill)",
+                timeout.as_secs()
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
 /// `--kv-transfer-config` JSON for a pd_split replica role.
 ///
 /// prefill → `kv_producer` (prefills and stores to the shared KV);
@@ -972,6 +1022,62 @@ mod tests {
             None,
             &[Some("cuda-12.4-sm89".into()), Some("cuda-12.4-sm90".into())],
         )
+        .is_ok());
+    }
+
+    #[test]
+    fn controller_url_is_reduced_to_a_socket_address() {
+        assert_eq!(
+            controller_addr("http://127.0.0.1:9000").as_deref(),
+            Some("127.0.0.1:9000")
+        );
+        assert_eq!(
+            controller_addr("127.0.0.1:9001/").as_deref(),
+            Some("127.0.0.1:9001")
+        );
+        assert_eq!(
+            controller_addr(" http://lmcache-ctrl.ns:9000 ").as_deref(),
+            Some("lmcache-ctrl.ns:9000")
+        );
+        assert_eq!(controller_addr("   "), None);
+    }
+
+    #[tokio::test]
+    async fn controller_gate_fails_fast_when_nothing_listens() {
+        // No controller configured -> no wait, launch proceeds.
+        assert!(
+            wait_for_lmcache_controller(None, std::time::Duration::from_millis(10))
+                .await
+                .is_ok()
+        );
+
+        // Nothing listening on this port -> the gate must fail (so the scheduler retries
+        // instead of starting an engine that would never report its KV keys).
+        let started = std::time::Instant::now();
+        let err =
+            wait_for_lmcache_controller(Some("127.0.0.1:9"), std::time::Duration::from_millis(300))
+                .await
+                .expect_err("must not succeed without a listener");
+        assert!(err.contains("not reachable"), "{err}");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(300),
+            "the gate must wait for its budget, not give up instantly"
+        );
+    }
+
+    #[tokio::test]
+    async fn controller_gate_passes_once_something_listens() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept in the background so the connect succeeds.
+        tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        assert!(wait_for_lmcache_controller(
+            Some(&format!("http://{addr}")),
+            std::time::Duration::from_secs(2)
+        )
+        .await
         .is_ok());
     }
 

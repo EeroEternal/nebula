@@ -320,7 +320,7 @@ curl -s http://127.0.0.1:8081/v1/score \
 | `NEBULA_PD_PREFILL_SPILLOVER_PENDING` | Router | `pd_split` 冷请求在 Prefill 池积压达阈值（`min_prefill_pending >= 阈值`）且某 Decode 副本有新鲜 `/stats/` 且 `pending_requests < min_prefill_pending` 时溢出直跑 Decode 的阈值 | `0`（默认关闭；显式设 `>0` 开启） |
 | `NEBULA_TOOL_PAUSE_TTL_MS` | Router | Agentic tool-call 暂停窗口内租户级 `(tenant_id, x-session-id)` 单次续接租约 TTL（毫秒） | `60000` |
 
-**`pd_split` 的启动顺序**：`lmcache_controller` / `lmcache_server` 必须先于引擎就绪（对 controller `/health` 做就绪等待）。引擎先起时 worker 能注册但**不会上报 KV 键**，`/lookup` 恒返回空、`pd_lookup_warm_total` 恒 0，`pd_split` 静默退化为单 Prefill 副本，**且只能靠重启引擎恢复**。路由器在连续 50 次全冷后打一条警告并计入 `stage_stats_missing_total{decision="warm_signal_cold"}`。
+**`pd_split` 的启动顺序**：`lmcache_controller` / `lmcache_server` 必须先于引擎就绪 —— 设了 `NEBULA_LMCACHE_CONTROLLER_URL` 时，`nebula-node`（引擎启动前）与 `k8s-controller`（建 Pod 前）会**等 controller 的 TCP 端口可连**，超时（`NEBULA_LMCACHE_CONTROLLER_WAIT_MS`，默认 node 60s / controller 30s）则本次不启动、下一轮重试。引擎先起时 worker 能注册但**不会上报 KV 键**，`/lookup` 恒返回空、`pd_lookup_warm_total` 恒 0，`pd_split` 静默退化为单 Prefill 副本，**且只能靠重启引擎恢复**。路由器在连续 50 次全冷后打一条警告并计入 `stage_stats_missing_total{decision="warm_signal_cold"}`。
 
 **先看有没有 stats**：`pd_split` 的短请求旁路、Prefill 溢流、以及 `least_pending` 在副本间分摊，全部依赖 `/stats/{model_uid}/{replica_id}`（由 `nebula-node` 或 `k8s-controller` 抓引擎 `/metrics` 写入）。指标 `nebula_router_stage_stats_missing_total` 非零或 `nebula_route_stale_stats_dropped_total` 持续增长，就说明这套管道没通 —— 此时任何 `pd_split` 的收益数字都不成立。
 

@@ -65,11 +65,12 @@ pub use model_cache::{
     ModelCacheEntry, NodeDiskStatus,
 };
 pub use model_deployment::{
-    approved_pd_images_from_env, effective_replica_config, effective_replica_image,
-    hardware_family_of_platform, kv_sharing_env, kv_transfer_config, lmcache_controller_env,
-    merge_model_config, validate_pd_split_image, validate_pd_split_with_context,
-    validate_replica_specs, DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment,
-    ReplicaPlacementSpec, ReplicaRole,
+    approved_pd_images_from_env, controller_addr, effective_replica_config,
+    effective_replica_image, hardware_family_of_platform, kv_sharing_env, kv_transfer_config,
+    lmcache_controller_env, merge_model_config, validate_pd_split_image,
+    validate_pd_split_with_context, validate_replica_specs, wait_for_lmcache_controller,
+    DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment, ReplicaPlacementSpec,
+    ReplicaRole,
 };
 pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};

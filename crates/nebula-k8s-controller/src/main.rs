@@ -529,6 +529,31 @@ async fn ensure_replica_running(
             .map_err(|e| anyhow::anyhow!(e))?;
     }
 
+    // Readiness gate: `lmcache_controller` must accept connections before the engine
+    // starts, otherwise LMCache registers the worker but never reports its KV keys and
+    // `/lookup` answers cold for that engine's lifetime (sticky until restart).
+    // Skipping this tick lets the controller come up instead of baking in the bad state.
+    if let Ok(ctrl) = std::env::var("NEBULA_LMCACHE_CONTROLLER_URL") {
+        let wait_ms: u64 = std::env::var("NEBULA_LMCACHE_CONTROLLER_WAIT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30_000);
+        if let Err(e) = nebula_common::wait_for_lmcache_controller(
+            Some(ctrl.as_str()),
+            std::time::Duration::from_millis(wait_ms),
+        )
+        .await
+        {
+            tracing::warn!(
+                model_uid = %model_uid,
+                replica_id,
+                error = %e,
+                "skipping pod creation until lmcache_controller is ready"
+            );
+            return Ok(());
+        }
+    }
+
     // Pod specs are immutable: a config change needs delete-then-create, not
     // apply. Delete now; the next reconcile tick creates the fresh pod.
     if config_changed && !phase.is_empty() {
