@@ -300,6 +300,8 @@ pub async fn forward_upstream_response(
     if is_sse {
         let mut upstream = resp.bytes_stream();
         let stream_idle = nebula_common::stream_idle_timeout();
+        let mut chunk_deadline =
+            nebula_common::ChunkDeadline::new(nebula_common::first_byte_timeout(), stream_idle);
         let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
@@ -328,7 +330,7 @@ pub async fn forward_upstream_response(
                         tracing::info!("gateway SSE aborted: client disconnected");
                         break;
                     }
-                    item = tokio::time::timeout(stream_idle, upstream.next()) => {
+                    item = tokio::time::timeout(chunk_deadline.next_deadline().0, upstream.next()) => {
                         match item {
                             Ok(Some(Ok(b))) => {
                                 if first {
@@ -381,8 +383,9 @@ pub async fn forward_upstream_response(
                                     .requests_aborted_total
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 tracing::warn!(
+                                    first,
                                     idle_ms = stream_idle.as_millis() as u64,
-                                    "gateway upstream SSE idle timeout; ending stream"
+                                    "gateway upstream SSE deadline exceeded; ending stream"
                                 );
                                 break;
                             }

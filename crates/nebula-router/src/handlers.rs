@@ -304,6 +304,8 @@ pub async fn proxy_chat_completions(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
         let stream_idle = nebula_common::stream_idle_timeout();
+        let mut chunk_deadline =
+            nebula_common::ChunkDeadline::new(nebula_common::first_byte_timeout(), stream_idle);
         let metrics = st.metrics.clone();
         let dual = st.dual_write.clone();
         let router_for_stream = st.router.clone();
@@ -326,7 +328,7 @@ pub async fn proxy_chat_completions(
                         aborted = true;
                         break;
                     }
-                    item = tokio::time::timeout(stream_idle, upstream.next()) => {
+                    item = tokio::time::timeout(chunk_deadline.next_deadline().0, upstream.next()) => {
                         match item {
                             Ok(Some(Ok(b))) => {
                                 if first_chunk {
@@ -358,8 +360,9 @@ pub async fn proxy_chat_completions(
                             Err(_) => {
                                 tracing::warn!(
                                     model_uid = %model_uid_for_stream,
+                                    first_chunk,
                                     idle_ms = stream_idle.as_millis() as u64,
-                                    "router SSE idle timeout; ending stream"
+                                    "router upstream SSE deadline exceeded; ending stream"
                                 );
                                 break;
                             }
