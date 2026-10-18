@@ -115,6 +115,192 @@ pub async fn stop_model(
     Ok((StatusCode::OK, Json(dep)).into_response())
 }
 
+/// `lmcache_controller` lifecycle API for one model (Batch 6.3: warm & pin / clear / lookup).
+///
+/// Disabled (503) unless a controller base URL is configured; see
+/// [`nebula_control::LmcacheController`]. Tokens are supplied by the caller because the
+/// control plane has no tokenizer - `warmup` takes a raw prompt and lets the engine do the
+/// tokenizing work it would do anyway.
+fn cache_controller() -> Result<nebula_control::LmcacheController, ServiceError> {
+    nebula_control::LmcacheController::from_env().ok_or_else(|| {
+        ServiceError::BadRequest(
+            "KV cache control is disabled: set NEBULA_LMCACHE_CONTROLLER_URL (host:port) or NEBULA_LMCACHE_CONTROLLER_BASE_URL"
+                .into(),
+        )
+    })
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CacheLookupRequest {
+    /// Prompt tokens to probe. Required: the control plane does not tokenize.
+    #[serde(default)]
+    pub tokens: Vec<u32>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CachePinRequest {
+    #[serde(default)]
+    pub tokens: Vec<u32>,
+    /// KV tier to pin in; defaults to the L1 host-DRAM backend.
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CacheClearRequest {
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CacheWarmupRequest {
+    /// Prompt whose KV should be computed and stored (tokenized by the engine).
+    pub prompt: String,
+    /// Also pin the prefix after warming it.
+    #[serde(default)]
+    pub pin: bool,
+    #[serde(default)]
+    pub location: Option<String>,
+}
+
+/// `POST /api/v2/models/{uid}/cache/lookup` — how many tokens of this prefix the store holds.
+pub async fn cache_lookup(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(_model_uid): Path<String>,
+    Json(req): Json<CacheLookupRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Viewer) {
+        return Ok(resp.into_response());
+    }
+    if req.tokens.is_empty() {
+        return Err(ServiceError::BadRequest(
+            "tokens must not be empty (the control plane does not tokenize)".into(),
+        ));
+    }
+    let client = cache_controller()?;
+    let matched = client.lookup(&req.tokens).await?;
+    let _ = st;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "matched_tokens": matched })),
+    )
+        .into_response())
+}
+
+/// `POST /api/v2/models/{uid}/cache/pin` — lock a hot prefix so eviction cannot drop it.
+pub async fn cache_pin(
+    State(_st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(_model_uid): Path<String>,
+    Json(req): Json<CachePinRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp.into_response());
+    }
+    if req.tokens.is_empty() {
+        return Err(ServiceError::BadRequest(
+            "tokens must not be empty (the control plane does not tokenize)".into(),
+        ));
+    }
+    let location = req
+        .location
+        .unwrap_or_else(|| nebula_control::DEFAULT_KV_LOCATION.to_string());
+    let client = cache_controller()?;
+    let num_tokens = client.pin(&location, &req.tokens).await?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "pinned_tokens": num_tokens, "location": location })),
+    )
+        .into_response())
+}
+
+/// `POST /api/v2/models/{uid}/cache/clear` — wipe this model's cache in a tier.
+pub async fn cache_clear(
+    State(_st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(_model_uid): Path<String>,
+    Json(req): Json<CacheClearRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp.into_response());
+    }
+    let location = req
+        .location
+        .unwrap_or_else(|| nebula_control::DEFAULT_KV_LOCATION.to_string());
+    let client = cache_controller()?;
+    let num_tokens = client.clear(&location).await?;
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({ "cleared_tokens": num_tokens, "location": location })),
+    )
+        .into_response())
+}
+
+/// `POST /api/v2/models/{uid}/cache/warmup` — make the engine compute and store this
+/// prompt's KV, optionally pinning it afterwards.
+///
+/// The warm-up request goes through the router like any other inference call: that is the
+/// only way to *produce* KV (the controller can only pin what already exists).
+pub async fn cache_warmup(
+    State(st): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path(model_uid): Path<String>,
+    Json(req): Json<CacheWarmupRequest>,
+) -> Result<impl IntoResponse, ServiceError> {
+    if let Some(resp) = require_role(&ctx, Role::Operator) {
+        return Ok(resp.into_response());
+    }
+    if req.prompt.trim().is_empty() {
+        return Err(ServiceError::BadRequest("prompt must not be empty".into()));
+    }
+    let body = serde_json::json!({
+        "model": model_uid,
+        "prompt": req.prompt,
+        "max_tokens": 1,
+        "temperature": 0,
+        "stream": false,
+    });
+    let url = format!("{}/v1/completions", st.router_url.trim_end_matches('/'));
+    let resp = st
+        .http
+        .post(&url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|e| ServiceError::Upstream(format!("warmup request failed: {e}")))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(ServiceError::Upstream(format!(
+            "warmup inference -> {status}: {}",
+            text.chars().take(200).collect::<String>()
+        )));
+    }
+    // Warm-up is a real inference call: it populates the shared store as a side effect.
+    // Pinning needs the token ids, which only the engine has, so a pin request is reported
+    // as "not applied" rather than silently claimed.
+    let location = req
+        .location
+        .unwrap_or_else(|| nebula_control::DEFAULT_KV_LOCATION.to_string());
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "warmed": true,
+            "pinned": false,
+            "pin_requested": req.pin,
+            "location": location,
+            "note": if req.pin {
+                "pin requires token ids the control plane does not have; call /cache/pin with tokens"
+            } else {
+                ""
+            },
+        })),
+    )
+        .into_response())
+}
+
 pub async fn scale_model(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,

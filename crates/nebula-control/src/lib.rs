@@ -5,6 +5,7 @@ pub mod governance;
 pub mod health;
 pub mod idempotency;
 pub mod inventory;
+pub mod lmcache;
 pub mod models;
 pub mod operation;
 pub mod pool;
@@ -28,6 +29,7 @@ pub use inventory::{
     list_nodes, list_replicas, DrainNodeResponse, DrainReplicaRequest, DrainReplicaResponse,
     NodeInventory, ReplicaView,
 };
+pub use lmcache::{LmcacheController, DEFAULT_KV_LOCATION};
 pub use models::{create_model, get_model, list_models, CreateModelRequest};
 pub use operation::{
     create_async_operation, create_operation, get_operation, Operation, OperationKind,

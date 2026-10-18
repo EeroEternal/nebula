@@ -450,6 +450,21 @@ retry_statuses = [404, 500, 502, 503, 504]   # 故意不含 429，见「关键�
 - 预算两个旋钮：单次尝试 `NEBULA_PROXY_FIRST_BYTE_TIMEOUT_MS`（默认 60s），跨尝试总计 `NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS`（默认 90s）。**不要只调大前者**，否则坏集群会把延迟按尝试次数放大。
 - 两条路径都已实现：`nebula-router` 与 `NEBULA_ROUTER_MODE=embedded`（gateway 进程内选 endpoint）都在首块到达后才提交状态；embedded 模式的重试计数是 `nebula_gateway_first_byte_retry_total`，router 模式是 `nebula_router_first_byte_retry_total`。
 
+### 缓存生命周期 API（Batch 6.3）
+
+给运维/Agent 用的 KV 缓存操作面，全部走 BFF（需 `NEBULA_LMCACHE_CONTROLLER_URL` 或 `NEBULA_LMCACHE_CONTROLLER_BASE_URL`，未配置时返回 400 并说明）：
+
+| 端点 | 权限 | 作用 |
+|------|------|------|
+| `POST /api/v2/models/{uid}/cache/lookup` | Viewer | `{tokens:[...]}` → `matched_tokens`（0 = 冷） |
+| `POST /api/v2/models/{uid}/cache/pin` | Operator | `{tokens:[...], location?}` → 锁住热门前缀，防驱逐 |
+| `POST /api/v2/models/{uid}/cache/clear` | Operator | `{location?}` → 清空该实例的缓存 |
+| `POST /api/v2/models/{uid}/cache/warmup` | Operator | `{prompt}` → 走 Router 真跑一次推理，把 KV 算出来写进共享存储 |
+
+- `tokens` 必须由调用方提供：控制面没有分词器；`warmup` 之所以收 prompt，是因为**只有引擎能产出 KV**，controller 只能 pin 已存在的。
+- `location` 默认 `LocalCPUBackend`（L1 DRAM 层）。
+- 没有 worker 注册时 `pin`/`clear` 会返回上游 500（`The number of tokens … should be the same across all workers.`），说明 shape 正确但没有可操作对象 —— 先确认引擎已注册（`query_worker_info`）。
+
 ### 什么时候不要用
 
 - **只有一个 gateway 实例**：多一跳代理，没有任何故障切换收益。

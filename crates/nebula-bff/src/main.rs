@@ -141,6 +141,19 @@ async fn main() -> anyhow::Result<()> {
         .route("/models/:model_uid/stop", post(handlers_v2::stop_model))
         .route("/models/:model_uid/scale", put(handlers_v2::scale_model))
         .route(
+            "/models/:model_uid/cache/lookup",
+            post(handlers_v2::cache_lookup),
+        )
+        .route("/models/:model_uid/cache/pin", post(handlers_v2::cache_pin))
+        .route(
+            "/models/:model_uid/cache/clear",
+            post(handlers_v2::cache_clear),
+        )
+        .route(
+            "/models/:model_uid/cache/warmup",
+            post(handlers_v2::cache_warmup),
+        )
+        .route(
             "/models/:model_uid/save-as-template",
             post(handlers_v2::save_as_template),
         )
