@@ -371,6 +371,12 @@ pub async fn proxy_chat_completions(
                                     error = %e,
                                     "router upstream stream error; ending stream early"
                                 );
+                                let _ = tx
+                                    .send(Ok(nebula_router::sse_error_frame(
+                                        "upstream_stream_error",
+                                        "upstream stream failed before completion",
+                                    )))
+                                    .await;
                                 break;
                             }
                             Ok(None) => break,
@@ -381,6 +387,12 @@ pub async fn proxy_chat_completions(
                                     idle_ms = stream_idle.as_millis() as u64,
                                     "router upstream SSE deadline exceeded; ending stream"
                                 );
+                                let _ = tx
+                                    .send(Ok(nebula_router::sse_error_frame(
+                                        "upstream_stream_timeout",
+                                        "upstream stream stalled past the deadline",
+                                    )))
+                                    .await;
                                 break;
                             }
                         }

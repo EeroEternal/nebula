@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import sys
 import time
+
+STALL_SENTINEL = "__stall__"
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -52,7 +54,8 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         model = req.get("model", "mock-model")
         if path == "/v1/chat/completions":
             if req.get("stream"):
-                self._stream_chat(model)
+                stall = STALL_SENTINEL in json.dumps(req.get("messages") or req.get("prompt") or "")
+                self._stream_chat(model, stall=stall)
                 return
             self._send_json(
                 200,
@@ -89,13 +92,13 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def _stream_chat(self, model: str) -> None:
+    def _stream_chat(self, model: str, stall: bool = False) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
         self.end_headers()
-        for i in range(200):
+        frames = 2 if stall else 200
+        for i in range(frames):
             chunk = {
                 "id": "chatcmpl-mock-stream",
                 "object": "chat.completion.chunk",
@@ -106,8 +109,18 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
             self.wfile.flush()
             time.sleep(0.05)
+        if stall:
+            # Sentinel for the stalled-stream gate: keep the socket open without ever
+            # sending [DONE] so the proxy's idle deadline is what ends the response.
+            time.sleep(300)
+            return
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
+        # A real engine closes the response after [DONE]. Without this the handler keeps
+        # the socket open for a next request on the same HTTP/1.1 connection, so the
+        # proxy never sees EOF and its idle deadline fires *after* a perfectly good
+        # stream (found while adding the stalled-stream gate).
+        self.close_connection = True
 
 
 def main() -> None:
