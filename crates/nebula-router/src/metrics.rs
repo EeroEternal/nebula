@@ -401,7 +401,7 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         "# HELP nebula_router_stage_stats_missing_total pd_split stage decisions skipped because the pool had no fresh /stats/ (needs the nebula-node/k8s-controller scrape).\n\
          # TYPE nebula_router_stage_stats_missing_total counter\n",
     );
-    for decision in ["short_bypass", "prefill_spillover"] {
+    for decision in ["short_bypass", "prefill_spillover", "warm_signal_cold"] {
         body.push_str(&format!(
             "nebula_router_stage_stats_missing_total{{decision=\"{decision}\"}} {}\n",
             st.router.stage_stats_missing(decision),

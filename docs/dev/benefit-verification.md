@@ -101,12 +101,27 @@
 1. **首字节前状态承诺没有带来性能回退**：两臂各并发点与 #44 合并前的同口径数字（`replicated` 1.00/3.48/6.89/9.05）在噪声范围内，p50 甚至更低（117 vs 131 ms）。
 2. **失败形态确实消失**：此前同一负载下 `pd_split` 出现过 15/192 条流在 `[DONE]` 前被截断、以及提交后截断的 200；本轮 **0 失败、0 截断、0 次首字节重试**（`nebula_router_upstream_stream_error_total=0`、`first_byte_retry_total=0`）。缓冲层只在"副本不出字"时才介入，正常路径无额外开销。
 3. **这一轮不是有效的双副本 A/B**，原因必须写清楚：harness 里没有 `/stats/` 采集管道（nebula-node / k8s-controller 的 scrape），router 看不到任何副本的 `pending_requests`，`least_pending` 只能挑到一个 endpoint —— **两臂实际上都只用了单个引擎**，所以两组数字才会几乎相同（12.48 vs 12.02 rps）。
-4. **`pd_split` 的暖信号本轮没有生效**：`pd_lookup_total=600`、`pd_lookup_warm_total=0`。控制器日志显示它退回到 `builtin` 哈希（`Could not load 'builtin' from vLLM. Using builtin hash.`），与引擎侧的 `--prefix-caching-hash-algo sha256_cbor` 不同域 → 全部判冷。此前出现 `warm=46` 的那一轮不可复现，说明**控制器与引擎的哈希域一致性是一个前置条件，必须先验证**（否则 `pd_split` 静默退化成单 Prefill 副本）。
+4. **`pd_split` 的暖信号本轮没有生效**：`pd_lookup_total=600`、`pd_lookup_warm_total=0`。**原因已在同日后继实验定位（下方的哈希猜测是错的，保留在此作为更正记录）**：`lmcache_controller` 必须**先于引擎**就绪；引擎先启动会让它"注册成功但 KV 键永远不上报"，`/lookup` 对该引擎写入的所有前缀恒返回空 `layout_info`，且**在该引擎生命周期内不可自愈**。证据见下方「暖信号启动顺序（2026-10-18 追加）」。
+
+### 暖信号启动顺序（2026-10-18 追加，纠正上面的哈希猜测）
+
+同一套 pd_split 栈（真引擎 + LMCache 0.5.5 探针镜像），只改**启动顺序**：
+
+| 启动顺序 | 引擎侧 | `/lookup` 对刚 prefill 过的前缀 | `query_worker_info` |
+|---|---|---|---|
+| **controller 先就绪**（等 ~12s） | `Using hash algorithm: builtin` | **`layout_info` 非空** | 两个 instance 都已注册 |
+| **引擎先起、controller 后起** | 同上（哈希一致） | **恒为空**，等 30s 仍空 | 两个 instance 同样已注册 |
+
+- 两侧哈希域其实是**一致的**（引擎与 controller 都退回 LMCache `builtin`，日志同样打印 `Could not load 'builtin' from vLLM`），所以此前"哈希域不一致"的结论是错的，已被此表推翻。
+- 真正的问题是**注册时机的粘性**：引擎在 controller 未就绪时启动，worker 之后能注册，但它启动时那次 `Registering KV caches` 没有对端，键再也不会被上报 —— 表现正是"`pd_lookup_total` 增长、`pd_lookup_warm_total` 恒 0、`pd_split` 静默退化成单 Prefill 副本"。
+- 这也解释了几轮 A/B 里 `warm=46` 与 `warm=0` 的随机差异：差别不在模型、不在负载，而在**controller 是否先于引擎就绪**。
+
+运维结论：`lmcache_controller` / `lmcache_server` 必须在引擎之前就绪，并对 controller 的 `/health` 做就绪等待；事后无法补救，只能重启引擎。`LMCACHE_PRE_CACHING_HASH_ALGORITHM` 若被显式钉死，两侧必须同值（默认 `builtin` 即一致）。
 
 ### 做真正的双副本 A/B 还缺什么
 
 - `/stats/` 来源：跑 `nebula-node`（或给 harness 加一个 stats scraper），否则 router 无法在副本间分摊；
-- 控制器哈希域：确认 `lmcache_controller` 与引擎使用同一 hash algo（日志里 `Using hash algorithm:` 必须与引擎一致），否则 `pd_lookup_warm_total` 恒为 0；
+- controller 就绪顺序：`lmcache_controller` 必须先于引擎就绪（否则键不上报、`pd_lookup_warm_total` 恒 0，见上表）；
 - 之后才能比较"亲和 replicated vs 暖路由 pd_split"的吞吐/尾延迟。
 
 在上述前置条件满足前，**不要引用本表作为 `pd_split` vs `replicated` 的收益结论** —— 它只说明"加了首字节承诺之后，单引擎路径没有变慢、也没有截断流"。
