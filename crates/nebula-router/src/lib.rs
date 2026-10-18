@@ -85,9 +85,55 @@ fn warm_cache_key(model_uid: &str, token_ids: &[u32]) -> (String, [u8; 32]) {
     (model_uid.to_string(), digest)
 }
 
+/// `choices[]` of an OpenAI-shaped body paused for a tool call.
+fn json_has_tool_calls(v: &serde_json::Value) -> bool {
+    let Some(choices) = v.get("choices").and_then(|c| c.as_array()) else {
+        return false;
+    };
+    choices.iter().any(|c| {
+        c.get("finish_reason").and_then(|r| r.as_str()) == Some("tool_calls")
+            || c.pointer("/message/tool_calls")
+                .and_then(|tc| tc.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+            || c.pointer("/delta/tool_calls")
+                .and_then(|tc| tc.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+    })
+}
+
+/// JSON bodies of an SSE chunk (`data: {...}` lines, empty / `[DONE]` dropped).
+/// Falls back to the whole input when the input carries no SSE framing.
+fn sse_data_payloads(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        let Some(rest) = line.trim_ascii().strip_prefix(b"data:") else {
+            continue;
+        };
+        let payload = rest.trim_ascii();
+        if payload.is_empty() || payload == b"[DONE]" {
+            continue;
+        }
+        out.push(payload);
+    }
+    if out.is_empty() {
+        out.push(bytes);
+    }
+    out
+}
+
 /// Inspect an upstream response payload or SSE chunk to detect whether the
 /// model paused for a tool call (`finish_reason == "tool_calls"` or non-empty
 /// `tool_calls` array).
+///
+/// SSE framing is stripped before the JSON parse: a `data: `-prefixed chunk never
+/// parses as JSON, so a streamed `delta.tool_calls` used to be invisible here.
+/// A chunk cut mid-object still cannot be parsed — engines emit a final chunk with
+/// `finish_reason == "tool_calls"`, which is the reliable signal for streaming.
+///
+/// For streamed responses use [`ToolCallScanner`], which also handles a marker
+/// split across chunk boundaries and skips the parse when no marker bytes appear.
 pub fn response_has_tool_calls(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return false;
@@ -100,22 +146,63 @@ pub fn response_has_tool_calls(bytes: &[u8]) -> bool {
     {
         return true;
     }
-    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) {
-        if let Some(choices) = v.get("choices").and_then(|c| c.as_array()) {
-            return choices.iter().any(|c| {
-                c.get("finish_reason").and_then(|r| r.as_str()) == Some("tool_calls")
-                    || c.pointer("/message/tool_calls")
-                        .and_then(|tc| tc.as_array())
-                        .map(|a| !a.is_empty())
-                        .unwrap_or(false)
-                    || c.pointer("/delta/tool_calls")
-                        .and_then(|tc| tc.as_array())
-                        .map(|a| !a.is_empty())
-                        .unwrap_or(false)
-            });
+    sse_data_payloads(bytes).into_iter().any(|payload| {
+        serde_json::from_slice::<serde_json::Value>(payload)
+            .map(|v| json_has_tool_calls(&v))
+            .unwrap_or(false)
+    })
+}
+
+const TOOL_CALLS_MARKER: &[u8] = b"tool_calls";
+/// Bytes kept from the previous chunk so a marker split across a chunk boundary
+/// is still detected (`tool_calls` minus one byte).
+const TOOL_CALLS_SCAN_CARRY: usize = TOOL_CALLS_MARKER.len() - 1;
+
+fn contains_marker(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Streaming `tool_calls` detector for SSE bodies.
+///
+/// Two things a bare per-chunk [`response_has_tool_calls`] call gets wrong for
+/// streamed responses:
+/// 1. Chunk boundaries fall wherever the transport decides — including inside the
+///    `data:` framing or inside the `tool_calls` literal — so a per-chunk check
+///    misses the event and the session silently loses its continuation lease.
+///    Chunks are therefore assembled into complete SSE lines before analysis.
+/// 2. UTF-8 validation + JSON parse ran on every chunk of every stream. A raw
+///    byte prefilter means a stream without tool calls pays only a byte scan.
+#[derive(Debug, Clone, Default)]
+pub struct ToolCallScanner {
+    /// Incomplete trailing line carried across chunks.
+    buf: Vec<u8>,
+}
+
+/// Cap on a single carried line. A JSON event larger than this is not something
+/// the pause detector needs to parse; only the marker tail is kept so a later
+/// marker split is still seen.
+const TOOL_CALLS_SCAN_LINE_CAP: usize = 8 * 1024;
+
+impl ToolCallScanner {
+    /// Feed one streamed chunk; returns `true` once a `tool_calls` pause is seen.
+    pub fn feed(&mut self, chunk: &[u8]) -> bool {
+        self.buf.extend_from_slice(chunk);
+        let mut hit = false;
+        let mut consumed = 0;
+        while let Some(nl) = self.buf[consumed..].iter().position(|b| *b == b'\n') {
+            let line = &self.buf[consumed..consumed + nl];
+            if contains_marker(line, TOOL_CALLS_MARKER) && response_has_tool_calls(line) {
+                hit = true;
+            }
+            consumed += nl + 1;
         }
+        self.buf.drain(..consumed);
+        if self.buf.len() > TOOL_CALLS_SCAN_LINE_CAP {
+            let keep = self.buf.len() - TOOL_CALLS_SCAN_CARRY;
+            self.buf.drain(..keep);
+        }
+        hit
     }
-    false
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2584,5 +2671,49 @@ mod model_spec_update_tests {
             .expect("spec re-registration deadlocked (DashMap get+remove on same key)");
         assert_eq!(router.resolve_model("Org/Model-B"), "m1");
         assert_eq!(router.resolve_model("m1"), "m1");
+    }
+}
+
+#[cfg(test)]
+mod tool_call_scanner_tests {
+    use super::*;
+
+    const CHUNK: &[u8] = br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","type":"function"}]}}]}
+"#;
+
+    #[test]
+    fn detects_tool_calls_inside_one_chunk() {
+        let mut s = ToolCallScanner::default();
+        assert!(s.feed(CHUNK));
+    }
+
+    #[test]
+    fn detects_tool_calls_split_across_chunk_boundaries() {
+        // Every possible split point of the marker must be detected: a TCP/SSE
+        // chunk boundary can land anywhere inside the literal.
+        for split in 1..CHUNK.len() {
+            let mut s = ToolCallScanner::default();
+            let hit = s.feed(&CHUNK[..split]) || s.feed(&CHUNK[split..]);
+            assert!(
+                hit,
+                "marker missed when the chunk boundary fell at byte {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_streams_without_tool_calls_and_binary_tails() {
+        let mut s = ToolCallScanner::default();
+        assert!(!s.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n"));
+        assert!(!s.feed(b"data: {\"choices\":[{\"delta\":{}}]}\n"));
+        // Non-UTF8 bytes must not be treated as a hit (and must not panic).
+        assert!(!s.feed(&[0xff, 0xfe, 0x00]));
+        assert!(!s.feed(b"data: [DONE]\n"));
+    }
+
+    #[test]
+    fn finish_reason_tool_calls_is_detected() {
+        let mut s = ToolCallScanner::default();
+        assert!(s.feed(b"data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n"));
     }
 }

@@ -318,6 +318,7 @@ pub async fn proxy_chat_completions(
             let mut decode_chunks: u32 = 0;
             let mut aborted = false;
             let mut tool_pause_marked = false;
+            let mut tool_scanner = nebula_router::ToolCallScanner::default();
             loop {
                 tokio::select! {
                     biased;
@@ -340,7 +341,7 @@ pub async fn proxy_chat_completions(
                                 }
                                 if !tool_pause_marked {
                                     if let Some(ref sid) = session_for_stream {
-                                        if nebula_router::response_has_tool_calls(&b) {
+                                        if tool_scanner.feed(&b) {
                                             router_for_stream.mark_tool_pause_for_tenant(
                                                 tenant_for_stream.as_deref(),
                                                 sid,

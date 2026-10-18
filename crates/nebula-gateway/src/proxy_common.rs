@@ -313,6 +313,7 @@ pub async fn forward_upstream_response(
             let _permit = permit;
             let mut first = true;
             let mut tool_pause_marked = false;
+            let mut tool_scanner = nebula_router::ToolCallScanner::default();
             loop {
                 tokio::select! {
                     biased;
@@ -344,7 +345,7 @@ pub async fn forward_upstream_response(
                                         session_for_stream.as_deref(),
                                         routed_for_stream.as_ref(),
                                     ) {
-                                        if nebula_router::response_has_tool_calls(&b) {
+                                        if tool_scanner.feed(&b) {
                                             router.mark_tool_pause_for_tenant(
                                                 tenant_for_stream.as_deref(),
                                                 sid,
