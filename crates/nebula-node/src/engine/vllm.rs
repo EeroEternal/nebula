@@ -269,6 +269,22 @@ impl Engine for VllmEngine {
             kv_envs = nebula_common::kv_sharing_env(ctx.role, kv);
             // Controller registration: makes the shared store's contents queryable
             // (POST /lookup) — the pd_split warm signal source.
+            // Readiness gate: an engine that starts before lmcache_controller registers
+            // but never reports KV keys, and that is sticky for the engine's lifetime
+            // (pd_split silently degrades to a single Prefill replica). Better to fail the
+            // launch and let the scheduler retry.
+            if let Ok(ctrl) = std::env::var("NEBULA_LMCACHE_CONTROLLER_URL") {
+                let wait_ms: u64 = std::env::var("NEBULA_LMCACHE_CONTROLLER_WAIT_MS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(60_000);
+                nebula_common::wait_for_lmcache_controller(
+                    Some(ctrl.as_str()),
+                    std::time::Duration::from_millis(wait_ms),
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!(e))?;
+            }
             if let Ok(ctrl) = std::env::var("NEBULA_LMCACHE_CONTROLLER_URL") {
                 let ctrl_reply = std::env::var("NEBULA_LMCACHE_CONTROLLER_REPLY_URL")
                     .unwrap_or_else(|_| ctrl.clone());
