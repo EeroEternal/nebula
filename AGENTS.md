@@ -43,10 +43,10 @@ Hard limit **80 lines / 1200 tokens**. Near the limit: **zero-sum** (add one, re
 7. **Sorting & Search**: Sort options state direction; search placeholders state searchable fields.
 8. **etcd is the control-plane authority**: 准入三问; one write owner; Gateway/Router hot path reads `/endpoints/` only. BFF-only CRUD → Postgres. See [`docs/dev/etcd.md`](docs/dev/etcd.md).
 9. **K8s is execution plane only**: do not replace etcd with the kube API; no dual-reconcile of Node vs controller. See [`docs/dev/k8s.md`](docs/dev/k8s.md).
-10. **Local CI only**: Never add or revive GitHub Actions test workflows. Push gate is `./scripts/ci.sh` via skill [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md).
+10. **Local CI only**: Never add or revive GitHub Actions test workflows. Push gate is `./scripts/ci.sh`.
 11. **Plugin/middleware** for custom data-plane logic (headers, auth decoration, masking). Never hardcode tenant branches into the core pipeline.
-12. **Docs layout**: `manual/` `versions/` `dev/` `arch/`; sole index `docs/README.md`; short names; `manual/` has no roadmap checkboxes. Details: [`docs-layout.md`](docs/ai/agents/docs-layout.md).
-13. **Zone C & Constraints over Coupling**: Nebula is **state- & stage-aware orchestration above engine black-boxes (Zone C / S2)**, not stateless LB. Treat KV Cache not merely as a read-only routing signal (`warm/cold`), but as a **first-class L2/L3/L4 tiered resource to declare, isolate, warm/pin, and account for**. Never touch engine internals (Zone A/B / S1), never pass KV bytes through Nebula (S3), and never do per-request cross-node handoffs; align components via **deploy-time constraints, shared hash invariants (`NEBULA_KV_HASH_SEED`), and hint-only recomputable KV state**. See [`docs/dev/direction.md`](docs/dev/direction.md), [`docs/dev/kv-governance.md`](docs/dev/kv-governance.md).
+12. **Docs layout**: `manual/` `versions/` `dev/` `arch/`; sole index `docs/README.md`; short names; `manual/` has no roadmap checkboxes.
+13. **Zone C & Constraints over Coupling**: Nebula is **state- & stage-aware orchestration above engine black-boxes (Zone C / S2)**, not stateless LB. Treat KV Cache as a **tiered L2/L3/L4 resource (declare / isolate / warm / account)**, not a read-only `warm/cold` signal. Never touch engine internals (Zone A/B / S1), never pass KV bytes through Nebula (S3), and never do per-request cross-node handoffs; align components via **deploy-time constraints, shared hash invariants (`NEBULA_KV_HASH_SEED`), and hint-only recomputable KV state**.
 
 ## Skills Index
 
