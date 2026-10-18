@@ -45,14 +45,14 @@
 | 谁 | 做什么 |
 |----|--------|
 | **推理引擎（Zone A/B · S1）** | 单机或引擎原生分布式上的推理、细粒度 batch、KV 内核与进程内 Stage、原生优化 |
-| **共享 KV 中间层（S3）** | 远端 KV 存储（如 `lmcache_server`）；KV 字节流只在引擎与存储间传输，永远旁路 Nebula |
-| **Nebula（Zone C · S2）** | **围绕 KV 中间状态的数据亲和与阶段化解耦调度（State- & Stage-Aware Orchestration）**：模型放哪、角色（prefill/decode）怎么分池、按前缀/冷暖信号选路、统一入口、鉴权审计、兼容与选型、SLO/成本/多租户、故障隔离与发布（详见 [`../dev/direction.md`](../dev/direction.md) §8–§10） |
+| **共享 KV 中间层（S3）** | 分级/远端 KV 存储（L1 Host DRAM / L2 NVMe / `lmcache_server`）；KV 字节流只在引擎与存储间传输，永远旁路 Nebula |
+| **Nebula（Zone C · S2）** | **数据面：围绕 KV 中间状态的数据亲和与阶段化解耦调度（State- & Stage-Aware Orchestration）**；**控制面：把 KV Cache 作为 L2/L3/L4 的一等公民分层资源（Tiered Resource）来声明、隔离、预热与记账**——管模型与角色（prefill/decode）放哪、L0/L1/L2 容量配额、租户级缓存隔离、按前缀/冷暖信号选路、鉴权审计、兼容与选型、SLO/成本归因与故障自愈（详见 [`../dev/direction.md`](../dev/direction.md) §8–§10、[`../dev/kv-governance.md`](../dev/kv-governance.md)） |
 
 请求主路径：
 
 ```text
-业务系统 → Gateway（一致性接入）→ Router（按 Placement + KV/Stage 信号选路）→ 引擎进程
-控制与治理：控制台 / CLI → BFF → etcd 声明式期望 → Scheduler / Node
+业务系统 → Gateway（一致性接入 + 租户缓存隔离/租约）→ Router（按 Placement + KV/Stage 信号选路）→ 引擎进程
+控制与治理：控制台 / CLI → BFF → etcd 声明式期望（含 L1/L2 KV 配额与预热/清理策略）→ Scheduler / Node / Controller
 ```
 
 ---
