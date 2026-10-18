@@ -1669,8 +1669,11 @@ const SSE_DECODE_LINE_CAP: usize = 64 * 1024;
 /// - `data: [DONE]`
 ///
 /// When the stream includes a trailing `usage.completion_tokens` (or
-/// `output_tokens`) field, `decode_tokens()` prefers `completion_tokens - 1` so
-/// multi-token chunks are accounted for accurately.
+/// `output_tokens`) field (e.g. when the client passes
+/// `stream_options: {"include_usage": true}`), `decode_tokens()` prefers
+/// `completion_tokens - 1` so multi-token chunks (such as speculative decoding
+/// steps) are accounted for at exact token granularity; without a `usage`
+/// frame, `decode_tokens()` falls back to non-empty delta frame count.
 #[derive(Debug, Default)]
 pub struct SseDecodeTracker {
     buf: Vec<u8>,
