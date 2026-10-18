@@ -332,6 +332,7 @@ curl -s http://127.0.0.1:8081/v1/score \
 - `nebula_router_prefix_index_entries`：当前前缀索引规模；
 - `nebula_router_pd_decode_local_hit_total`：`pd_split` 命中 Decode 池本地显存（Tier-1 跳过 Prefill 与远端 KV 拉取）计数；
 - `nebula_router_pd_short_bypass_total`：`pd_split` 短请求直通空闲 Decode 副本计数；
+- `nebula_router_saved_prefill_tokens_total{model_uid}`：**缓存命中的收益口径**（Batch 6.4）—— 被服务副本实际已持有的 prefill token 数（块数 × 16）。冷请求与非所选副本的命中都不计入，可当作节省量的保守下界。
 - `nebula_router_stage_prefill_spillover_total`：`pd_split` Prefill 池饱和时溢出至空闲 Decode 副本计数。
 - `nebula_router_stage_stats_missing_total{decision="short_bypass"|"prefill_spillover"|"warm_signal_cold"}`：**因缺少新鲜 `/stats/` 而无法评估**的阶段决策计数。非零意味着 `/stats/` 管道没通（`nebula-node` / `k8s-controller` 的 scrape 没跑或副本不上报），此时短请求旁路与 Prefill 溢流**静默失效**，`pd_split` 会退化成"全部走 Prefill"——排查顺序见下方「数值先看它」。
 

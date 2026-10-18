@@ -493,6 +493,17 @@ pub fn render_router_metrics(router: &nebula_router::Router) -> String {
     );
     let _ = writeln!(
         body,
+        "# HELP nebula_router_saved_prefill_tokens_total Prefill tokens the served replica already held (cache-hit savings).\n\
+         # TYPE nebula_router_saved_prefill_tokens_total counter"
+    );
+    for (model, tokens) in router.saved_prefill_tokens_by_model() {
+        let _ = writeln!(
+            body,
+            "nebula_router_saved_prefill_tokens_total{{model_uid=\"{model}\"}} {tokens}"
+        );
+    }
+    let _ = writeln!(
+        body,
         "# HELP nebula_router_pd_short_bypass_total pd_split short prompts (< NEBULA_PD_BYPASS_TOKENS) bypassed directly to Decode pool.\n\
          # TYPE nebula_router_pd_short_bypass_total counter\n\
          nebula_router_pd_short_bypass_total {}",

@@ -319,6 +319,10 @@ pub struct Router {
     /// and routes cold short requests directly to unsaturated Decode replicas.
     pd_bypass_tokens: usize,
     pd_short_bypass_total: AtomicU64,
+    /// Batch 6.4 (Account): prefill tokens the chosen replica already held, per model.
+    /// `matched_blocks * 16` for the replica that actually served the request, so this is
+    /// the conservative form of the ROI numerator - it only counts cache hits we routed to.
+    saved_prefill_tokens: DashMap<String, AtomicU64>,
     /// Stage decisions skipped for lack of fresh `/stats/` (decision → count):
     /// `short_bypass` | `prefill_spillover`. Without the node/controller scrape these
     /// decisions are impossible, and the degradation used to be invisible.
@@ -411,6 +415,7 @@ impl Router {
             stage_prefill_fallback_total: AtomicU64::new(0),
             stage_decode_fallback_total: AtomicU64::new(0),
             stage_stats_missing: DashMap::new(),
+            saved_prefill_tokens: DashMap::new(),
             stage_prefill_spillover_total: AtomicU64::new(0),
             pd_decode_local_hit_total: AtomicU64::new(0),
             pd_prefill_spillover_pending: AtomicU64::new(pd_prefill_spillover_pending),
@@ -556,6 +561,32 @@ impl Router {
             "decode" => self.stage_decode_fallback_total.load(Ordering::Relaxed),
             _ => self.stage_prefill_fallback_total.load(Ordering::Relaxed),
         }
+    }
+
+    /// Prefill tokens saved by cache hits for `model_uid` (Batch 6.4).
+    pub fn saved_prefill_tokens(&self, model_uid: &str) -> u64 {
+        self.saved_prefill_tokens
+            .get(model_uid)
+            .map(|e| e.value().load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Per-model saved-token counters, for `/metrics`.
+    pub fn saved_prefill_tokens_by_model(&self) -> Vec<(String, u64)> {
+        self.saved_prefill_tokens
+            .iter()
+            .map(|e| (e.key().clone(), e.value().load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    fn record_saved_prefill_tokens(&self, model_uid: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        self.saved_prefill_tokens
+            .entry(model_uid.to_string())
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(tokens, Ordering::Relaxed);
     }
 
     /// Count of stage decisions skipped for lack of fresh `/stats/` (`decision`, count).
@@ -1600,6 +1631,19 @@ impl Router {
                 .fetch_add(1, Ordering::Relaxed);
         }
 
+        // Batch 6.4 (Account): tokens the *served* replica already held = prefill work the
+        // cluster did not repeat. Blocks are 16 tokens (the value the hash chain is built
+        // on), and only the selected replica's matched depth counts - a deeper owner that
+        // we did not route to saved nothing.
+        if let Some(matches) = scoped_prefix_matches.as_ref() {
+            if let Some(&blocks) = matches.get(&selected.replica_id) {
+                self.record_saved_prefill_tokens(
+                    &selected.model_uid,
+                    (blocks as u64).saturating_mul(16),
+                );
+            }
+        }
+
         if selected.role != ReplicaRole::Prefill {
             if let Some(session_id) = ctx.session_id.as_deref() {
                 let key = session_key(ctx.tenant_id.as_deref(), session_id);
@@ -2197,6 +2241,58 @@ mod plan_version_tests {
         assert_eq!(ep.replica_id, 0);
         assert_eq!(router.stage_fallback_total("prefill"), 1);
         assert_eq!(router.stage_fallback_total("decode"), 0);
+    }
+
+    /// Batch 6.4 (Account): the counter only counts what the *served* replica held, and a
+    /// cold request saves nothing.
+    #[test]
+    fn saved_prefill_tokens_counts_only_the_served_replicas_prefix() {
+        let router = Router::new();
+        router.upsert_endpoint(ready_ep("m1", 0, 0));
+        let h: [u8; 32] = [0x77; 32];
+
+        // Cold: nothing indexed yet -> no savings.
+        let ctx = ctx_with_session(None);
+        router
+            .route(&ctx, "m1", Some(std::slice::from_ref(&h)), false)
+            .unwrap();
+        assert_eq!(
+            router.saved_prefill_tokens("m1"),
+            0,
+            "cold request saved nothing"
+        );
+
+        // Replica 0 now holds the prefix: the next request routes there and saves
+        // 1 block = 16 tokens (the block size the hash chain is built on).
+        router.prefix_index().apply(
+            "m1",
+            0,
+            &[kv_events::KvEvent::Stored {
+                block_hashes: vec![h.to_vec()],
+                medium: None,
+            }],
+            100,
+        );
+        router
+            .route(&ctx, "m1", Some(std::slice::from_ref(&h)), false)
+            .unwrap();
+        assert_eq!(router.saved_prefill_tokens("m1"), 16);
+
+        // Three matched blocks -> 48 tokens on top.
+        let chain: Vec<[u8; 32]> = (0..3).map(|i| [0x80 + i as u8; 32]).collect();
+        for hash in &chain {
+            router.prefix_index().apply(
+                "m1",
+                0,
+                &[kv_events::KvEvent::Stored {
+                    block_hashes: vec![hash.to_vec()],
+                    medium: None,
+                }],
+                200,
+            );
+        }
+        router.route(&ctx, "m1", Some(&chain), false).unwrap();
+        assert_eq!(router.saved_prefill_tokens("m1"), 16 + 48);
     }
 
     /// Silent degradation this counter exists for: with no `/stats/` the short-prompt

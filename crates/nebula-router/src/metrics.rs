@@ -314,6 +314,15 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         st.router.hint_stale_degraded_total(),
     ));
     body.push_str(
+        "# HELP nebula_router_saved_prefill_tokens_total Prefill tokens the served replica already held (cache-hit savings, Batch 6.4 Account).\n\
+         # TYPE nebula_router_saved_prefill_tokens_total counter\n",
+    );
+    for (model, tokens) in st.router.saved_prefill_tokens_by_model() {
+        body.push_str(&format!(
+            "nebula_router_saved_prefill_tokens_total{{model_uid=\"{model}\"}} {tokens}\n"
+        ));
+    }
+    body.push_str(
         "# HELP nebula_router_affinity_hit_total Affinity/hint hits by kind.\n\
          # TYPE nebula_router_affinity_hit_total counter\n",
     );
