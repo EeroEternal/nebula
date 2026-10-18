@@ -123,8 +123,18 @@ pub fn evaluate_slo_from_router_metrics_with_pools(
         "24h" | "1d" => 86400.0,
         _ => 900.0,
     };
-    let req = parse_metric_sum(metrics_text, "nebula_router_requests_total");
-    let err5 = parse_metric_sum(metrics_text, "nebula_router_responses_5xx");
+    let router_req = parse_metric_sum(metrics_text, "nebula_router_requests_total");
+    let (req, err5) = if router_req > 0.0 {
+        (
+            router_req,
+            parse_metric_sum(metrics_text, "nebula_router_responses_5xx"),
+        )
+    } else {
+        (
+            parse_metric_sum(metrics_text, "nebula_gateway_requests_total"),
+            parse_metric_sum(metrics_text, "nebula_gateway_responses_5xx"),
+        )
+    };
     let availability = if req > 0.0 {
         Some(1.0 - (err5 / req))
     } else {
@@ -294,6 +304,47 @@ nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"+Inf\"} 500\n";
                 decode_avg_kv_usage: Some(0.50),
             },
         );
+        assert_eq!(ev.status, SloComplianceStatus::Breaching);
+        assert!(ev.breaches.iter().any(|b| b.contains("tpot_p95")));
+        assert!(ev.suggestions.iter().any(|s| s.kind == "scale_decode_pool"));
+    }
+
+    #[test]
+    fn evaluates_slo_from_embedded_gateway_metrics() {
+        let slo = ModelSlo {
+            model_uid: "m1".into(),
+            availability_target: Some(0.99),
+            ttft_p95_ms: Some(1000.0),
+            tpot_p95_ms: Some(40.0),
+            latency_p95_ms: Some(10000.0),
+            throughput_tps: None,
+            window: "5m".into(),
+            exclude_abort_from_error_budget: true,
+            exclude_drain_from_error_budget: true,
+            notes: None,
+            updated_at_ms: 1,
+        };
+        let metrics = "\
+nebula_gateway_requests_total 500\n\
+nebula_gateway_responses_5xx 0\n\
+nebula_route_ttft_seconds_bucket{model_uid=\"m1\",le=\"0.2\"} 500\n\
+nebula_route_ttft_seconds_bucket{model_uid=\"m1\",le=\"+Inf\"} 500\n\
+nebula_route_latency_seconds_bucket{model_uid=\"m1\",le=\"2.0\"} 500\n\
+nebula_route_latency_seconds_bucket{model_uid=\"m1\",le=\"+Inf\"} 500\n\
+nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"0.02\"} 10\n\
+nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"0.075\"} 500\n\
+nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"+Inf\"} 500\n";
+        let ev = evaluate_slo_from_router_metrics_with_pools(
+            &slo,
+            metrics,
+            &PdPoolTelemetry {
+                is_pd_split: true,
+                tpot_p95_ms: None,
+                prefill_pending_max: Some(0),
+                decode_avg_kv_usage: Some(0.50),
+            },
+        );
+        assert!(!ev.breaches.iter().any(|b| b.contains("availability")));
         assert_eq!(ev.status, SloComplianceStatus::Breaching);
         assert!(ev.breaches.iter().any(|b| b.contains("tpot_p95")));
         assert!(ev.suggestions.iter().any(|s| s.kind == "scale_decode_pool"));

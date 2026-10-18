@@ -219,11 +219,19 @@ async fn proxy_chat_as_responses(
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
+        let model_for_metrics = routed_endpoint
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .or_else(|| builder_seed.model.clone())
+            .unwrap_or_else(|| "unknown".to_string());
         let mut builder = ResponseStreamBuilder::new(&builder_seed);
+        let started_at = std::time::Instant::now();
 
         tokio::spawn(async move {
             let _permit = queue_permit;
             let mut tool_pause_marked = false;
+            let mut first_chunk = true;
+            let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             if tx
                 .send(Ok(
                     Event::default().data(builder.created_event().to_string())
@@ -251,6 +259,14 @@ async fn proxy_chat_as_responses(
                     item = upstream.next() => {
                         match item {
                             Some(Ok(chunk)) => {
+                                if first_chunk {
+                                    first_chunk = false;
+                                    metrics.observe_ttft(
+                                        &model_for_metrics,
+                                        started_at.elapsed().as_secs_f64(),
+                                    );
+                                }
+                                decode_tracker.feed(&chunk);
                                 buf.push_str(&String::from_utf8_lossy(&chunk));
                                 while let Some(pos) = buf.find('\n') {
                                     let mut line = buf[..pos].to_string();
@@ -267,6 +283,13 @@ async fn proxy_chat_as_responses(
                                                 let _ = tx
                                                     .send(Ok(Event::default().data(completed.to_string())))
                                                     .await;
+                                                if let Some(tpot) = decode_tracker.finish_tpot() {
+                                                    metrics.observe_tpot(&model_for_metrics, tpot);
+                                                }
+                                                metrics.observe_e2e_latency(
+                                                    &model_for_metrics,
+                                                    started_at.elapsed().as_secs_f64(),
+                                                );
                                                 return;
                                             }
                                             OpenAiStreamChunk::Text(delta) => {
@@ -337,6 +360,13 @@ async fn proxy_chat_as_responses(
                                 let _ = tx
                                     .send(Ok(Event::default().data(completed.to_string())))
                                     .await;
+                                if let Some(tpot) = decode_tracker.finish_tpot() {
+                                    metrics.observe_tpot(&model_for_metrics, tpot);
+                                }
+                                metrics.observe_e2e_latency(
+                                    &model_for_metrics,
+                                    started_at.elapsed().as_secs_f64(),
+                                );
                                 break;
                             }
                         }
@@ -350,7 +380,15 @@ async fn proxy_chat_as_responses(
             .into_response();
     }
 
+    let started_at = std::time::Instant::now();
     let bytes = resp.bytes().await.unwrap_or_default();
+    let elapsed = started_at.elapsed().as_secs_f64();
+    let model_for_metrics = routed_endpoint
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .or(builder_seed.model.as_deref())
+        .unwrap_or("unknown");
+    st.metrics.observe_e2e_latency(model_for_metrics, elapsed);
     if let (Some(router), Some(sid), Some((m, r))) = (
         st.router.as_ref(),
         session_id.as_deref(),
@@ -442,10 +480,17 @@ async fn proxy_chat_as_anthropic(
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
         let model = requested_model.clone();
+        let model_for_metrics = routed_endpoint
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_else(|| requested_model.clone());
+        let started_at = std::time::Instant::now();
 
         tokio::spawn(async move {
             let _permit = queue_permit;
             let mut tool_pause_marked = false;
+            let mut first_chunk = true;
+            let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             let msg_id = format!("msg_{}", Uuid::new_v4());
             let start = json!({
                 "type": "message_start",
@@ -502,6 +547,14 @@ async fn proxy_chat_as_anthropic(
                     item = upstream.next() => {
                         match item {
                             Some(Ok(chunk)) => {
+                                if first_chunk {
+                                    first_chunk = false;
+                                    metrics.observe_ttft(
+                                        &model_for_metrics,
+                                        started_at.elapsed().as_secs_f64(),
+                                    );
+                                }
+                                decode_tracker.feed(&chunk);
                                 buf.push_str(&String::from_utf8_lossy(&chunk));
                                 while let Some(pos) = buf.find('\n') {
                                     let mut line = buf[..pos].to_string();
@@ -560,6 +613,13 @@ async fn proxy_chat_as_anthropic(
                                             }
                                         }
                                         if is_done {
+                                            if let Some(tpot) = decode_tracker.finish_tpot() {
+                                                metrics.observe_tpot(&model_for_metrics, tpot);
+                                            }
+                                            metrics.observe_e2e_latency(
+                                                &model_for_metrics,
+                                                started_at.elapsed().as_secs_f64(),
+                                            );
                                             return;
                                         }
                                     }
@@ -573,6 +633,13 @@ async fn proxy_chat_as_anthropic(
                                             .data(payload.to_string())))
                                         .await;
                                 }
+                                if let Some(tpot) = decode_tracker.finish_tpot() {
+                                    metrics.observe_tpot(&model_for_metrics, tpot);
+                                }
+                                metrics.observe_e2e_latency(
+                                    &model_for_metrics,
+                                    started_at.elapsed().as_secs_f64(),
+                                );
                                 break;
                             }
                         }
@@ -586,7 +653,14 @@ async fn proxy_chat_as_anthropic(
             .into_response();
     }
 
+    let started_at = std::time::Instant::now();
     let bytes = resp.bytes().await.unwrap_or_default();
+    let elapsed = started_at.elapsed().as_secs_f64();
+    let model_for_metrics = routed_endpoint
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or(&requested_model);
+    st.metrics.observe_e2e_latency(model_for_metrics, elapsed);
     if let (Some(router), Some(sid), Some((m, r))) = (
         st.router.as_ref(),
         session_id.as_deref(),

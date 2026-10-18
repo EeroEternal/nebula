@@ -60,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+/// Maximum consecutive reconcile ticks a model may renew existing endpoint TTLs
+/// while `/models/{model_uid}/spec` fails to load. Protects running Pods across
+/// transient etcd read blips while letting permanently broken specs expire.
+const MAX_SPEC_ERROR_REFRESH_TICKS: u32 = 3;
+
 #[derive(Debug, Default)]
 pub struct ControllerMetrics {
     pub deployment_parse_errors_total: std::sync::atomic::AtomicU64,
@@ -68,6 +73,7 @@ pub struct ControllerMetrics {
     pub model_reconcile_errors_total: std::sync::atomic::AtomicU64,
     pub replica_reconcile_success_total: std::sync::atomic::AtomicU64,
     pub replica_reconcile_errors_total: std::sync::atomic::AtomicU64,
+    pub consecutive_spec_errors: std::sync::Mutex<std::collections::HashMap<String, u32>>,
 }
 
 async fn load_model_spec(
@@ -84,10 +90,10 @@ async fn load_model_spec(
     }
 }
 
-/// Renew existing `/endpoints/{model_uid}/{replica_id}` (and `/stats/`) TTLs
-/// for replicas on `gpu_node` without reconciling or recreating Pods when
-/// `/models/{model_uid}/spec` fails to load, preventing already-healthy Pods
-/// from dropping out of Router.
+/// Renew existing `Ready` `/endpoints/{model_uid}/{replica_id}` (and `/stats/`)
+/// TTLs for replicas on `gpu_node` without reconciling or recreating Pods when
+/// `/models/{model_uid}/spec` transiently fails to load, preventing
+/// already-healthy Pods from dropping out of Router during brief blips.
 async fn refresh_existing_model_endpoints(
     store: &dyn MetaStore,
     gpu_node: &str,
@@ -107,13 +113,15 @@ async fn refresh_existing_model_endpoints(
         }
         let ep_key = format!("/endpoints/{}/{replica_id}", dep.model_uid);
         if let Ok(Some((raw, _))) = store.get(&ep_key).await {
-            let refreshed = if let Ok(mut ep) = serde_json::from_slice::<EndpointInfo>(&raw) {
+            if let Ok(mut ep) = serde_json::from_slice::<EndpointInfo>(&raw) {
+                if ep.status != EndpointStatus::Ready {
+                    continue;
+                }
                 ep.last_heartbeat_ms = now_ms;
-                serde_json::to_vec(&ep).unwrap_or(raw)
-            } else {
-                raw
-            };
-            let _ = store.put(&ep_key, refreshed, Some(15000)).await;
+                if let Ok(refreshed) = serde_json::to_vec(&ep) {
+                    let _ = store.put(&ep_key, refreshed, Some(15000)).await;
+                }
+            }
         }
         let stats_key = format!("/stats/{}/{replica_id}", dep.model_uid);
         if let Ok(Some((raw, _))) = store.get(&stats_key).await {
@@ -152,21 +160,48 @@ where
 
         let model_uid = dep.model_uid.clone();
         let spec = match load_model_spec(store, &model_uid).await {
-            Ok(spec) => spec,
+            Ok(spec) => {
+                if let Ok(mut map) = metrics.consecutive_spec_errors.lock() {
+                    map.remove(&model_uid);
+                }
+                spec
+            }
             Err(e) => {
                 // Never fall back to spec=None on store/parse errors: that would
                 // change config_fingerprint and delete healthy running pods.
-                // Instead, renew existing endpoint TTLs so healthy pods stay in
-                // routing while skipping Pod reconciliation this tick.
+                // Renew existing Ready endpoint TTLs for up to MAX_SPEC_ERROR_REFRESH_TICKS
+                // consecutive ticks so brief blips don't drop healthy pods, while
+                // permanently corrupted specs stop renewing and let stale endpoints expire.
                 metrics
                     .spec_load_errors_total
                     .fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(
-                    model_uid = %model_uid,
-                    error = %e,
-                    "failed to load model spec; refreshing existing endpoints without reconciling pods"
-                );
-                refresh_existing_model_endpoints(store, gpu_node, &dep).await;
+                let streak = {
+                    let mut map = metrics
+                        .consecutive_spec_errors
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let entry = map.entry(model_uid.clone()).or_insert(0);
+                    *entry = entry.saturating_add(1);
+                    *entry
+                };
+                if streak <= MAX_SPEC_ERROR_REFRESH_TICKS {
+                    tracing::warn!(
+                        model_uid = %model_uid,
+                        streak,
+                        max_streak = MAX_SPEC_ERROR_REFRESH_TICKS,
+                        error = %e,
+                        "failed to load model spec; refreshing existing Ready endpoints within grace window"
+                    );
+                    refresh_existing_model_endpoints(store, gpu_node, &dep).await;
+                } else {
+                    tracing::error!(
+                        model_uid = %model_uid,
+                        streak,
+                        max_streak = MAX_SPEC_ERROR_REFRESH_TICKS,
+                        error = %e,
+                        "model spec load failed beyond grace window; skipping endpoint TTL refresh so stale endpoints expire"
+                    );
+                }
                 continue;
             }
         };
@@ -1109,7 +1144,52 @@ mod tests {
         let refreshed_ep: EndpointInfo = serde_json::from_slice(&ep_raw).unwrap();
         assert!(
             refreshed_ep.last_heartbeat_ms > 42,
-            "existing endpoint heartbeat must be refreshed when spec load fails"
+            "existing endpoint heartbeat must be refreshed when spec load fails within grace window"
+        );
+
+        // After MAX_SPEC_ERROR_REFRESH_TICKS (3) total consecutive failures, controller
+        // must stop renewing the endpoint so permanently broken specs cannot keep dead
+        // Pods in routing forever.
+        for _ in 2..=MAX_SPEC_ERROR_REFRESH_TICKS {
+            reconcile_deployments_with(
+                &store,
+                "node-1",
+                &metrics,
+                |_dep, _spec| async move { Ok(()) },
+            )
+            .await
+            .unwrap();
+        }
+        let reset_marker = 123_456u64;
+        let mut stale_ep = refreshed_ep.clone();
+        stale_ep.last_heartbeat_ms = reset_marker;
+        store
+            .put(
+                "/endpoints/b-corrupt-spec/0",
+                serde_json::to_vec(&stale_ep).unwrap(),
+                Some(15000),
+            )
+            .await
+            .unwrap();
+
+        // Tick 4 (> MAX_SPEC_ERROR_REFRESH_TICKS): must NOT refresh last_heartbeat_ms.
+        reconcile_deployments_with(
+            &store,
+            "node-1",
+            &metrics,
+            |_dep, _spec| async move { Ok(()) },
+        )
+        .await
+        .unwrap();
+        let (ep_raw_after_cap, _) = store
+            .get("/endpoints/b-corrupt-spec/0")
+            .await
+            .unwrap()
+            .unwrap();
+        let ep_after_cap: EndpointInfo = serde_json::from_slice(&ep_raw_after_cap).unwrap();
+        assert_eq!(
+            ep_after_cap.last_heartbeat_ms, reset_marker,
+            "endpoint heartbeat must stop being renewed once MAX_SPEC_ERROR_REFRESH_TICKS is exceeded"
         );
     }
 }

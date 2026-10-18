@@ -1653,6 +1653,160 @@ impl Router {
     }
 }
 
+/// Maximum buffered bytes for an incomplete SSE line in [`SseDecodeTracker`].
+const SSE_DECODE_LINE_CAP: usize = 64 * 1024;
+
+/// Stateful SSE stream token counter and decode-phase timer for TPOT (Time Per
+/// Output Token).
+///
+/// Reassembles `data:` lines across arbitrary TCP chunk boundaries and counts
+/// only frames that emit generated token content (`choices[].delta` with
+/// non-empty `content`, `reasoning_content`/`reasoning`, or `tool_calls`
+/// function name/arguments, or `/v1/completions` `choices[].text`), ignoring:
+/// - initial role-only frames (`{"delta":{"role":"assistant","content":""}}`)
+/// - empty finish frames (`{"delta":{},"finish_reason":"stop"}`)
+/// - trailing usage-only frames (`{"choices":[],"usage":{"completion_tokens":...}}`)
+/// - `data: [DONE]`
+///
+/// When the stream includes a trailing `usage.completion_tokens` (or
+/// `output_tokens`) field, `decode_tokens()` prefers `completion_tokens - 1` so
+/// multi-token chunks are accounted for accurately.
+#[derive(Debug, Default)]
+pub struct SseDecodeTracker {
+    buf: Vec<u8>,
+    first_token_at: Option<std::time::Instant>,
+    decode_token_events: u32,
+    reported_completion_tokens: Option<u32>,
+}
+
+impl SseDecodeTracker {
+    pub fn feed(&mut self, chunk: &[u8]) {
+        self.feed_at(chunk, std::time::Instant::now());
+    }
+
+    pub fn feed_at(&mut self, chunk: &[u8], now: std::time::Instant) {
+        if chunk.is_empty() {
+            return;
+        }
+        let mut buf = std::mem::take(&mut self.buf);
+        buf.extend_from_slice(chunk);
+        let mut consumed = 0;
+        while let Some(nl) = buf[consumed..].iter().position(|b| *b == b'\n') {
+            let line = &buf[consumed..consumed + nl];
+            self.inspect_line(line, now);
+            consumed += nl + 1;
+        }
+        buf.drain(..consumed);
+        if buf.len() > SSE_DECODE_LINE_CAP {
+            buf.clear();
+        }
+        self.buf = buf;
+    }
+
+    fn inspect_line(&mut self, raw_line: &[u8], now: std::time::Instant) {
+        let Ok(text) = std::str::from_utf8(raw_line) else {
+            return;
+        };
+        let trimmed = text.trim();
+        let Some(rest) = trimmed.strip_prefix("data:") else {
+            return;
+        };
+        let payload = rest.trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            return;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) else {
+            return;
+        };
+        if let Some(usage) = val.get("usage") {
+            if let Some(n) = usage
+                .get("completion_tokens")
+                .or_else(|| usage.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+                .filter(|&n| n > 0)
+            {
+                self.reported_completion_tokens = Some(n.min(u32::MAX as u64) as u32);
+            }
+        }
+        let emitted = sse_frame_token_events(&val);
+        if emitted > 0 {
+            if self.first_token_at.is_none() {
+                self.first_token_at = Some(now);
+                let after_first = emitted - 1;
+                if after_first > 0 {
+                    self.decode_token_events = self.decode_token_events.saturating_add(after_first);
+                }
+            } else {
+                self.decode_token_events = self.decode_token_events.saturating_add(emitted);
+            }
+        }
+    }
+
+    /// Number of generated tokens after the first token.
+    pub fn decode_tokens(&self) -> u32 {
+        if let Some(reported) = self.reported_completion_tokens {
+            let from_usage = reported.saturating_sub(1);
+            if from_usage > 0 {
+                return from_usage;
+            }
+        }
+        self.decode_token_events
+    }
+
+    pub fn finish_tpot(&self) -> Option<f64> {
+        self.finish_tpot_at(std::time::Instant::now())
+    }
+
+    pub fn finish_tpot_at(&self, end: std::time::Instant) -> Option<f64> {
+        let first_at = self.first_token_at?;
+        let tokens = self.decode_tokens();
+        if tokens == 0 {
+            return None;
+        }
+        let decode_secs = end.saturating_duration_since(first_at).as_secs_f64();
+        Some(decode_secs / (tokens as f64))
+    }
+}
+
+fn sse_frame_token_events(val: &serde_json::Value) -> u32 {
+    let Some(choices) = val.get("choices").and_then(|c| c.as_array()) else {
+        return 0;
+    };
+    let mut emitted = 0u32;
+    for choice in choices {
+        let delta_has_token = choice.get("delta").is_some_and(|delta| {
+            delta
+                .get("content")
+                .or_else(|| delta.get("reasoning_content"))
+                .or_else(|| delta.get("reasoning"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+                || delta
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|tcs| {
+                        tcs.iter().any(|tc| {
+                            tc.pointer("/function/name")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|s| !s.is_empty())
+                                || tc
+                                    .pointer("/function/arguments")
+                                    .and_then(|v| v.as_str())
+                                    .is_some_and(|s| !s.is_empty())
+                        })
+                    })
+        });
+        let text_has_token = choice
+            .get("text")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+        if delta_has_token || text_has_token {
+            emitted = emitted.saturating_add(1);
+        }
+    }
+    emitted
+}
+
 #[cfg(test)]
 mod plan_version_tests {
     use super::*;
@@ -2741,5 +2895,81 @@ mod tool_call_scanner_tests {
         assert_eq!(ep_m1.replica_id, 1);
         assert_eq!(router.tool_continuation_hit_total(), 1);
         assert!(!router.has_active_tool_pause_for_tenant(Some("tenant_a"), "sess-1"));
+    }
+}
+
+#[cfg(test)]
+mod sse_decode_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn ignores_role_only_finish_usage_and_done_frames() {
+        let t0 = std::time::Instant::now();
+        let mut tracker = SseDecodeTracker::default();
+        // 1. Role-only initial frame (0 tokens)
+        tracker.feed_at(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+            t0,
+        );
+        // 2. Three content token frames (1 first token + 2 decode tokens)
+        tracker.feed_at(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"}}]}\n\n",
+            t0 + std::time::Duration::from_millis(10),
+        );
+        tracker.feed_at(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"}}]}\n\n",
+            t0 + std::time::Duration::from_millis(30),
+        );
+        tracker.feed_at(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"!\"}}]}\n\n",
+            t0 + std::time::Duration::from_millis(50),
+        );
+        // 3. Finish frame with empty delta (0 tokens)
+        tracker.feed_at(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            t0 + std::time::Duration::from_millis(50),
+        );
+        // 4. Usage tail frame with empty choices (0 delta tokens, no completion_tokens override)
+        tracker.feed_at(
+            b"data: {\"choices\":[]}\n\n",
+            t0 + std::time::Duration::from_millis(50),
+        );
+        // 5. Done marker (0 tokens)
+        tracker.feed_at(
+            b"data: [DONE]\n\n",
+            t0 + std::time::Duration::from_millis(50),
+        );
+
+        assert_eq!(tracker.decode_tokens(), 2);
+        let tpot = tracker
+            .finish_tpot_at(t0 + std::time::Duration::from_millis(50))
+            .unwrap();
+        assert!((tpot - 0.020).abs() < 1e-6);
+    }
+
+    #[test]
+    fn honors_usage_completion_tokens_and_handles_split_tcp_chunks() {
+        let mut tracker = SseDecodeTracker::default();
+        let stream = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"tok1 tok2\"}}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
+            "data: [DONE]\n"
+        );
+        for chunk in stream.as_bytes().chunks(7) {
+            tracker.feed(chunk);
+        }
+        // completion_tokens = 5 => decode_tokens after first token = 4
+        assert_eq!(tracker.decode_tokens(), 4);
+    }
+
+    #[test]
+    fn counts_legacy_completions_and_tool_call_argument_deltas() {
+        let mut tracker = SseDecodeTracker::default();
+        tracker.feed(b"data: {\"choices\":[{\"index\":0,\"text\":\"abc\"}]}\n\n");
+        tracker.feed(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]}}]}\n\n");
+        tracker.feed(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"NYC\\\"}\"}}]}}]}\n\n");
+        // 3 token frames total => 2 decode tokens after first token
+        assert_eq!(tracker.decode_tokens(), 2);
     }
 }

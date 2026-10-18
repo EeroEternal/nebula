@@ -314,8 +314,7 @@ pub async fn proxy_chat_completions(
         let request_id_for_task = request_id.clone();
         tokio::spawn(async move {
             let mut first_chunk = true;
-            let mut first_token_at: Option<std::time::Instant> = None;
-            let mut decode_chunks: u32 = 0;
+            let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             let mut aborted = false;
             let mut tool_pause_marked = false;
             let mut tool_scanner = nebula_router::ToolCallScanner::default();
@@ -331,14 +330,11 @@ pub async fn proxy_chat_completions(
                             Some(Ok(b)) => {
                                 if first_chunk {
                                     first_chunk = false;
-                                    first_token_at = Some(std::time::Instant::now());
                                     let ttft = request_start.elapsed().as_secs_f64();
                                     metrics.observe_ttft(&model_uid_for_stream, ttft);
                                     dual.emit_ttft("nebula_router", &model_uid_for_stream, ttft);
-                                } else {
-                                    decode_chunks =
-                                        decode_chunks.saturating_add(count_sse_token_chunks(&b));
                                 }
+                                decode_tracker.feed(&b);
                                 if !tool_pause_marked {
                                     if let Some(ref sid) = session_for_stream {
                                         if tool_scanner.feed(&b) {
@@ -364,11 +360,9 @@ pub async fn proxy_chat_completions(
             }
             let e2e = request_start.elapsed().as_secs_f64();
             metrics.observe_e2e_latency(&model_uid_for_stream, e2e);
-            if !aborted && decode_chunks > 0 {
-                if let Some(first_at) = first_token_at {
-                    let decode_secs = first_at.elapsed().as_secs_f64();
-                    metrics
-                        .observe_tpot(&model_uid_for_stream, decode_secs / (decode_chunks as f64));
+            if !aborted {
+                if let Some(tpot) = decode_tracker.finish_tpot() {
+                    metrics.observe_tpot(&model_uid_for_stream, tpot);
                 }
             }
             if aborted {
@@ -458,21 +452,4 @@ fn inject_router_echo_headers(out: &mut Response, request_id: &str, replica_id: 
         out.headers_mut()
             .insert(HeaderName::from_static(HEADER_REPLICA_ID), v);
     }
-}
-
-fn count_sse_token_chunks(bytes: &[u8]) -> u32 {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return 0;
-    };
-    let mut n = 0u32;
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("data:") {
-            let payload = rest.trim();
-            if !payload.is_empty() && payload != "[DONE]" {
-                n = n.saturating_add(1);
-            }
-        }
-    }
-    n
 }

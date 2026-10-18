@@ -312,12 +312,15 @@ pub async fn forward_upstream_response(
             // Engine queue permit is held for the whole streamed response.
             let _permit = permit;
             let mut first = true;
+            let mut aborted = false;
             let mut tool_pause_marked = false;
             let mut tool_scanner = nebula_router::ToolCallScanner::default();
+            let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             loop {
                 tokio::select! {
                     biased;
                     _ = tx.closed() => {
+                        aborted = true;
                         metrics
                             .requests_aborted_total
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -329,6 +332,11 @@ pub async fn forward_upstream_response(
                             Some(Ok(b)) => {
                                 if first {
                                     first = false;
+                                    if let (Some(req_t0), Some((ref m, _))) =
+                                        (req_start, routed_for_stream.as_ref())
+                                    {
+                                        metrics.observe_ttft(m, req_t0.elapsed().as_secs_f64());
+                                    }
                                     if stage_timing {
                                         tracing::info!(
                                             target: "gateway_stage",
@@ -339,6 +347,7 @@ pub async fn forward_upstream_response(
                                         );
                                     }
                                 }
+                                decode_tracker.feed(&b);
                                 if !tool_pause_marked {
                                     if let (Some(router), Some(sid), Some((m, r))) = (
                                         router_for_stream.as_ref(),
@@ -357,6 +366,7 @@ pub async fn forward_upstream_response(
                                     }
                                 }
                                 if tx.send(Ok(b)).await.is_err() {
+                                    aborted = true;
                                     metrics
                                         .requests_aborted_total
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -366,6 +376,16 @@ pub async fn forward_upstream_response(
                             }
                             Some(Err(_)) | None => break,
                         }
+                    }
+                }
+            }
+            if !aborted {
+                if let Some((ref m, _)) = routed_for_stream {
+                    if let Some(req_t0) = req_start {
+                        metrics.observe_e2e_latency(m, req_t0.elapsed().as_secs_f64());
+                    }
+                    if let Some(tpot) = decode_tracker.finish_tpot() {
+                        metrics.observe_tpot(m, tpot);
                     }
                 }
             }
@@ -390,6 +410,12 @@ pub async fn forward_upstream_response(
             Bytes::new()
         }
     };
+    if let Some((ref m, _)) = routed_endpoint {
+        if let Some(req_t0) = req_start {
+            st.metrics
+                .observe_e2e_latency(m, req_t0.elapsed().as_secs_f64());
+        }
+    }
     if let (Some(router), Some(sid), Some((m, r))) =
         (st.router.as_ref(), session_id, routed_endpoint.as_ref())
     {

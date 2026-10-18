@@ -9,6 +9,104 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+#[derive(Debug)]
+pub struct Histogram {
+    bounds: &'static [f64],
+    counts: Vec<AtomicU64>,
+    sum_micros: AtomicU64,
+    total_count: AtomicU64,
+}
+
+const E2E_BOUNDS: &[f64] = &[
+    0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
+const TTFT_BOUNDS: &[f64] = &[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0];
+const TPOT_BOUNDS: &[f64] = &[0.005, 0.01, 0.02, 0.035, 0.05, 0.075, 0.1, 0.2, 0.5, 1.0];
+
+impl Histogram {
+    fn new(bounds: &'static [f64]) -> Self {
+        let counts = (0..=bounds.len()).map(|_| AtomicU64::new(0)).collect();
+        Self {
+            bounds,
+            counts,
+            sum_micros: AtomicU64::new(0),
+            total_count: AtomicU64::new(0),
+        }
+    }
+
+    pub fn observe(&self, seconds: f64) {
+        let micros = (seconds * 1_000_000.0).max(0.0) as u64;
+        self.sum_micros.fetch_add(micros, Ordering::Relaxed);
+        self.total_count.fetch_add(1, Ordering::Relaxed);
+        for (i, &b) in self.bounds.iter().enumerate() {
+            if seconds <= b {
+                self.counts[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.counts[self.bounds.len()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn render_for_model(&self, name: &str, model_uid: &str, out: &mut String) {
+        use std::fmt::Write;
+        for (i, &b) in self.bounds.iter().enumerate() {
+            let c = self.counts[i].load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "{name}_bucket{{model_uid=\"{model_uid}\",le=\"{b}\"}} {c}"
+            );
+        }
+        let inf = self.counts[self.bounds.len()].load(Ordering::Relaxed);
+        let _ = writeln!(
+            out,
+            "{name}_bucket{{model_uid=\"{model_uid}\",le=\"+Inf\"}} {inf}"
+        );
+        let sum_secs = self.sum_micros.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        let count = self.total_count.load(Ordering::Relaxed);
+        let _ = writeln!(out, "{name}_sum{{model_uid=\"{model_uid}\"}} {sum_secs:.6}");
+        let _ = writeln!(out, "{name}_count{{model_uid=\"{model_uid}\"}} {count}");
+    }
+}
+
+type ModelHistograms =
+    std::sync::RwLock<std::collections::BTreeMap<String, std::sync::Arc<Histogram>>>;
+
+fn observe_model_histogram(
+    map: &ModelHistograms,
+    bounds: &'static [f64],
+    model_uid: &str,
+    seconds: f64,
+) {
+    if let Ok(guard) = map.read() {
+        if let Some(h) = guard.get(model_uid) {
+            h.observe(seconds);
+            return;
+        }
+    }
+    if let Ok(mut guard) = map.write() {
+        let h = guard
+            .entry(model_uid.to_string())
+            .or_insert_with(|| std::sync::Arc::new(Histogram::new(bounds)))
+            .clone();
+        drop(guard);
+        h.observe(seconds);
+    }
+}
+
+fn render_model_histograms(map: &ModelHistograms, name: &str, help: &str, out: &mut String) {
+    use std::fmt::Write;
+    let Ok(guard) = map.read() else {
+        return;
+    };
+    if guard.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "# HELP {name} {help}");
+    let _ = writeln!(out, "# TYPE {name} histogram");
+    for (model_uid, hist) in guard.iter() {
+        hist.render_for_model(name, model_uid, out);
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Metrics {
     pub requests_total: AtomicU64,
@@ -45,9 +143,24 @@ pub struct Metrics {
     pub queue_denied_full_total: AtomicU64,
     pub queue_denied_tenant_total: AtomicU64,
     pub queue_denied_timeout_total: AtomicU64,
+    pub e2e_latency: ModelHistograms,
+    pub ttft: ModelHistograms,
+    pub tpot: ModelHistograms,
 }
 
 impl Metrics {
+    pub fn observe_e2e_latency(&self, model_uid: &str, seconds: f64) {
+        observe_model_histogram(&self.e2e_latency, E2E_BOUNDS, model_uid, seconds);
+    }
+
+    pub fn observe_ttft(&self, model_uid: &str, seconds: f64) {
+        observe_model_histogram(&self.ttft, TTFT_BOUNDS, model_uid, seconds);
+    }
+
+    pub fn observe_tpot(&self, model_uid: &str, seconds: f64) {
+        observe_model_histogram(&self.tpot, TPOT_BOUNDS, model_uid, seconds);
+    }
+
     pub fn record_tenant_deny(&self, code: &str) {
         match code {
             "tenant_rps_exceeded" => {
@@ -272,6 +385,25 @@ pub fn render_metrics(metrics: &Metrics) -> String {
         "nebula_gateway_queue_denied_total{{reason=\"queue_timeout\"}} {}\n",
         metrics.queue_denied_timeout_total.load(Ordering::Relaxed),
     ));
+
+    render_model_histograms(
+        &metrics.e2e_latency,
+        "nebula_route_latency_seconds",
+        "End-to-end request duration in seconds.",
+        &mut body,
+    );
+    render_model_histograms(
+        &metrics.ttft,
+        "nebula_route_ttft_seconds",
+        "Time to first response byte in seconds.",
+        &mut body,
+    );
+    render_model_histograms(
+        &metrics.tpot,
+        "nebula_route_tpot_seconds",
+        "Mean time per output token (inter-chunk decode latency) in seconds for streaming responses.",
+        &mut body,
+    );
 
     body
 }
