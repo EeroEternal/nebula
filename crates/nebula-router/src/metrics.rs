@@ -17,6 +17,17 @@ const HISTOGRAM_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0,
 ];
 
+/// Fixed TPOT buckets (seconds per output token).
+///
+/// Deliberately **not** [`HISTOGRAM_BUCKETS`]: the latency ladder jumps 0.01 -> 0.05,
+/// which is exactly where a healthy TPOT lives (5-40 ms/token). Reusing it pinned
+/// `nebula_route_tpot_seconds` p95 at 50 ms on real hardware (measured 11.35 ms) and
+/// since `router_metrics` reports the bucket *boundary*, every `tpot_p95_ms` target in
+/// (10, 50] ms became a permanent false `Breaching` + `scale_decode_pool`.
+const TPOT_BUCKETS: &[f64] = &[
+    0.002, 0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.2, 0.5, 1.0, 5.0,
+];
+
 /// A simple histogram with fixed buckets, safe for concurrent use.
 #[derive(Debug)]
 pub struct Histogram {
@@ -123,7 +134,7 @@ impl Metrics {
     pub fn observe_tpot(&self, model_uid: &str, seconds: f64) {
         self.tpot
             .entry(model_uid.to_string())
-            .or_insert_with(|| Histogram::new(HISTOGRAM_BUCKETS))
+            .or_insert_with(|| Histogram::new(TPOT_BUCKETS))
             .observe(seconds);
     }
 
@@ -469,4 +480,64 @@ pub async fn track_requests(
     }
 
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tpot_bucket_tests {
+    use super::*;
+
+    /// Upper bound of the bucket a value is counted into — this is exactly what
+    /// `nebula_control::parse_histogram_quantile_filtered` reports as the quantile.
+    fn reported_upper_bound(buckets: &[f64], value: f64) -> f64 {
+        buckets
+            .iter()
+            .copied()
+            .find(|b| value <= *b)
+            .unwrap_or(f64::INFINITY)
+    }
+
+    #[test]
+    fn realistic_tpot_is_not_reported_as_50ms() {
+        // Measured on 8x RTX 5090, Qwen2.5-14B TP=2, vLLM 0.23.0: 11.35 ms/output token
+        // (sum=0.034046s over 3 requests x 63 decode tokens).
+        let tpot = 0.011_35;
+        assert!(
+            reported_upper_bound(TPOT_BUCKETS, tpot) <= 0.015,
+            "11.35ms TPOT must resolve below 20ms, got {}",
+            reported_upper_bound(TPOT_BUCKETS, tpot)
+        );
+        // The latency ladder reported 50ms for the same sample, which made every
+        // tpot_p95 target in (10, 50] ms a permanent false breach.
+        assert_eq!(reported_upper_bound(HISTOGRAM_BUCKETS, tpot), 0.05);
+    }
+
+    #[test]
+    fn tpot_buckets_resolve_the_5_to_50ms_band_within_2x() {
+        let mut low = 0.005_f64;
+        while low < 0.05 {
+            let next = TPOT_BUCKETS
+                .iter()
+                .copied()
+                .find(|b| *b > low)
+                .expect("TPOT buckets must cover the 5-50ms band");
+            assert!(
+                next / low <= 2.0,
+                "TPOT bucket gap {low} -> {next} is wider than 2x; a reported p95 could \
+                 overshoot the real value (and an SLO target) by more than one step"
+            );
+            low = next;
+        }
+    }
+
+    #[test]
+    fn tpot_histogram_counts_into_the_tpot_ladder() {
+        let h = Histogram::new(TPOT_BUCKETS);
+        for _ in 0..9 {
+            h.observe(0.011_35);
+        }
+        h.observe(0.045);
+        let rendered = h.format_prometheus("nebula_route_tpot_seconds", "m1");
+        assert!(rendered.contains("le=\"0.015\"} 9"), "{rendered}");
+        assert!(rendered.contains("le=\"0.05\"} 10"), "{rendered}");
+    }
 }

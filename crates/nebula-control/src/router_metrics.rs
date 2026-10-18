@@ -82,14 +82,20 @@ pub fn parse_histogram_quantile_filtered(
     }
 
     let target = total * quantile.clamp(0.0, 1.0);
+    let mut largest: Option<f64> = None;
     for (bits, cumulative) in by_le {
         let boundary = f64::from_bits(bits);
+        largest = Some(boundary);
         if cumulative >= target {
             return boundary;
         }
     }
 
-    0.0
+    // The quantile falls inside the `+Inf` bucket (a handful of samples where one
+    // outlier exceeds the largest finite bound). Report that bound as a lower bound:
+    // returning 0.0 made callers drop the sample entirely ("no TTFT data" instead of
+    // "at least 300s").
+    largest.unwrap_or(0.0)
 }
 
 fn normalize_zero(value: f64) -> f64 {
@@ -307,6 +313,32 @@ nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"+Inf\"} 500\n";
         assert_eq!(ev.status, SloComplianceStatus::Breaching);
         assert!(ev.breaches.iter().any(|b| b.contains("tpot_p95")));
         assert!(ev.suggestions.iter().any(|s| s.kind == "scale_decode_pool"));
+    }
+
+    #[test]
+    fn quantile_landing_in_inf_bucket_reports_largest_finite_bound() {
+        // 9 of 10 samples fall in the finite buckets, one exceeds the largest finite
+        // bound: p95 lives in `+Inf`. Reporting the largest finite bound keeps the
+        // sample visible; returning 0.0 made callers report "no data" instead.
+        let metrics = "\
+nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"0.02\"} 8\n\
+nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"0.05\"} 9\n\
+nebula_route_tpot_seconds_bucket{model_uid=\"m1\",le=\"+Inf\"} 10\n";
+        assert_eq!(
+            parse_histogram_quantile_filtered(
+                metrics,
+                "nebula_route_tpot_seconds",
+                0.95,
+                Some("m1")
+            ),
+            0.05
+        );
+
+        // No samples at all still reports "no data", not a fabricated bound.
+        assert_eq!(
+            parse_histogram_quantile_filtered("", "nebula_route_tpot_seconds", 0.95, Some("m1")),
+            0.0
+        );
     }
 
     #[test]
