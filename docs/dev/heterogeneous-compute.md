@@ -45,23 +45,23 @@ flowchart TB
         W4["并行草稿投机验证 (Speculative Execution)<br/>轻量草稿生成 + 单次权重访存批量核验 · 以算力补带宽"]
     end
 
-    subgraph L3_StageState["第二层：阶段解耦与全局状态寻址约定 (Stage Disaggregation & State Addressing)"]
-        S1["统一哈希寻址约定 (NEBULA_KV_HASH_SEED)<br/>16-token sha256_cbor 块哈希全栈逐位对齐 · 零 RPC 协商"]
-        S2["全局多 Owner 索引与联合代价打分<br/>nebula-indexd 扇出 + Score = SavedPrefill - QueueWait - KvPenalty"]
-        S3["PD 角色化分池编排 (pd_split 契约)<br/>Prefill 池 (kv_producer 算力密集) ↔ Decode 池 (kv_both 带宽密集)"]
-        S4["幂等重算容错约定 (Hint-Only & Recompute)<br/>任何缓存/网络故障只退化为本地重算 · 生产 0 拒绝"]
+    subgraph L3_StageState["第二层：全局状态寻址与读写分离控制面 (Stage Disaggregation & State Addressing)"]
+        S1["全局统一缓存寻址 (NEBULA_KV_HASH_SEED)<br/>16-token 块编号全栈标准统一 · 免问询直接定位缓存卡"]
+        S2["多卡缓存地图与防拥塞选路 (nebula-indexd)<br/>综合权衡省下算力与排队水位 · 多卡显存拼成大池且防单卡过载"]
+        S3["读写分离异构分池编排 (pd_split 契约)<br/>算力卡专职读长文 (Prefill) ↔ 带宽卡专职流式吐字 (Decode)"]
+        S4["无损降级重算兜底 (Hint-Only & Recompute)<br/>单卡抖动或网络超时自动退化本地计算 · 生产环境 100% 零报错"]
     end
 
-    subgraph L2_HardwareContract["第三层：异构硬件物理契约与三级存储置换 (Hardware Contracts & Tiered Memory)"]
-        H1["Roofline 并发拐点选型契约 (selection.rs)<br/>Batch&lt;=4 偏高带宽/4-bit · Batch&gt;=16 偏高算力原生 FP8/BF16"]
-        H2["能力矩阵与部署门禁契约 (capability.rs / compat.rs)<br/>结构化声明引擎能力 · 镜像 Digest 白名单 · 混合架构缓存体检"]
-        H3["三级缓存存储换算力 (⏳ Batch 6: kv-governance.md)<br/>L0(片上 HBM) → L1(宿主机 DDR5) → L2(本地 NVMe / lm:// 共享池)"]
-        H4["硬件中立传输契约 (LMCache lm:// 纯 TCP)<br/>不绑 NVIDIA 专属 NIXL · 国产昇腾 NPU 与多代 GPU 统一互通"]
+    subgraph L2_HardwareContract["第三层：异构硬件契约与分级存储层 (Hardware Contracts & Tiered Memory)"]
+        H1["并发拐点动态适配 (Roofline selection.rs)<br/>低并发配 4-bit 高带宽池 · 高并发自动切原生 FP8/BF16 高算力池"]
+        H2["异构准入与防呆门禁 (capability.rs / compat.rs)<br/>上线前核验真实卡型与验证镜像白名单 · 自动巡检缓存静默失效"]
+        H3["三级存储以存代算 (⏳ Batch 6: kv-governance.md)<br/>L0(片上显存) → L1(主机 DDR5) → L2(本地 NVMe) · 放大 10x 等效显存"]
+        H4["跨商互通与租户隔离 (LMCache lm:// & cache_salt)<br/>标准 TCP 协议让国产卡与 GPU 共网协同 · 租户缓存物理隔离"]
     end
 
-    subgraph L1_FeedbackOps["第四层：硬件无关瓶颈反馈与多租户错峰经营 (Feedback Surface & Fleet Operations)"]
-        O1["二元曲面瓶颈反馈契约 (slo.rs / capacity.rs)<br/>废弃失真的 SM/AICore 利用率 → 统一看 TTFT vs TPOT/KV 水位"]
-        O2["有界公平队列与波谷填谷 (queue.rs)<br/>高 SLA 在线流量保延迟 · 低优批处理/评测任务自动填平算力波谷"]
+    subgraph L1_FeedbackOps["第四层：异构算力底座与错峰经营层 (Heterogeneous Fleet & Operations)"]
+        O1["高算力预填充池 + 高带宽解码池 + 主机存储池<br/>昇腾 910B/A800 啃长文 · H20/L40S 保流式吐字 · 主机 DDR5/NVMe 存温冷块"]
+        O2["统一瓶颈度量与昼夜错峰填谷 (slo.rs / queue.rs)<br/>按首字/吐字延迟精准扩缩容 · 白天保高 SLA 交互 · 夜间离线批处理填谷"]
         O3["多租户安全共池与算力记账 (⏳ Batch 6)<br/>cache_salt 缓存物理正交 + saved_prefill_tokens 算力节省账单"]
     end
 
@@ -72,7 +72,7 @@ flowchart TB
 
 ---
 
-## 3. 第一维：更细粒度的计算解耦抽象（让不同性质的客户负载各归其位）
+## 3. 第一维（L4）：负载计算分流与细粒度子阶段抽象（让不同性质的客户负载各归其位）
 
 大模型推理从来不是铁板一块的“同质计算”。站在智算中心对外服务的视角，如果把外部客户千差万别的业务流量全部塞进同一条重型生成流水线，不仅会造成严重的算力错配，还会让大量非主力卡无法发挥价值。Nebula 在控制面与路由入口将笼统的推理调用**拆解为物理特征纯粹的四类细粒度计算机制**：
 
@@ -115,83 +115,74 @@ Nebula 在 Zone C 层的演进方向，正是扮演关系型数据库中的 **�
 
 ---
 
-## 4. 第二维：异构卡计算能力的“物理画像与门禁契约”（屏蔽底层碎片化）
+## 4. 第二维（L3）：全局状态寻址与读写解耦约定（消灭多卡重复计算与慢卡抖动）
 
-为了让运营商机房里的多厂商、多代际异构卡在同一套控制面下高效运转，同时**绝不侵入引擎内部代码（严守 Zone C 边界）**，Nebula 用三组声明式契约将异构硬件标准化：
+在多厂商、多代际异构算力池中，如果多张加速卡之间无法高效共享中间计算状态（KV Cache），同一企业客户的公共系统提示词和行业知识库就会在几十张卡上被反复重算。Nebula **不依赖特定芯片厂商的私有硬件直连（如不绑 NVIDIA NVLink）**，而是通过四项控制面机制实现跨卡高效协同：
 
-### 4.1 Roofline 并发拐点选型契约（L3 [`selection.rs`](../../crates/nebula-common/src/selection.rs)）
-
-同一张异构卡、同一种量化格式，在不同负载并发度下会跨过 **Roofline 算术强度拐点**，表现出截然相反的效率特征：
-
-| 负载区间 | 物理瓶颈状态 | 量化与硬件选型规律 | Nebula L3 契约动作（`roofline_quantization_adjustment`） |
+| L3 控制面核心机制 | 机制原理（直观严谨定义） | Nebula 契约与实现触点 | 智算中心对外服务经营收益 |
 |---|---|---|---|
-| **低并发交互区（`Batch <= 4`）** | **显存带宽受限（Memory-bound）**：每次权重读取仅服务 1～4 条序列 | 4-bit（W4A16/AWQ/GPTQ）将权重访存字节减半，直接带来显著解码提速 | 在 `Latency` / `Throughput` 偏好下，自动为 **4-bit 量化候选与高带宽性价比池**加分 |
-| **高并发吞吐区（`Batch >= 16`）或长文 Prefill** | **计算受限（Compute-bound）**：一次权重读取分摊给 $\ge 16$ 条序列，访存被计算掩盖 | 非原生 W4A4 通路下，4-bit 每次 GEMM 前的寄存器解包（Unpack）反而增加额外算力开销；原生 **FP8 / BF16 Tensor/Cube 通路**反超 | 自动切换为 **原生 FP8（或具备原生 W4A4 硬件的池）** 加分；在 `Cost`（`$/1k tokens`）偏好下保持纯成本排序并输出可解释 `reasons` |
-
-配合跨池切换代价评估（`switching_cost` / `switch_penalty`），L3 选型层能够根据业务的实际并发画像，把模型精准匹配到最能发挥物理效率的异构卡池。
-
-### 4.2 引擎能力矩阵与部署期兼容门禁契约（L1 [`capability.rs`](../../crates/nebula-common/src/capability.rs) + L2 [`compat.rs`](../../crates/nebula-common/src/compat.rs#L221)）
-
-面对国产卡与不同代际 GPU 的软件栈差异，Nebula **不在数据面热路径写任何平台 `if-else` 分支**，而是通过三道静态门禁契约在部署期完成防呆：
-
-1. **硬件池与平台证据契约（[`HardwarePool`](../../crates/nebula-common/src/pool.rs) + [`validate_compat_for_replica_specs`](../../crates/nebula-control/src/deploy.rs)）**：
-   每个节点上报真实的硬件平台标识（`platform`）、驱动版本与加速卡型号；凡是带有平台作用域的 `CompatibilityRule`，必须校验目标池节点的真实硬件证据，不满足直接阻断部署或要求显式填写 `image_override_reason` 留痕审计。
-2. **镜像产物真机门禁契约（[`validate_pd_split_image`](../../crates/nebula-common/src/model_deployment.rs#L258)）**：
-   异构环境下的共享 KV 组件极易因版本微差触发断言崩溃或静默退化。契约要求凡开启 `pd_split` 的部署，其容器镜像引用必须先通过 [`scripts/check_lmcache_compat.sh`](../../scripts/check_lmcache_compat.sh) 真机正数传输门禁，并列入 `NEBULA_APPROVED_PD_IMAGES` 白名单。
-3. **静默特性失效巡检契约（[`engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs#L10) + [`compat_slo.rs`](../../crates/nebula-bff/src/compat_slo.rs)）**：
-   针对部分混合注意力（Hybrid Attention）模型在异构引擎上“表面运行正常、实则静默关闭 Prefix Cache”的陷阱，控制面通过采集统一的 `vllm:prefix_cache_queries_total` 指标契约，在有流量但查询数恒为 0 时自动触发 `DiagnosticEvent` 告警。
-
-### 4.3 硬件无关的二元曲面瓶颈反馈契约（L4 [`slo.rs`](../../crates/nebula-common/src/slo.rs) + [`capacity.rs`](../../crates/nebula-common/src/capacity.rs#L40)）
-
-不同厂商芯片的硬件利用率指标（如 NVIDIA `DCGM_FI_DEV_GPU_UTIL` vs 昇腾 `npu_chip_info_aicore_usage`）不仅采集方式各异，而且在大模型 Decode 阶段**完全失真**（当显存带宽 100% 满载、延迟已经严重恶化时，算力核利用率往往只有 20% 左右，传统基于利用率的扩缩容彻底失效）。
-
-Nebula 统一约定所有异构后端只向上暴露一套**与具体芯片无关的物理结果契约**：
-- **算力饱和度信号**：`TTFT p95` + Prefill 池 `pending_requests` ⇒ 若违约，精准判定为**算力池不足**，输出 `scale_prefill_pool`；
-- **带宽与显存饱和度信号**：`TPOT p95`（由 Router 从流式 token 间隔直方图 [`router_metrics.rs`](../../crates/nebula-control/src/router_metrics.rs) 直接测量，不依赖厂商私有指标）+ `kv_cache_usage` ⇒ 若 TPOT 违约则判定为**解码带宽不足**，若 SLO 达标但 `kv_cache_usage > 0.85` 则作为预防性容量预警（保持 `Compliant` 状态）输出 `scale_decode_pool`。
+| **1. 全局统一缓存寻址**<br>（`NEBULA_KV_HASH_SEED`） | **全栈统一数据块编号标准**：网关、索引服务与所有异构引擎共享完全一致的 16-token 块切分、哈希种子（`NEBULA_KV_HASH_SEED == PYTHONHASHSEED`）、`sha256_cbor` 算法与分词模板，网关无需发任何跨节点查询报文即可直接算出请求对应的块编号 | [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs#L158) + [`prompt_hash.rs`](../../crates/nebula-router/src/prompt_hash.rs#L26) | **“把计算精准派往已有缓存的卡”**：毫秒级定位已持有客户历史前缀的加速卡，消灭多卡重复 Prefill 计算，显著降低单请求算力消耗 |
+| **2. 多卡缓存地图与防拥塞选路**<br>（`nebula-indexd` 联合打分） | **全局缓存目录 + 容量/排队联合权衡**：实时维护全集群每张卡持有的缓存块地图（[`PrefixIndex`](../../crates/nebula-router/src/kv_events.rs#L193)），选路时综合计算 `省下的预填充算力 - 当前排队等待 - 显存水位惩罚`，在命中缓存与负载均衡之间自动寻优 | [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) + [`strategy.rs`](../../crates/nebula-router/src/strategy.rs) | **“多卡显存拼成逻辑大池，高峰期防单卡堵死”**：既让全集群显存容量线性叠加，又在热门客户流量突发时自动向次优空闲卡分流（`owner_congested`），杜绝单卡排队违约 |
+| **3. 读写分离异构分池编排**<br>（`pd_split` 契约） | **算力池与带宽池物理分离**：将长文档阅读（Prefill，`kv_producer`）与流式吐字（Decode，`kv_both`）拆入不同硬件池独立扩缩容，消除同卡混跑时的计算与访存互相阻塞 | [`model_deployment.rs`](../../crates/nebula-common/src/model_deployment.rs#L20-L34) + [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L723) | **“好钢用在刀刃上，国产算力卡与高带宽卡协同变现”**：用充裕的国产算力卡专门消化长文，用高带宽卡专门保交互吐字，首字延迟 TTFT p99 实测降低 21% |
+| **4. 无损降级重算兜底**<br>（`Hint-Only & Recompute`） | **缓存仅作加速提示、异常自动退化本地计算**：利用大模型前向计算的幂等性，将一切跨卡缓存目录与传输仅视为性能加速提示（Hint）；遇网络抖动或 200ms 查表超时，目标卡立即无缝退化为本地自计算 | [`lib.rs`](../../crates/nebula-router/src/lib.rs) 容错回退状态机 | **“屏蔽异构机房硬件毛刺，保障电信级 99.99% 可用性”**：将异构集群常见的单点抖动从“客户报错中断”降级为偶发的“毫秒级延迟波动”，真机四项故障注入实测 **100% 零报错拒绝** |
 
 ---
 
-## 5. 第三维：跨异构单元协同的“三条核心约定（Invariants over Tight Coupling）”
+## 5. 第三维（L2）：异构硬件契约与分级存储层（屏蔽硬件差异、突破显存容量墙）
 
-在多厂商、多代际异构算力池中，最大的工程难题是：**如何在不依赖芯片私有硬件直连（如不绑 NVIDIA NVLink / NIXL）的前提下，让多张异构卡围绕 KV Cache 中间状态高效协同？**
+为了让机房里不同时期采购的国产 NPU 与多代 GPU 在同一套平台下稳定混部，同时**绝不侵入底层引擎代码（严守 Zone C 边界）**，Nebula 通过四项声明式硬件与存储契约向下纳管算力：
 
-Nebula 的解法是**用三条严格的“前置约定（Invariants）”替代运行时的跨组件强耦合**：
+### 5.1 并发拐点动态适配（`Roofline` 算术强度选型契约，[`selection.rs`](../../crates/nebula-common/src/selection.rs)）
 
-### 5.1 状态寻址约定：全栈确定性块哈希不变量（`NEBULA_KV_HASH_SEED` + `sha256_cbor`）
+同一张异构卡、同一种量化格式，在客户业务的不同并发批次（Batch Size）下会跨过 **Roofline 算术强度拐点**，表现出截然相反的效率特征：
 
-- **约定内容**：
-  强制约定 Router（[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs#L158) / [`prompt_hash.rs`](../../crates/nebula-router/src/prompt_hash.rs#L26)）、全局索引服务 [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs)、以及所有异构引擎实例共享完全一致的哈希种子（`NEBULA_KV_HASH_SEED == PYTHONHASHSEED`）、块大小（16 tokens）、`sha256_cbor` 链式哈希算法与同一份 `tokenizer.json`（含 `chat_template` 渲染对齐）。
-- **如何提升异构算力利用率**：
-  1. **零通信定位数据（Move Compute to Data）**：Router 收到请求的瞬间，无需向任何引擎发 RPC 询问，直接在本地内存 [`PrefixIndex`](../../crates/nebula-router/src/kv_events.rs#L193) 中按算出的 8 字节块 Key 查出每张候选卡已持有的连续前缀块数 `matched_blocks`；
-  2. **多卡联合代价打分（防单卡拥塞）**：通过无锁代价函数综合评估每张候选卡 $w$ 的 **“省下的 Prefill 计算量（`matched_blocks * 16`）” vs “当前排队等待代价（`pending_requests`）与显存水位惩罚（`kv_cache_usage`）”**（[`strategy.rs`](../../crates/nebula-router/src/strategy.rs)），既让全集群显存容量线性叠加，又在热点前缀突发时自动向次优空闲卡溢流（`owner_congested`）。
+| 客户业务并发区间 | 硬件物理瓶颈 | 最优硬件池与量化匹配规律 | 智算中心经营收益（配合 `switching_cost` / `switch_penalty`） |
+|---|---|---|---|
+| **低并发实时交互区（`Batch <= 4`）** | **显存带宽受限（Memory-bound）**：每次权重搬运仅服务 1～4 个并发请求 | **4-bit 量化（W4A16/AWQ/GPTQ）** 将权重读取字节减半，直接带来显著解码提速 | 自动优先匹配 **4-bit 量化与高带宽性价比卡池**，以更低硬件成本交付极速交互体验 |
+| **高并发吞吐区（`Batch >= 16`）或长文阅读** | **峰值算力受限（Compute-bound）**：一次权重读取分摊给 $\ge 16$ 个请求，访存被计算掩盖 | 非原生 W4A4 下 4-bit 实时解包（Unpack）反而消耗额外算力；**原生 FP8 / BF16 矩阵核**反超 | 自动切换至 **原生 FP8/BF16 高算力卡池**，避免高并发下算力被解包操作拖慢，最大化整机吞吐 |
 
-### 5.2 状态交换与存储置换约定：硬件中立协议（`lm://`）+ 三级缓存卸载（以存代算）
+### 5.2 异构准入与防呆门禁（[`capability.rs`](../../crates/nebula-common/src/capability.rs) + [`compat.rs`](../../crates/nebula-common/src/compat.rs#L221)）
 
-- **约定内容**：
-  1. 跨卡/跨角色（Prefill → Decode）状态交换统一采用硬件无关的开源 **LMCache `lm://` 纯 TCP 协议**与 `lmcache_controller` `/lookup` 目录接口，绝不绑定 NVIDIA 专属的 NIXL 或 `p2p_nccl`；
-  2. 将 KV Cache 建模为横跨 **L0（加速卡 HBM）→ L1（宿主机 DDR5 内存）→ L2（本地 NVMe 磁盘 / 远端共享池）** 的一等公民分层资源（⏳ Batch 6 待实现声明式 L1/L2 配额与单池 Offload，详见 [`kv-governance.md`](kv-governance.md)）。
-- **如何提升异构算力利用率**：
-  - **国产卡与异构 GPU 无缝共网**：只要跑通标准以太网 TCP 并满足张量 dtype 契约，昇腾 NPU 池与各类 GPU 池都能用同一套控制面跑通 `pd_split` 与缓存共享；
-  - **用廉价主机内存/磁盘放大 10× 有效显存（⏳ Batch 6）**：运营商服务器普遍配有数百 GB 闲置主机内存与高速 NVMe，通过声明式 L1/L2 Offload 承接温/冷 KV 块，把最昂贵的加速卡片上显存腾出来跑更大并发 Batch。
+面对国产卡与不同代际 GPU 的驱动、镜像和算子支持差异，Nebula 通过三道上线前门禁与巡检契约消除运维事故：
+1. **真实硬件证据核验（[`HardwarePool`](../../crates/nebula-common/src/pool.rs) + [`validate_compat_for_replica_specs`](../../crates/nebula-control/src/deploy.rs)）**：节点自动上报硬件平台（`platform`）、驱动与卡型；部署时强制核验目标池的真实硬件证据，不兼容配置直接拦截或要求审计留痕（`image_override_reason`）。
+2. **验证镜像白名单门禁（[`validate_pd_split_image`](../../crates/nebula-common/src/model_deployment.rs#L258)）**：凡开启跨卡读写分离（`pd_split`）的部署，其镜像必须先通过 [`scripts/check_lmcache_compat.sh`](../../scripts/check_lmcache_compat.sh) 真机正数传输门禁并列入 `NEBULA_APPROVED_PD_IMAGES` 白名单，杜绝版本微差导致线上崩溃。
+3. **缓存静默失效自动巡检（[`engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs#L10) + [`compat_slo.rs`](../../crates/nebula-bff/src/compat_slo.rs)）**：针对部分混合注意力模型在异构引擎上“表面正常响应、实则暗中关闭前缀缓存”的隐患，平台持续巡检 `vllm:prefix_cache_queries_total` 指标，异常归零时自动发出 `DiagnosticEvent` 运维告警。
 
-### 5.3 容错与可用性约定：只发 Hint + 随时可重算（Recompute on Failure）
+### 5.3 三级存储以存代算与跨商互通（[`kv-governance.md`](kv-governance.md)，⏳ Batch 6）
 
-- **约定内容**：
-  利用大模型 Prefill 阶段“给定相同 token 序列，输出 KV 张量完全确定”的**纯函数幂等特性**，约定系统中所有的跨组件状态（`nebula-indexd` 块目录、`lmcache_controller` `/lookup` 响应、`lmcache_server` 远端块、乃至 `Tool-Pause` 租约）**全部只作为性能加速偏置（Hint），绝不作为正确性依赖**。
-- **如何提升异构算力利用率**：
-  异构机房最常见的问题是长尾节点抖动或网络瞬断。在传统强耦合流水线中，一端抖动就会导致整条跨卡请求失败报错；而在 Nebula 的重算约定下，远端拉取失败或 `/lookup` 200ms 超时会自动回退到目标卡本地自 Prefill（Recompute），**把异构集群的“可用性事故”彻底降级为偶发的“延迟退化”，真机四项故障注入实测 100% 零拒绝（HTTP 200）**。
+- **三级存储以存代算（`L0 显存 → L1 主存 → L2 闪存`）**：
+  智算中心服务器普遍标配数百 GB 闲置主机 DDR5 内存与数 TB 高速 NVMe 闪存。Nebula 将 KV Cache 建模为横跨 **L0（加速卡片上显存）→ L1（宿主机 DDR5 内存）→ L2（本地 NVMe 磁盘 / 共享存储池）** 的分级资源（⏳ Batch 6），用廉价主机存储将单卡等效缓存容量**放大 10 倍**，无需追加购买昂贵显卡即可承载大规模企业知识库与长会话驻留。
+- **跨厂商通用传输与租户物理隔离（`LMCache lm://` + `cache_salt`）**：
+  跨卡状态传输统一采用标准以太网纯 TCP 协议（`lm://`），不绑定特定芯片厂商私有硬件协议（如 NIXL），让**国产昇腾 NPU 与各类 GPU 能够一网互通**；同时通过租户级密码学盐值（`cache_salt`，⏳ Batch 6）对不同企业客户的缓存块做物理正交隔离，满足政企客户严苛的数据安全合规要求。
 
 ---
 
-## 6. 对照总结：传统容器虚拟化 vs Nebula 细粒度计算契约体系
+## 6. 第四维（L1）：异构算力底座与昼夜错峰经营（看得准瓶颈、填得满波谷）
+
+### 6.1 统一瓶颈度量：用客户体感指标替代失真的硬件利用率（[`slo.rs`](../../crates/nebula-common/src/slo.rs) + [`capacity.rs`](../../crates/nebula-common/src/capacity.rs#L40)）
+
+不同厂商芯片的底层利用率指标（如 NVIDIA `DCGM_FI_DEV_GPU_UTIL` vs 昇腾 `npu_chip_info_aicore_usage`）不仅口径不一，而且在大模型解码阶段**严重失真**——当显存带宽 100% 满载、客户吐字已经明显卡顿时，算力核利用率往往只有 20% 左右，导致传统基于 GPU 利用率的告警与扩缩容彻底失效。
+
+Nebula 统一采用**与具体芯片无关的三维服务水位契约 `(TTFT, TPOT, KV_Usage)`**：
+- **首字延迟（`TTFT p95`）+ 预填充排队数超标** ⇒ 精准判定为**算力池不足**，自动触发算力池扩容（`scale_prefill_pool`）；
+- **吐字间隔（`TPOT p95`，由网关直接测量流式间隔 [`router_metrics.rs`](../../crates/nebula-control/src/router_metrics.rs)）超标或显存水位 `kv_cache_usage > 0.85`** ⇒ 精准判定为**解码带宽或显存容量不足**，提前触发解码池预警或扩容（`scale_decode_pool`）。
+
+### 6.2 昼夜错峰填谷与算力节省记账（[`queue.rs`](../../crates/nebula-common/src/queue.rs) + ⏳ Batch 6）
+
+- **有界公平队列与波谷填谷**：通过分级优先级队列，白天高峰期优先保障高溢价在线交互客户的低延迟 SLA；夜间或算力波谷期自动放行批量文档处理、离线评测与数据清洗任务，将机房 24 小时平均算力利用率拉满。
+- **算力节省可视化记账（`saved_prefill_tokens`，⏳ Batch 6）**：实时统计因缓存命中与阶段分流为机房省下的重算 Token 总量与等效 GPU 时长，让智算中心的每一分优化收益都清晰可查。
+
+---
+
+## 7. 全景对照总结：传统容器虚拟化 vs Nebula 异构计算契约与状态编排体系
 
 | 维度 | 传统云原生虚拟化方案（K8s + HAMi vGPU 切卡） | Nebula 异构计算契约与状态编排方案 |
 |---|---|---|
-| **核心抽象对象** | **静态容器与显存切片**（Pod / vGPU Memory MB / Core %） | **细粒度计算阶段与中间状态**（Prefill / Decode / Score / Continuation + 16-token KV Block） |
-| **适用负载时代** | 小模型时代（单卡显存过剩，靠切碎单卡塞更多小模型提利用率） | **大模型时代**（单模型占满整卡/多卡，靠消除重复计算、解耦阶段瓶颈与以存代算提利用率） |
-| **异构卡适配方式** | 仅负责挂载驱动设备号，对卡间算术强度与算子支持边界无感知 | **声明式物理契约**：L1 能力矩阵 + L2 兼容规则与镜像白名单 + L3 Roofline 并发拐点自动匹配 |
-| **Prefill / Decode 矛盾** | 同卡混跑，算力与显存带宽互相拖累（木桶效应） | **角色化分池（`pd_split`）+ 短请求智能旁路**：算力喂算力池，带宽喂解码池，短请求原地消化 |
-| **跨卡协同机制** | 无状态轮询（每张卡重复算、重复存相同前缀，或强绑厂商私有 RDMA） | **前置约定协同**：统一 `NEBULA_KV_HASH_SEED` 零通信寻址 + 硬件中立 `lm://` 共享 + 故障自动 Recompute |
-| **显存容量墙突破** | 受限于物理卡 HBM 大小，满了只能加买新卡 | **以存代算（L0 HBM → L1 主机内存 → L2 本地 NVMe/远端池，⏳ Batch 6）**：用廉价主机存储将单卡等效缓存容量放大 10× |
-| **容量与瓶颈度量** | 看失真的 GPU/NPU 算力利用率（`SM_UTIL` 在 Decode 满载时仅 ~25%） | **硬件无关二元曲面契约**：看 `(TTFT, TPOT, KV_Usage)` 直接定位缺算力还是缺带宽/显存 |
-| **多租户共池混部** | 靠硬切卡隔离（切碎后单租户并发能力下降，闲置切片无法共享） | **全池共享 + 软硬协同治理**：有界公平队列（在线优先 + 波谷批处理填谷）+ 租户级 `cache_salt` 缓存隔离与 `Saved Tokens` 算力记账（⏳ Batch 6） |
+| **核心管理颗粒度** | **静态容器与显存切片**（只管 Pod 生死与显存 MB 切分） | **细粒度计算阶段与中间状态**（单步判别 / 短请求直通 / 会话续算 / 投机核验 + 16-token 缓存块） |
+| **适用业务形态** | 小模型时代（单卡显存过剩，靠切碎单卡塞更多小模型提装箱率） | **大模型服务时代**（单模型占满整卡/多卡，靠消除重复计算、读写分离与以存代算提并发吞吐） |
+| **非主力/国产卡变现能力** | 客户挑卡严重，中端卡与异构卡因单卡性能短板难以售卖 | **扬长避短协同变现**：国产算力卡专职长文预填充与批量判别，中端卡靠投机核验拉升吐字速度达到高 SLA |
+| **长短请求与读写矛盾** | 同卡混跑、一刀切转发，长文阅读阻塞流式吐字，碎请求挤占内网 | **读写分离（`pd_split`）+ 短请求就近直通**：算力喂算力池、带宽喂解码池、短消息原地秒结 |
+| **跨卡协同与防呆机制** | 无状态轮询（多卡重复计算相同前缀），上线靠人工试错排障 | **全局统一哈希寻址 + 异构准入门禁**：零通信定位缓存卡、自动防拥塞分流、上线前拦截不兼容镜像 |
+| **硬件故障容错能力** | 单点慢卡或网络抖动直接导致跨卡流水线报错中断 | **无损降级重算（`Hint-Only & Recompute`）**：异常 200ms 内自动退化本地计算，生产环境 **100% 零报错** |
+| **显存容量墙突破** | 受限于加速卡片上显存大小，显存满载只能追加采购新卡 | **三级存储以存代算（L0 显存 → L1 主存 → L2 闪存，⏳ Batch 6）**：用廉价服务器内存/硬盘放大 10× 等效显存 |
+| **瓶颈度量与多租户经营** | 看失真的算力利用率（解码满载时算力仅 ~25%），靠硬切卡隔离租户 | **看真实体感水位 `(TTFT, TPOT, KV_Usage)`**：精准识别算力/带宽瓶颈，支持昼夜错峰填谷与租户级缓存安全共池（⏳ Batch 6） |
