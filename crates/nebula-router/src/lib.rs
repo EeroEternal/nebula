@@ -317,6 +317,10 @@ pub struct Router {
     /// and routes cold short requests directly to unsaturated Decode replicas.
     pd_bypass_tokens: usize,
     pd_short_bypass_total: AtomicU64,
+    /// Stage decisions skipped for lack of fresh `/stats/` (decision → count):
+    /// `short_bypass` | `prefill_spillover`. Without the node/controller scrape these
+    /// decisions are impossible, and the degradation used to be invisible.
+    stage_stats_missing: DashMap<&'static str, AtomicU64>,
     /// pd_split controller warm-lookup cache: (model, sha256(token_ids)) → (warm, ts).
     pd_warm_cache: DashMap<(String, [u8; 32]), (bool, u64)>,
     pd_lookup_total: AtomicU64,
@@ -402,6 +406,7 @@ impl Router {
             prefix_lookup: DashMap::new(),
             stage_prefill_fallback_total: AtomicU64::new(0),
             stage_decode_fallback_total: AtomicU64::new(0),
+            stage_stats_missing: DashMap::new(),
             stage_prefill_spillover_total: AtomicU64::new(0),
             pd_decode_local_hit_total: AtomicU64::new(0),
             pd_prefill_spillover_pending: AtomicU64::new(pd_prefill_spillover_pending),
@@ -546,6 +551,21 @@ impl Router {
             "decode" => self.stage_decode_fallback_total.load(Ordering::Relaxed),
             _ => self.stage_prefill_fallback_total.load(Ordering::Relaxed),
         }
+    }
+
+    /// Count of stage decisions skipped for lack of fresh `/stats/` (`decision`, count).
+    pub fn stage_stats_missing(&self, decision: &str) -> u64 {
+        self.stage_stats_missing
+            .get(decision)
+            .map(|e| e.value().load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn note_stage_stats_missing(&self, decision: &'static str) {
+        self.stage_stats_missing
+            .entry(decision)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn stage_prefill_spillover_total(&self) -> u64 {
@@ -1398,6 +1418,15 @@ impl Router {
                     })
                     .cloned()
                     .collect();
+                if bypass_decode.is_empty()
+                    && !candidates_data
+                        .iter()
+                        .any(|(ep, s)| ep.role == ReplicaRole::Decode && s.is_some())
+                {
+                    // Short prompt, but no Decode replica has fresh stats: the bypass
+                    // cannot be evaluated and traffic stays on the Prefill pool.
+                    self.note_stage_stats_missing("short_bypass");
+                }
                 if !bypass_decode.is_empty() {
                     self.pd_short_bypass_total.fetch_add(1, Ordering::Relaxed);
                     tracing::debug!(
@@ -1415,6 +1444,11 @@ impl Router {
                 // has fresh stats with pending_requests >= spillover_threshold and at least
                 // one Decode (kv_both) replica has fresh stats with strictly lower pending
                 // load, spill cold traffic over to those lighter Decode replicas.
+                if !pool.iter().any(|(_, s)| s.is_some()) {
+                    // Spillover opted in but the Prefill pool has no stats: nothing to
+                    // compare, so cold traffic cannot be rerouted.
+                    self.note_stage_stats_missing("prefill_spillover");
+                }
                 let min_prefill_pending = pool
                     .iter()
                     .filter_map(|(_, s)| s.as_ref().map(|st| st.pending_requests))
@@ -2138,6 +2172,43 @@ mod plan_version_tests {
         assert_eq!(ep.replica_id, 0);
         assert_eq!(router.stage_fallback_total("prefill"), 1);
         assert_eq!(router.stage_fallback_total("decode"), 0);
+    }
+
+    /// Silent degradation this counter exists for: with no `/stats/` the short-prompt
+    /// bypass cannot be evaluated, and the A/B harness measured a single-replica pool
+    /// while everything looked healthy.
+    #[test]
+    fn stage_decisions_report_missing_stats_instead_of_silently_degrading() {
+        let router = Router::new();
+        router.upsert_endpoint(ep_with_role("m1", 0, ReplicaRole::Prefill));
+        router.upsert_endpoint(ep_with_role("m1", 1, ReplicaRole::Decode));
+
+        // Short prompt, no stats anywhere: bypass impossible -> counted as stats-blind.
+        let short = [[0x11u8; 32], [0x22u8; 32]];
+        router
+            .route(&ctx_with_session(None), "m1", Some(&short), false)
+            .unwrap();
+        assert_eq!(router.pd_short_bypass_total(), 0);
+        assert_eq!(router.stage_stats_missing("short_bypass"), 1);
+
+        // Once the Decode replica reports fresh stats the bypass can be evaluated and
+        // the blindness counter stops moving.
+        let now = now_ms();
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 0,
+            prefix_cache_hit_rate: None,
+            prefix_cache_queries_total: None,
+            prompt_cache_hit_rate: None,
+            kv_cache_usage: Some(0.1),
+        });
+        router
+            .route(&ctx_with_session(None), "m1", Some(&short), false)
+            .unwrap();
+        assert_eq!(router.pd_short_bypass_total(), 1);
+        assert_eq!(router.stage_stats_missing("short_bypass"), 1);
     }
 
     #[test]

@@ -397,6 +397,16 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
          nebula_router_pd_decode_local_hit_total {}\n",
         st.router.pd_decode_local_hit_total(),
     ));
+    body.push_str(
+        "# HELP nebula_router_stage_stats_missing_total pd_split stage decisions skipped because the pool had no fresh /stats/ (needs the nebula-node/k8s-controller scrape).\n\
+         # TYPE nebula_router_stage_stats_missing_total counter\n",
+    );
+    for decision in ["short_bypass", "prefill_spillover"] {
+        body.push_str(&format!(
+            "nebula_router_stage_stats_missing_total{{decision=\"{decision}\"}} {}\n",
+            st.router.stage_stats_missing(decision),
+        ));
+    }
     body.push_str(&format!(
         "# HELP nebula_router_pd_short_bypass_total pd_split short cold requests bypassing controller lookup and prefill pool to unsaturated decode pool.\n\
          # TYPE nebula_router_pd_short_bypass_total counter\n\

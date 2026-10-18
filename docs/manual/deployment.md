@@ -320,6 +320,8 @@ curl -s http://127.0.0.1:8081/v1/score \
 | `NEBULA_PD_PREFILL_SPILLOVER_PENDING` | Router | `pd_split` 冷请求在 Prefill 池积压达阈值（`min_prefill_pending >= 阈值`）且某 Decode 副本有新鲜 `/stats/` 且 `pending_requests < min_prefill_pending` 时溢出直跑 Decode 的阈值 | `0`（默认关闭；显式设 `>0` 开启） |
 | `NEBULA_TOOL_PAUSE_TTL_MS` | Router | Agentic tool-call 暂停窗口内租户级 `(tenant_id, x-session-id)` 单次续接租约 TTL（毫秒） | `60000` |
 
+**先看有没有 stats**：`pd_split` 的短请求旁路、Prefill 溢流、以及 `least_pending` 在副本间分摊，全部依赖 `/stats/{model_uid}/{replica_id}`（由 `nebula-node` 或 `k8s-controller` 抓引擎 `/metrics` 写入）。指标 `nebula_router_stage_stats_missing_total` 非零或 `nebula_route_stale_stats_dropped_total` 持续增长，就说明这套管道没通 —— 此时任何 `pd_split` 的收益数字都不成立。
+
 **运维三件套（缺一则亲和永不命中，但安全回落可见）**：引擎 `PYTHONHASHSEED` 固定 + `--prefix-caching-hash-algo sha256_cbor`（执行面设 `NEBULA_KV_EVENTS_ENDPOINT` 后自动注入）+ Router tokenizer 目录。
 
 **排障核心指标**：
@@ -329,6 +331,7 @@ curl -s http://127.0.0.1:8081/v1/score \
 - `nebula_router_pd_decode_local_hit_total`：`pd_split` 命中 Decode 池本地显存（Tier-1 跳过 Prefill 与远端 KV 拉取）计数；
 - `nebula_router_pd_short_bypass_total`：`pd_split` 短请求直通空闲 Decode 副本计数；
 - `nebula_router_stage_prefill_spillover_total`：`pd_split` Prefill 池饱和时溢出至空闲 Decode 副本计数。
+- `nebula_router_stage_stats_missing_total{decision="short_bypass"|"prefill_spillover"}`：**因缺少新鲜 `/stats/` 而无法评估**的阶段决策计数。非零意味着 `/stats/` 管道没通（`nebula-node` / `k8s-controller` 的 scrape 没跑或副本不上报），此时短请求旁路与 Prefill 溢流**静默失效**，`pd_split` 会退化成"全部走 Prefill"——排查顺序见下方「数值先看它」。
 
 ## 7.7 etcd 备份与恢复
 
