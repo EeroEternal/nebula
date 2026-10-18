@@ -45,6 +45,8 @@ fn max_matched_tokens(v: &serde_json::Value) -> Option<u64> {
 /// the order of evictions, not requests) and time out fast so routing never
 /// stalls on the controller.
 const PD_WARM_CACHE_MS: u64 = 2_000;
+/// Lookups after which an all-cold streak is worth a warning (and a counter).
+const PD_COLD_STREAK_ALARM: u64 = 50;
 const PD_WARM_CACHE_MAX_ENTRIES: usize = 4_096;
 const PD_LOOKUP_TIMEOUT_MS: u64 = 200;
 
@@ -324,6 +326,8 @@ pub struct Router {
     /// pd_split controller warm-lookup cache: (model, sha256(token_ids)) → (warm, ts).
     pd_warm_cache: DashMap<(String, [u8; 32]), (bool, u64)>,
     pd_lookup_total: AtomicU64,
+    /// Set once when the cold-streak alarm has been logged for this process.
+    pd_cold_streak_warned: std::sync::atomic::AtomicBool,
     pd_lookup_warm_total: AtomicU64,
     http_client: reqwest::Client,
     stats_max_age_ms: u64,
@@ -414,6 +418,7 @@ impl Router {
             pd_short_bypass_total: AtomicU64::new(0),
             pd_warm_cache: DashMap::new(),
             pd_lookup_total: AtomicU64::new(0),
+            pd_cold_streak_warned: std::sync::atomic::AtomicBool::new(false),
             pd_lookup_warm_total: AtomicU64::new(0),
             http_client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_millis(PD_LOOKUP_TIMEOUT_MS))
@@ -795,9 +800,25 @@ impl Router {
             }
         };
         self.insert_warm_cache_at(cache_key, warm, now_ms());
-        self.pd_lookup_total.fetch_add(1, Ordering::Relaxed);
+        let lookups = self.pd_lookup_total.fetch_add(1, Ordering::Relaxed) + 1;
         if warm {
             self.pd_lookup_warm_total.fetch_add(1, Ordering::Relaxed);
+        } else if lookups >= PD_COLD_STREAK_ALARM {
+            // A warm signal that never fires means pd_split is silently degenerating
+            // into a single-Prefill deployment. The usual cause is bring-up order: an
+            // engine that started before lmcache_controller registers but never reports
+            // its KV keys, so every lookup answers cold for that engine's lifetime
+            // (docs/dev/benefit-verification.md §"暖信号启动顺序").
+            if self.pd_lookup_warm_total.load(Ordering::Relaxed) == 0 {
+                if !self.pd_cold_streak_warned.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        model_uid = %model_uid,
+                        lookups,
+                        "every LMCache controller lookup has been cold; pd_split is running as a single-Prefill pool (check that lmcache_controller was ready before the engines started)"
+                    );
+                }
+                self.note_stage_stats_missing("warm_signal_cold");
+            }
         }
         warm
     }
