@@ -442,7 +442,7 @@ retry_statuses = [404, 500, 502, 503, 504]   # 故意不含 429，见「关键�
 - 上游副本"接了请求但不出字"时，router 会换副本重试；所有副本都在预算内没出字才返回 `503 + Retry-After`，而不是先回 `200` 再吐一条截断的流。
 - **响应头（含 `x-nebula-*` 回显头）会晚到首个 token**。依赖"尽早拿到 header"的客户端/代理需要知道这一点；对 LLM 流式来说 header 本身没有信息量。
 - 预算两个旋钮：单次尝试 `NEBULA_PROXY_FIRST_BYTE_TIMEOUT_MS`（默认 60s），跨尝试总计 `NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS`（默认 90s）。**不要只调大前者**，否则坏集群会把延迟按尝试次数放大。
-- 本机制目前只在 `nebula-router` 内实现；`NEBULA_ROUTER_MODE=embedded`（gateway 自己在做 endpoint 选择）仍沿用"提交后再报错"的旧行为，见 #42。
+- 两条路径都已实现：`nebula-router` 与 `NEBULA_ROUTER_MODE=embedded`（gateway 进程内选 endpoint）都在首块到达后才提交状态；embedded 模式的重试计数是 `nebula_gateway_first_byte_retry_total`，router 模式是 `nebula_router_first_byte_retry_total`。
 
 ### 什么时候不要用
 

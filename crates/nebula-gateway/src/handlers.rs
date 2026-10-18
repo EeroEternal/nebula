@@ -186,7 +186,7 @@ async fn proxy_chat_as_responses(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let resp = match post_router_chat(&st, &prepared, &chat_body).await {
+    let (resp, prefetched_first) = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
@@ -215,7 +215,16 @@ async fn proxy_chat_as_responses(
     }
 
     if stream {
-        let mut upstream = resp.bytes_stream();
+        // Embedded mode may have already consumed the byte that let it commit 200;
+        // replay it so the adapter sees the whole upstream body.
+        let mut upstream: std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>,
+        > = match prefetched_first {
+            Some(head) => Box::pin(
+                futures_util::stream::once(async move { Ok(head) }).chain(resp.bytes_stream()),
+            ),
+            None => Box::pin(resp.bytes_stream()),
+        };
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
@@ -447,7 +456,7 @@ async fn proxy_chat_as_anthropic(
         Ok(v) => v,
         Err(r) => return r,
     };
-    let resp = match post_router_chat(&st, &prepared, &chat_body).await {
+    let (resp, prefetched_first) = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
@@ -475,7 +484,16 @@ async fn proxy_chat_as_anthropic(
     }
 
     if stream {
-        let mut upstream = resp.bytes_stream();
+        // Embedded mode may have already consumed the byte that let it commit 200;
+        // replay it so the adapter sees the whole upstream body.
+        let mut upstream: std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>,
+        > = match prefetched_first {
+            Some(head) => Box::pin(
+                futures_util::stream::once(async move { Ok(head) }).chain(resp.bytes_stream()),
+            ),
+            None => Box::pin(resp.bytes_stream()),
+        };
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
@@ -737,7 +755,7 @@ pub async fn proxy_post(
     let t_acquired = std::time::Instant::now();
 
     // Embedded router: route in-process and hit the engine directly (no router hop).
-    let resp = if st.router.is_some() {
+    let (resp, prefetched_first) = if st.router.is_some() {
         match forward_embedded(
             &st,
             &prepared,
@@ -761,7 +779,7 @@ pub async fn proxy_post(
             .send()
             .await
         {
-            Ok(r) => r,
+            Ok(r) => (r, None),
             Err(e) => {
                 let kind = classify_reqwest_error(&e);
                 st.metrics.record_upstream_error(kind);
@@ -800,6 +818,7 @@ pub async fn proxy_post(
         prepared.ctx.tenant_id.as_deref(),
         prepared.ctx.session_id.as_deref(),
         routed_endpoint,
+        prefetched_first,
     )
     .await
 }
