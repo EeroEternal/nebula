@@ -95,8 +95,8 @@ flowchart TB
 | 细粒度计算机制 | 机制原理（直观严谨定义） | Nebula 契约与实现触点 | 智算中心对外服务经营收益 |
 |---|---|---|---|
 | **1. 单次前向判别计算**<br>（`/v1/score` 契约） | **只做 1 次前向阅读、不做逐词生成（100% Prefill、0% Decode）**：客户在做检索重排（Rerank）、意图路由、合规审核时，只需获取候选词概率分布，无需进入自回归解码循环 | [`EngineCapability.score_api`](../../crates/nebula-common/src/capability.rs) + [`gate.rs`](../../crates/nebula-gateway/src/interface/gate.rs) + [`lib.rs`](../../crates/nebula-router/src/lib.rs) 前缀哈希路由 | **省去 100% 解码访存开销，单卡吞吐提升 10×+**：将外部客户的判别/打分流量从高价解码池剥离，定向卸载至算力充裕的国产 NPU 池批量高吞吐处理 |
-| **2. 短请求就近直通旁路**<br>（输入 `< 256 Tokens`） | **短输入免跨池折腾**：未达 LMCache 256-Token 块边界的短请求，跨节点查表与网络传输耗时反而高于计算本身；当解码池空闲时直接原地完成计算 | [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L723) + `NEBULA_PD_BYPASS_TOKENS=256` | **长短客流智能分道**：短对话客户获得毫秒级首字响应，同时避免海量碎请求挤占机房内网带宽与长文 Prefill 算力池 |
-| **3. 多步会话挂起续算**<br>（外部工具调用单次租约） | **外部工具调用等待期“锁卡保活”**：企业客户的 Agent 工作流在发出 `tool_calls` 后会停顿数秒等待外部 API 返回；网关自动在原卡登记单次租约，工具返回后优先放行并精准送回原卡续算 | 服务端观测 `finish_reason="tool_calls"` 登记 `(tenant_id, session_id)` 单次租约 + [`EngineQueue::acquire_with_priority`](../../crates/nebula-common/src/queue.rs#L110) | **杜绝换卡导致的数万字历史上下文返工重算**：保护已投入算力（PLAS），消除 Agent 客户多轮交互中 50%～80% 的无效重复 Prefill，使同等卡数可承载的并发企业客户数翻倍 |
+| **2. 短请求就近直通旁路**<br>（输入 `< 256 Tokens`） | **短输入免跨池折腾**：未达 LMCache 256-Token 块边界的短请求，跨节点查表与网络传输耗时反而高于计算本身；当解码池空闲时直接原地完成计算 | [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L707) + `NEBULA_PD_BYPASS_TOKENS=256` | **长短客流智能分道**：短对话客户获得毫秒级首字响应，同时避免海量碎请求挤占机房内网带宽与长文 Prefill 算力池 |
+| **3. 多步会话挂起续算**<br>（外部工具调用单次租约） | **外部工具调用等待期“锁卡保活”**：企业客户的 Agent 工作流在发出 `tool_calls` 后会停顿数秒等待外部 API 返回；网关自动在原卡登记单次租约，工具返回后优先放行并精准送回原卡续算 | 服务端观测 `finish_reason="tool_calls"` 登记 `(tenant_id, session_id)` 单次租约 + [`EngineQueue::acquire_with_priority`](../../crates/nebula-common/src/queue.rs#L112) | **杜绝换卡导致的数万字历史上下文返工重算**：保护已投入算力（PLAS），消除 Agent 客户多轮交互中 50%～80% 的无效重复 Prefill，使同等卡数可承载的并发企业客户数翻倍 |
 
 ### 3.3 算子与验证级置换：并行草稿投机验证（以算力补带宽）
 
@@ -123,7 +123,7 @@ Nebula 在 Zone C 层的演进方向，正是扮演关系型数据库中的 **�
 |---|---|---|---|
 | **1. 全局统一缓存寻址**<br>（`NEBULA_KV_HASH_SEED`） | **全栈统一数据块编号标准**：网关、索引服务与所有异构引擎共享完全一致的 16-Token 块切分、哈希种子（`NEBULA_KV_HASH_SEED == PYTHONHASHSEED`）、`sha256_cbor` 算法与分词模板，网关无需发任何跨节点查询报文即可直接算出请求对应的块编号 | [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs#L158) + [`prompt_hash.rs`](../../crates/nebula-router/src/prompt_hash.rs#L26) | **“把计算精准派往已有缓存的卡”**：毫秒级定位已持有客户历史前缀的加速卡，消灭多卡重复 Prefill 计算，显著降低单请求算力消耗 |
 | **2. 多卡缓存地图与防拥塞选路**<br>（`nebula-indexd` 联合打分） | **全局缓存目录 + 容量/排队联合权衡**：实时维护全集群每张卡持有的缓存块地图（[`PrefixIndex`](../../crates/nebula-router/src/kv_events.rs#L193)），选路时综合计算 `省下的预填充算力 - 当前排队等待 - 显存水位惩罚`，在命中缓存与负载均衡之间自动寻优 | [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) + [`strategy.rs`](../../crates/nebula-router/src/strategy.rs) | **“同构多卡显存拼成大池，高峰期防单卡堵死”**：既让池内多卡显存容量线性叠加，又在热门客户流量突发时自动向次优空闲卡分流（`owner_congested`），杜绝单卡排队违约 |
-| **3. 读写分离分池编排**<br>（`pd_split` 契约） | **算力池与带宽池物理分离**：在兼容切分域内，将长文档阅读（Prefill，`kv_producer`）与流式吐字（Decode，`kv_both`）拆入不同角色池独立扩缩容，消除同卡混跑时的计算与访存互相阻塞 | [`model_deployment.rs`](../../crates/nebula-common/src/model_deployment.rs#L20-L34) + [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L723) | **“消除长文阅读阻塞流式吐字”**：让算力型节点专职消化长上下文、带宽型节点专职服务流式解码，首字延迟 TTFT p99 实测降低 21% |
+| **3. 读写分离分池编排**<br>（`pd_split` 契约） | **算力池与带宽池物理分离**：在兼容切分域内，将长文档阅读（Prefill，`kv_producer`）与流式吐字（Decode，`kv_both`）拆入不同角色池独立扩缩容，消除同卡混跑时的计算与访存互相阻塞 | [`model_deployment.rs`](../../crates/nebula-common/src/model_deployment.rs#L20-L34) + [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L707) | **“消除长文阅读阻塞流式吐字”**：让算力型节点专职消化长上下文、带宽型节点专职服务流式解码，首字延迟 TTFT p99 实测降低 21% |
 | **4. 无损降级重算兜底**<br>（缓存仅作加速提示） | **缓存仅作加速提示、异常自动退化本地计算**：利用大模型前向计算的幂等性，将一切跨卡缓存目录与传输仅视为性能加速提示；遇网络抖动或 200ms 查表超时，目标卡立即无缝退化为本地自计算 | [`lib.rs`](../../crates/nebula-router/src/lib.rs) 容错回退状态机 | **“屏蔽异构机房硬件毛刺，保障电信级 99.99% 可用性”**：将异构集群常见的单点抖动从“客户报错中断”降级为偶发的“毫秒级延迟波动”，真机四项故障注入实测 **100% 零报错拒绝** |
 
 ---

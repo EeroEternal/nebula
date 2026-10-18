@@ -104,6 +104,7 @@ pub mod telemetry;
 pub use args::{parse_etcd_endpoints, CommonArgs};
 pub use dual_write::DualWriteEmitter;
 pub use http::{
-    audit_http_client, build_http_client, control_plane_http_client, health_http_client,
-    proxy_http_client, stream_idle_timeout, HttpClientOptions, DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+    audit_http_client, build_http_client, control_plane_http_client, first_byte_timeout,
+    health_http_client, proxy_http_client, stream_idle_timeout, ChunkDeadline, HttpClientOptions,
+    DEFAULT_PROXY_FIRST_BYTE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 };

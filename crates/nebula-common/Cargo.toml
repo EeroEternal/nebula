@@ -25,4 +25,6 @@ xtrace-client.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# `start_paused` (virtual time) for the streaming-deadline tests
+tokio = { version = "1", features = ["test-util"] }
 
