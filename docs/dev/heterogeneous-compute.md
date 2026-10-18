@@ -7,13 +7,13 @@
 
 ## 1. 背景与核心判断：为什么容器虚拟化（K8s / HAMi）救不了大模型异构算力？
 
-### 1.1 场景收敛：聚焦“纯异构推理算力的管理与压榨”
+### 1.1 场景收敛：聚焦“智算中心多批次异构卡池的高效对外服务”
 
-面向运营商与智算中心机房，底层资产的物理现实非常明确：**机房内长期并存多厂商、多代际、不同互联与主存配比的异构加速卡**（如华为昇腾 910B/910C 等国产 NPU、NVIDIA H800/A800/L40S/RTX 4090/5090 等多代 GPU，搭配大容量宿主机 DDR5 内存与本地 NVMe 磁盘）。
+面向运营商与大型智算中心机房，底层算力资产的物理现实非常明确：**机房内长期并存多批次采购、多厂商、多代际、不同互联与主存配比的异构加速卡**（如华为昇腾 910B/910C 等国产 NPU、NVIDIA H800/A800/L40S/RTX 4090/5090 等多代 GPU，搭配大容量宿主机 DDR5 内存与本地 NVMe 磁盘）。
 
-围绕**“如何把异构算力管得更好、有效利用率（Goodput / MFU）提得更高”**这一唯一核心目标，本方案明确**剥离三类与生产推理算力提效无关的外围概念**：
+站在**智算中心算力运营与对外提供推理服务（MaaS / 托管推理池）**的视角，核心经营痛点是：**外部客户争抢高端卡，而大量国产卡与中端卡因单卡带宽或算子差异难以直接满足高 SLA 要求，同时粗放调度导致机房内部存在大量重复计算与显存空转**。围绕**“如何把机房内全量异构算力管起来、提效变现，以更低单 Token 成本承载更高外部客户并发”**这一核心目标，本方案明确**剥离三类与生产推理算力提效无关的外围概念**：
 - **❌ 剥离 RSI（算子递归自改写 / 离线梦境进化）**：生产算力底座要求绝对的确定性、可审计与数值稳定，严禁线上系统自主变异改写算子内核；
-- **❌ 剥离 Agent 代码执行沙箱 / RL 训练采样池**：沙箱属于上游应用侧执行环境，RL Rollout 属于后训练管线，均不属于推理算力底座职责；
+- **❌ 剥离 Agent 代码执行沙箱 / RL 训练采样池**：沙箱属于上游客户应用侧执行环境，RL Rollout 属于后训练管线，均不属于推理算力底座职责；
 - **❌ 剥离跨公有云拼凑“逻辑超算”或天价专用晶圆芯片**：聚焦自有异构机房内通用 GPU / 国产 NPU 与主机存储层级的协同压榨。
 
 ### 1.2 核心洞察：K8s 纳管与 HAMi 切卡虚拟化为什么作用有限？
@@ -38,11 +38,11 @@
 
 ```mermaid
 flowchart TB
-    subgraph L4_Workload["第一层：细粒度计算形态抽象与入口契约 (Workload & Sub-Stage Abstraction)"]
-        W1["纯前向打分计算 (/v1/score 契约)<br/>1 次 Prefill 拿概率分布 · 零 Decode 开销"]
-        W2["微计算原地旁路 (Short-Prompt Bypass)<br/>&lt; 256 tokens 短请求跳过远端查表原地完成"]
-        W3["挂起态计算恢复 (Tool-Pause Continuation)<br/>服务端租约锁定原卡与优先级 · 保住累计计算量 PLAS"]
-        W4["算子/验证级置换 (Speculative & Lookup)<br/>轻量草稿 / N-gram 查找置换昂贵大图串行权重搬运"]
+    subgraph L4_Workload["第一层：负载计算分流与细粒度子阶段抽象 (Workload & Sub-Stage Abstraction)"]
+        W1["单次前向判别计算 (/v1/score 契约)<br/>单步前向直出概率分布 · 零解码开销 · 定向卸载算力池"]
+        W2["短请求就近直通旁路 (Short-Prompt Bypass)<br/>&lt; 256 tokens 短请求跳过远端查表原地处理 · 免跨网流转"]
+        W3["多步会话挂起续算 (Tool-Pause Continuation)<br/>外部工具等待期锁卡保活与优先唤醒 · 杜绝历史重算"]
+        W4["并行草稿投机验证 (Speculative Execution)<br/>轻量草稿生成 + 单次权重访存批量核验 · 以算力补带宽"]
     end
 
     subgraph L3_StageState["第二层：阶段解耦与全局状态寻址约定 (Stage Disaggregation & State Addressing)"]
@@ -72,39 +72,39 @@ flowchart TB
 
 ---
 
-## 3. 第一维：更细粒度的计算解耦抽象（让不同性质的计算各归其位）
+## 3. 第一维：更细粒度的计算解耦抽象（让不同性质的客户负载各归其位）
 
-大模型推理从来不是铁板一块的“同质计算”。要把异构卡用满，第一步是在控制面与路由层把一次笼统的推理调用**拆解为物理特征纯粹的细粒度计算原语**：
+大模型推理从来不是铁板一块的“同质计算”。站在智算中心对外服务的视角，如果把外部客户千差万别的业务流量全部塞进同一条重型生成流水线，不仅会造成严重的算力错配，还会让大量非主力卡无法发挥价值。Nebula 在控制面与路由入口将笼统的推理调用**拆解为物理特征纯粹的四类细粒度计算机制**：
 
-### 3.1 阶段级计算抽象：Prefill（算力密集 GEMM）vs Decode（带宽密集 GEMV）
+### 3.1 阶段级计算解耦：Prefill（算力密集 GEMM）vs Decode（带宽密集 GEMV）
 
 - **底层物理矛盾**：
-  - **Prefill 阶段**：并行处理完整输入序列，本质是大矩阵乘（GEMM），**算术强度极高（Compute-bound）**，瓶颈在于芯片的峰值算力（FLOPs）；
-  - **Decode 阶段**：自回归逐词生成，本质是矩阵-向量乘（GEMV），每吐 1 个 token 都必须把数十 GB 模型权重和历史 KV Cache 从显存完整读一遍，**算术强度极低（Memory-bandwidth-bound）**，瓶颈完全在显存带宽与容量，此时高算力卡的 Tensor Core / Cube 单元有 **75%～85% 的时间在空转等待显存**。
+  - **Prefill（首字阅读阶段）**：并行处理完整输入上下文，本质是大矩阵乘（GEMM），**算术强度极高（Compute-bound）**，瓶颈在于芯片的峰值浮点算力（FLOPs）；
+  - **Decode（逐词生成阶段）**：自回归逐词输出，本质是矩阵-向量乘（GEMV），每生成 1 个 token 都必须把数十 GB 模型权重和历史 KV Cache 从显存完整读取一遍，**算术强度极低（Memory-bandwidth-bound）**，瓶颈完全在显存带宽与容量，此时高算力卡的计算单元有 **75%～85% 的时间在空转等待显存搬运**。
 - **稳态交互性增益定律**：
   当同构节点把 $75\%$ 的时间花在 Prefill、仅 $25\%$ 的时间花在 Decode 时，Decode 批次被迫承受 $4\times$ 的排队与插队膨胀；将两者物理拆分为独立池后，在总吞吐不变的前提下，单请求平均解码交互速度可获得 $\frac{1}{\text{Decode Time \%}}$ 倍（如 $2\times \sim 4\times$）的直接提升。
 - **Nebula 的计算角色契约（[`model_deployment.rs`](../../crates/nebula-common/src/model_deployment.rs#L20-L34)）**：
-  通过 `DeploymentTopology::PdSplit` 将副本显式抽象为两种计算角色：
-  - **`ReplicaRole::Prefill`（`kv_producer`）**：部署在**算力型卡池**，专职消化长冷上下文并向共享池生产 KV 块；
-  - **`ReplicaRole::Decode`（`kv_both`）**：部署在**带宽/大显存型卡池**，专职拉取暖 KV 块并维持高并发、低抖动的流式输出（真机实测稳态 TTFT p99 降低 21%、e2e p99 降低 18%）。
+  通过 `DeploymentTopology::PdSplit` 将副本显式抽象为两种计算角色，使机房内不同特性的加速卡各司其职：
+  - **`ReplicaRole::Prefill`（`kv_producer`）**：部署在**算力充裕的卡池（如国产昇腾 910B / A800）**，专职消化客户长文档上下文并向共享池生产 KV 块；
+  - **`ReplicaRole::Decode`（`kv_both`）**：部署在**高显存带宽/大显存卡池（如 H20 / L40S）**，专职拉取暖 KV 块并维持高并发、低抖动的流式输出（真机实测稳态 TTFT p99 降低 21%、e2e p99 降低 18%）。
 
-### 3.2 负载形态级细粒度抽象：拒绝“一刀切”流水线
+### 3.2 负载形态级细粒度分流：拒绝“一刀切”消耗机房资源
 
-并非所有请求都应当走完整的“查表 → 远程 Prefill → 跨网拉 KV → Decode”重型链路。Nebula 进一步按**计算形态与生命周期**抽象出三类特化执行契约：
+针对外部客户的不同调用形态，Nebula 拒绝让所有请求都走完整的“全局查表 → 远程 Prefill → 跨网传 KV → Decode”重型链路，而是通过三项精准分流契约消除无效开销：
 
-| 细粒度计算原语 | 物理特征 | Nebula 契约与实现触点 | 算力提效价值 |
+| 细粒度计算机制 | 机制原理（直观严谨定义） | Nebula 契约与实现触点 | 智算中心对外服务经营收益 |
 |---|---|---|---|
-| **1. 纯前向打分计算（`/v1/score`）** | **100% Prefill、0% Decode**：分类、路由门控、RAG 重排只需 1 次前向传播获取候选词概率分布 | [`EngineCapability.score_api`](../../crates/nebula-common/src/capability.rs) + [`gate.rs`](../../crates/nebula-gateway/src/interface/gate.rs) + [`lib.rs`](../../crates/nebula-router/src/lib.rs) 前缀哈希路由 | 省去全部自回归解码步，命中前缀缓存时几毫秒即释放算力；对不支持的后端静态返回 `400 score_api_unsupported` |
-| **2. 微计算原地旁路（Short-Prompt Bypass）** | **小输入冷请求（`< 256 tokens`）**：未达 LMCache 256-token 块边界，远端查表与网络传输开销大于计算本身 | [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L723) + `NEBULA_PD_BYPASS_TOKENS=256` | 当 Decode 池有新鲜 `/stats/` 且空闲（`min_pending == 0`）时，短路 `/lookup` 直接在 Decode 节点原地完成 Chunked Prefill，消除 Prefill 池排队瓶颈 |
-| **3. 挂起态计算续接（`Tool-Pause` Continuation）** | **多步断续计算**：Agent 发出 `tool_calls` 后停顿数秒至数十秒等待外部工具返回，期间数十 KB～MB 的 KV 驻留在原卡显存中 | 服务端观测 `finish_reason="tool_calls"` 登记 `(tenant_id, session_id)` 单次租约 + [`EngineQueue::acquire_with_priority`](../../crates/nebula-common/src/queue.rs#L110) | 将工具返回识别为“已投入算力（PLAS）的恢复”而非新请求：赋予有界优先唤醒并强锚定原副本，防止前序几十轮算力因排队 429 或换卡驱逐而白费 |
+| **1. 单次前向判别计算（`/v1/score` 契约）** | **只做 1 次前向阅读、不做逐词生成（100% Prefill、0% Decode）**：客户在做检索重排（Rerank）、意图路由、合规审核时，只需获取候选词概率分布，无需进入自回归解码循环 | [`EngineCapability.score_api`](../../crates/nebula-common/src/capability.rs) + [`gate.rs`](../../crates/nebula-gateway/src/interface/gate.rs) + [`lib.rs`](../../crates/nebula-router/src/lib.rs) 前缀哈希路由 | **省去 100% 解码访存开销，单卡吞吐提升 10×+**：将外部客户的判别/打分流量从高价解码池剥离，定向卸载至算力充裕的国产 NPU 池批量高吞吐处理 |
+| **2. 短请求就近直通旁路（`Short-Prompt Bypass`）** | **短输入免跨池折腾（`< 256 tokens`）**：未达 LMCache 256-token 块边界的短请求，跨节点查表与网络传输耗时反而高于计算本身；当解码池空闲时直接原地完成计算 | [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L723) + `NEBULA_PD_BYPASS_TOKENS=256` | **长短客流智能分道**：短对话客户获得毫秒级首字响应，同时避免海量碎请求挤占机房内网带宽与长文 Prefill 算力池 |
+| **3. 多步会话挂起续算（`Tool-Pause` 租约续接）** | **外部工具调用等待期“锁卡保活”**：企业客户的 Agent 工作流在发出 `tool_calls` 后会停顿数秒等待外部 API 返回；网关自动在原卡登记单次租约，工具返回后优先放行并精准送回原卡续算 | 服务端观测 `finish_reason="tool_calls"` 登记 `(tenant_id, session_id)` 单次租约 + [`EngineQueue::acquire_with_priority`](../../crates/nebula-common/src/queue.rs#L110) | **杜绝换卡导致的数万字历史上下文返工重算**：保护已投入算力（PLAS），消除 Agent 客户多轮交互中 50%～80% 的无效重复 Prefill，使同等卡数可承载的并发企业客户数翻倍 |
 
-### 3.3 算子与验证级计算抽象：用“廉价草稿/查找”置换“昂贵大图访存”
+### 3.3 算子与验证级置换：并行草稿投机验证（`Speculative` 以算力补带宽）
 
-- **物理机制**：在低并发 Decode 阶段，既然瓶颈是“每步都要搬运一次几十 GB 的主模型权重”，那么最有效的算力压榨手段就是**让每搬运一次主模型权重，能一次性并行验证出多个 token（提高平均接受长度 $\tau = 1 + \text{accepted}/\text{drafts}$）**。
-- **Nebula 的声明式装配契约（[`model_request.rs`](../../crates/nebula-common/src/model_request.rs) / [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs)）**：
-  将投机执行抽象为模型部署契约 `speculative_config`：
-  - 支持用极低成本的 **N-gram 上下文窗口匹配（`ngram`）**、**多 Token 预测头（`mtp`）** 或 **独立小草稿模型（`draft_model`）** 先生成候选序列，再交由主模型单次前向并行验证；
-  - 由 [`validate_model_config`](../../crates/nebula-common/src/capability.rs) 在部署期按后端能力做静态校验，把复杂的底层投机参数变成安全可控的平台级加速开关。
+- **机制原理（用冗余算力置换紧缺显存带宽）**：
+  在对外交付低延迟生成服务时，机房内大量中端卡或异构卡受限于显存带宽（每吐 1 个词都要完整搬运一次数十 GB 模型权重，而高达 80% 的算力核处于闲置等待状态），导致单流吐字速度（TPOT）难以达到高价值客户的 SLA 门槛。
+  **并行草稿投机验证**通过极轻量的 **上下文窗口匹配（`ngram`）**、**多 Token 预测头（`mtp`）** 或 **轻量草稿模型（`draft_model`）** 先快速预测后续多个候选词，再利用主模型原本闲置的算力**仅读取 1 次显存权重即一次性并行核验多个词**（将单次权重访存的有效产出提升至 $\tau = 1 + \text{accepted}/\text{drafts}$）。
+- **Nebula 声明式装配契约与经营价值（[`model_request.rs`](../../crates/nebula-common/src/model_request.rs) / [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs)）**：
+  通过 `speculative_config` 统一声明并由 [`validate_model_config`](../../crates/nebula-common/src/capability.rs) 在部署期按后端能力做静态校验。在不损失任何生成精度的前提下，**将显存带宽受限卡型的单流解码速度提升 1.5～2.5 倍，帮助智算中心把原本难以单独售卖的中端异构卡转化为满足高 SLA 标准的高溢价服务能力**。
 
 ### 3.4 演进视野：异构推理控制面的本质是“物理查询优化器（Physical Query Optimizer）”
 

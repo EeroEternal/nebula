@@ -23,7 +23,7 @@
     <line x1="138" y1="48" x2="138" y2="122" stroke="#64748B" stroke-width="1.5"/>
     <circle cx="138" cy="48" r="3" fill="#64748B"/>
     <circle cx="138" cy="122" r="3" fill="#64748B"/>
-    <text x="126" y="80" text-anchor="end" font-size="11" font-weight="700" fill="#475569">L4 · 细粒度计算层</text>
+    <text x="126" y="80" text-anchor="end" font-size="11" font-weight="700" fill="#475569">L4 · 负载计算分流</text>
     <text x="126" y="96" text-anchor="end" font-size="9.5" font-weight="500" fill="#64748B">Workload &amp; Sub-Stage</text>
 
     <!-- Plane 2: Stage Disaggregation & State Invariants (Focal) -->
@@ -51,30 +51,30 @@
     <!-- Card 1 -->
     <rect x="160" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="176" cy="65" r="4" fill="#3B82F6"/>
-    <text x="186" y="69" font-size="12.5" font-weight="700" fill="#1E293B">纯前向打分计算</text>
+    <text x="186" y="69" font-size="12.5" font-weight="700" fill="#1E293B">单次前向判别计算</text>
     <text x="174" y="88" font-size="10.5" fill="#475569">EngineCapability.score_api</text>
-    <text x="174" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">/v1/score 1次Prefill · 零Decode</text>
+    <text x="174" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">单步前向直出概率 · 定向卸载算力池</text>
 
     <!-- Card 2 -->
     <rect x="372" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="388" cy="65" r="4" fill="#3B82F6"/>
-    <text x="398" y="69" font-size="12.5" font-weight="700" fill="#1E293B">微计算原地旁路</text>
+    <text x="398" y="69" font-size="12.5" font-weight="700" fill="#1E293B">短请求就近直通旁路</text>
     <text x="386" y="88" font-size="10.5" fill="#475569">Short-Prompt Bypass (&lt;256)</text>
-    <text x="386" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">Decode空闲时跳过远端查表</text>
+    <text x="386" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">解码池空闲时原地处理 · 免跨网流转</text>
 
     <!-- Card 3 -->
     <rect x="584" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="600" cy="65" r="4" fill="#3B82F6"/>
-    <text x="610" y="69" font-size="12.5" font-weight="700" fill="#1E293B">挂起态计算续接</text>
+    <text x="610" y="69" font-size="12.5" font-weight="700" fill="#1E293B">多步会话挂起续算</text>
     <text x="598" y="88" font-size="10.5" fill="#475569">Tool-Pause Continuation</text>
-    <text x="598" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">单次租约优先唤醒 · 保住PLAS</text>
+    <text x="598" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">工具等待期锁卡保活 · 杜绝历史重算</text>
 
     <!-- Card 4 -->
     <rect x="796" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="812" cy="65" r="4" fill="#3B82F6"/>
-    <text x="822" y="69" font-size="12.5" font-weight="700" fill="#1E293B">算子/验证级置换</text>
+    <text x="822" y="69" font-size="12.5" font-weight="700" fill="#1E293B">并行草稿投机验证</text>
     <text x="810" y="88" font-size="10.5" fill="#475569">Speculative · ngram / mtp</text>
-    <text x="810" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">廉价草稿置换大图串行权重访存</text>
+    <text x="810" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">单次权重访存吐多词 · 以算力补带宽</text>
   </g>
 
   <!-- L4 -> L3 Vertical Converging Arrows -->
@@ -193,14 +193,14 @@
     <text x="470" y="564" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">高带宽 Decode 交互池</text>
     <text x="470" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">Bandwidth-Bound GEMV Pool</text>
     <text x="470" y="600" text-anchor="middle" font-size="9.5" fill="#065F46">H20 / L40S / RTX 4090 / 5090</text>
-    <text x="470" y="614" text-anchor="middle" font-size="9.5" fill="#047857">高并发流式解码与短请求原地旁路</text>
+    <text x="470" y="614" text-anchor="middle" font-size="9.5" fill="#047857">高并发流式解码与短请求就近直通</text>
 
     <!-- Silicon 3: Host DDR5 & Local NVMe Tier -->
     <rect x="584" y="542" width="196" height="84" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
     <text x="682" y="564" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">主机 DDR5 与 NVMe 存储池</text>
     <text x="682" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">Host Memory &amp; Local Storage</text>
     <text x="682" y="600" text-anchor="middle" font-size="9.5" fill="#065F46">数百GB空闲DDR5 + 高速NVMe</text>
-    <text x="682" y="614" text-anchor="middle" font-size="9.5" fill="#047857">承接温/冷KV块与挂起态驻留</text>
+    <text x="682" y="614" text-anchor="middle" font-size="9.5" fill="#047857">承接温/冷KV块与多步会话挂起驻留</text>
 
     <!-- Silicon 4: Binary Feedback Surface & Fair Queueing -->
     <rect x="796" y="542" width="196" height="84" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
