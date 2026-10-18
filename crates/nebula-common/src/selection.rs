@@ -293,11 +293,17 @@ fn roofline_quantization_adjustment(
     (effective_bonus, reason)
 }
 
+/// Switching-cost penalty, identical for every preference.
+///
+/// Single definition shared by `score_candidate` and `build_score_breakdown` so
+/// the explainable breakdown always reconstructs the real `score`; the two drifted
+/// apart once (Cost used `* 0.01` while the breakdown printed `* 10.0`).
+fn switch_penalty(c: &BackendCandidate) -> f64 {
+    c.switching_cost * 10.0
+}
+
 fn score_candidate(pref: SelectionPreference, c: &BackendCandidate, roofline_bonus: f64) -> f64 {
-    let switch_penalty = match pref {
-        SelectionPreference::Cost => c.switching_cost * 0.01,
-        SelectionPreference::Latency | SelectionPreference::Throughput => c.switching_cost * 10.0,
-    };
+    let switch_penalty = switch_penalty(c);
     let base = match pref {
         SelectionPreference::Latency => {
             let ttft = c.ttft_p95_ms.unwrap_or(f64::MAX);
@@ -329,7 +335,7 @@ fn build_score_breakdown(
     roofline_bonus: f64,
     score: f64,
 ) -> Vec<String> {
-    let switch_penalty = c.switching_cost * 10.0;
+    let switch_penalty = switch_penalty(c);
     let mut parts = vec![format!("preference={}", preference_label(pref))];
     match pref {
         SelectionPreference::Latency => {
@@ -732,6 +738,50 @@ mod tests {
         .unwrap();
         assert_eq!(ok.deployment.model_uid, "qwen");
         assert_eq!(ok.engine_type, "vllm");
+    }
+
+    #[test]
+    fn score_breakdown_terms_reconstruct_score_for_every_preference() {
+        // Regression: Cost used `switching_cost * 0.01` for scoring while the
+        // breakdown printed `* 10.0`, so the API's explainable `score_breakdown`
+        // did not add up for cost-preference responses.
+        let c = BackendCandidate {
+            engine_type: "vllm".into(),
+            engine_version: None,
+            image_id: None,
+            platform: None,
+            confidence: RecommendConfidence::High,
+            switching_cost: 0.25,
+            score: 0.0,
+            score_breakdown: vec![],
+            evidence_run_ids: vec![],
+            ttft_p95_ms: Some(800.0),
+            throughput_tps: Some(42.0),
+            cost_per_1k_tokens: Some(0.004),
+            reasons: vec![],
+        };
+        for pref in [
+            SelectionPreference::Latency,
+            SelectionPreference::Throughput,
+            SelectionPreference::Cost,
+        ] {
+            let score = score_candidate(pref, &c, 0.0);
+            let printed_penalty = build_score_breakdown(pref, &c, 0.0, score)
+                .iter()
+                .find_map(|p| p.strip_prefix("switch_penalty=").map(str::to_string))
+                .expect("switch_penalty in breakdown")
+                .parse::<f64>()
+                .expect("numeric switch_penalty");
+            let reconstructed = match pref {
+                SelectionPreference::Latency => -(800.0 + printed_penalty),
+                SelectionPreference::Throughput => 42.0 - printed_penalty,
+                SelectionPreference::Cost => -(0.004 + printed_penalty),
+            };
+            assert!(
+                (score - reconstructed).abs() < 1e-6,
+                "{pref:?}: score={score} but breakdown reconstructs {reconstructed}"
+            );
+        }
     }
 
     #[test]
