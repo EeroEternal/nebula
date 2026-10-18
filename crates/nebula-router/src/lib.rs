@@ -803,22 +803,26 @@ impl Router {
         let lookups = self.pd_lookup_total.fetch_add(1, Ordering::Relaxed) + 1;
         if warm {
             self.pd_lookup_warm_total.fetch_add(1, Ordering::Relaxed);
-        } else if lookups >= PD_COLD_STREAK_ALARM {
-            // A warm signal that never fires means pd_split is silently degenerating
+        } else if lookups >= PD_COLD_STREAK_ALARM
+            && self.pd_lookup_warm_total.load(Ordering::Relaxed) == 0
+        {
+            // A warm signal that has never fired means pd_split is silently degenerating
             // into a single-Prefill deployment. The usual cause is bring-up order: an
             // engine that started before lmcache_controller registers but never reports
             // its KV keys, so every lookup answers cold for that engine's lifetime
             // (docs/dev/benefit-verification.md §"暖信号启动顺序").
-            if self.pd_lookup_warm_total.load(Ordering::Relaxed) == 0 {
-                if !self.pd_cold_streak_warned.swap(true, Ordering::Relaxed) {
-                    tracing::warn!(
-                        model_uid = %model_uid,
-                        lookups,
-                        "every LMCache controller lookup has been cold; pd_split is running as a single-Prefill pool (check that lmcache_controller was ready before the engines started)"
-                    );
-                }
-                self.note_stage_stats_missing("warm_signal_cold");
+            //
+            // Note the `warm_total == 0` guard: ordinary cold misses in a mixed stream
+            // must not be counted here, or the counter would read "signal dead" while it
+            // is working (measured: 176 warm hits alongside 123 false positives).
+            if !self.pd_cold_streak_warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    model_uid = %model_uid,
+                    lookups,
+                    "every LMCache controller lookup has been cold; pd_split is running as a single-Prefill pool (check that lmcache_controller was ready before the engines started)"
+                );
             }
+            self.note_stage_stats_missing("warm_signal_cold");
         }
         warm
     }

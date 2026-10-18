@@ -126,3 +126,35 @@
 
 在上述前置条件满足前，**不要引用本表作为 `pd_split` vs `replicated` 的收益结论** —— 它只说明"加了首字节承诺之后，单引擎路径没有变慢、也没有截断流"。
 
+---
+
+## 2026-10-18 第三轮：前置条件齐备后的 `pd_split` vs `replicated`
+
+> 前置条件（前两轮缺的就是这两条）：**controller 先于引擎就绪**（产品侧已由 `wait_for_lmcache_controller` 门禁保证，见 #51）+ **`/stats/` 可读**（`nebula-node` 职责，本轮用等价抓取替代）。其余同上：101 / 8×5090 / Qwen2.5-7B TP=1 / vLLM 0.23.0 + LMCache 0.5.5 探针镜像，96 前缀 ×1500 词，每点 120 请求，`max_tokens=32`，先跑一轮 `C=4` 预热丢弃。
+
+| 臂 | C=1 | C=2 | C=4 | C=8 | p50 @C8 | p99 @C8 | 失败 |
+|---|---|---|---|---|---|---|---|
+| `replicated`（prefix_affinity + kv-events） | 1.90 | 3.46 | 6.84 | **12.89** | **107 ms** | **219 ms** | 0 |
+| `pd_split`（暖信号生效） | 0.63\* | 3.13 | 5.92 | **10.75** | 257 ms | 343 ms | 0 |
+
+\* `pd_split` 的 C=1 点有单个请求的长尾（p50 仍 138 ms，均值被拉低到 0.63 rps），与冷取回偶发卡顿一致，属已知现象（#37）。
+
+**有效性证据**（否则这组数字不成立）：
+- `pd_split`：`pd_lookup_total=600`、**`pd_lookup_warm_total=176`** → 暖路由真的生效（前两轮该值分别为 0 和 46）；
+- 两臂：`stage_stats_missing_total{short_bypass|prefill_spillover}=0` → `/stats/` 管道可用；
+- 两臂：`retry_total≈0`、`upstream_stream_error_total=0`、`first_byte_retry_total=0` → 无重试、无截断；
+- `replicated`：`prefix_index_entries` 增长、`strategy_fallback{no_signal}` 只在首见前缀时增加。
+
+### 结论（以此为准）
+
+1. **在 7B / TP=1 / 单机 / 1:1 池配比 / 96×1500 词前缀这一配置下，`pd_split` 三项指标均略逊**：吞吐 −17%（10.75 vs 12.89 rps）、TTFT p50 与 p99 均更差（257/343 ms vs 107/219 ms）。
+2. **"暖态尾部更优"在本配置下不成立**。此前记录的 `p99 −61%` 来自**暖信号未生效**的那一轮（实际是"单 Prefill 副本 vs 双副本"），已更正；2026-07-13 的 `p99 −21%` 属另一套条件（8 前缀、不同取回路径），不能外推到此。
+3. **`pd_split` 的收益条件因此收窄为**：跨机/跨卡取回明显快于重算（大模型、长 prefill、本地 tier 命中），或需要把 prefill 与 decode 的**故障域与扩缩容耦合**拆开的场景 —— 不是"开箱即更快"。
+4. 前两轮的数字（`1.07 rps`、`10.83 rps`、`p99 449 ms`）都应视为**前置条件不满足时的观测**，不再作为收益依据。
+
+### 仍未覆盖
+
+- 多机 / 真实跨机 `lm://`（本轮 controller、store、两个引擎同机，TCP 走 loopback，取回成本被严重低估）；
+- 更大模型与更长 prefill（pd_split 的理论收益区）；
+- C>8、长输出（OSL 主导）场景。
+

@@ -249,13 +249,14 @@ stage = warm → decode 池（便宜地 retrieve）
 
 | 配置 | rps | TTFT p50 | TTFT p99 | 失败 |
 |---|---|---|---|---|
-| replicated（prefix_affinity 生效） | 9.05 | **131 ms** | 1163 ms | 0 |
-| pd_split，**共享存储为空**（首轮冷前缀） | 1.07 | 1073 ms | 2646 ms | **15（流无 `[DONE]`）** |
-| pd_split，**共享存储已预热** | **10.83** | 224 ms | **449 ms（−61%）** | 0 |
+| replicated（prefix_affinity + `/stats/` 生效） | **12.89** | **107 ms** | **219 ms** | 0 |
+| pd_split（controller 先就绪 → 暖信号生效 `warm=176/600`） | 10.75 | 257 ms | 343 ms | 0 |
 
-**修正后的结论**（初版曾误读首轮冷启动为"暖态变慢 8.6×"，原因与证据见 `benefit-verification.md`）：
+> ⚠️ 本表是**前置条件齐备后**（controller 就绪 + `/stats/` 管道，见 [`../dev/benefit-verification.md`](../dev/benefit-verification.md) §"暖信号启动顺序"与 §"2026-10-18 第三轮"）的口径。早前本小节曾记录 `pd_split` 预热后 **p99 −61%**，那一轮实测是**暖信号未生效**（`pd_lookup_warm_total=0`）时的"单 Prefill 副本 vs 双副本"，因此不能作为 pd_split 的尾部收益证据，已更正。
 
-1. **稳态吞吐与 replicated 持平**（10.83 vs 9.05 rps），且**尾部延迟显著更优（p99 −61%）** —— 与本节 2026-07-13 的原始判断同向，v1 的定位（尾部优化）成立。
+**修正后的结论**（本节被更正过两次：先误读冷启动为"暖态慢 8.6×"，后又把"暖信号未生效"的单副本数字当成 pd_split 的尾部收益）：
+
+1. **前置条件齐备（controller 先就绪 + `/stats/`）后，本配置下 pd_split 在三项指标上均略逊**：rps 10.75 vs 12.89（−17%）、TTFT p50 257 vs 107 ms、p99 343 vs 219 ms。即"尾部更优"在 7B / TP=1 / 单机 / 1:1 池配比 / 96×1500 词前缀下**不成立**；它需要更强的条件（跨机取回替代重算、更大模型、更长 prefill）才可能显现，2026-07-13 的 p99 −21% 属另一套条件，不能直接外推。
 2. **真正的风险是"冷存储 + 单 Prefill 池"的突发**：96 个前缀从零开始时全部压到唯一 Prefill 副本，C=8 下积压 → 1.07 rps 且 15/192 流截断。**预热/预热策略（Batch 6.3）与 Prefill 池配比是这条风险的对冲**，不是可选优化。
 3. 暖请求的 p50 劣化（131 → 224 ms）来自整请求级路由仍要经 `lm://` 取回全量 KV（实测 ≈0.6 ms/token），量级与 p50 差同向，但不足以抵消 p99 的收益。
 4. `nebula_router_upstream_stream_error_total` 为 0：截断流是"上游 EOF 无 `[DONE]`"，router 侧无错误信号 —— 该静默分支已由同批 instrumentation 补上日志与计数。
