@@ -1767,6 +1767,7 @@ dependencies = [
  "hex",
  "nebula-common",
  "nebula-meta",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

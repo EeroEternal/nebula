@@ -115,6 +115,8 @@ flowchart TB
 ---
 
 
+> **状态更新（2026-10-18，6.3）**：生命周期 API 已封装为 `nebula-control::LmcacheController`（`lookup` / `pin` / `clear`）并挂在 BFF `POST /api/v2/models/{uid}/cache/{lookup,pin,clear,warmup}`；`warmup` 走 Router 真正跑一次推理（controller 只能 pin 已存在的 KV，**产不出** KV）。真机校验：三个请求形状对 `lmcache 0.5.5` 均被接受（无 worker 时 `pin`/`clear` 返回 500 `The number of tokens … should be the same across all workers.`，属语义拒绝而非字段错误）。**未做**：控制台 UI、定时预热、warmup 后自动 pin（缺 token ids）。
+>
 > **状态更新（2026-10-18，6.4）**：`saved_prefill_tokens` 已在 Router 侧落地为 `nebula_router_saved_prefill_tokens_total{model_uid}` —— 只累计「被服务副本实际持有的块数 × 16」，冷请求与「命中了但没路由过去」的块都不计入，因此是 ROI 的**保守下界**。**未做**：租户维度聚合与 `$` 折算（缺少每模型单价输入，凭空折算会把「节省 token」变成编造的成本数字）。
 
 > **状态更新（2026-10-18）**：6.1 的「声明 + 水位」已落地 —— `KvSharingSpec` 新增 `local_cpu_size_gb` / `local_disk_path` / `local_disk_size_gb`（未声明时保持原 5 GB 行为），`kv_sharing_env` 按声明下发到 `LMCACHE_MAX_LOCAL_CPU_SIZE` / `LMCACHE_LOCAL_DISK` / `LMCACHE_MAX_LOCAL_DISK_SIZE`（真机确认 LMCache 0.5.5 读到 `12 GB` 与磁盘路径），`NodeStatus` 上报宿主机内存，容量快照输出 `kv_l1_oversubscribed`。**仍未做**：`replicated` 单池的分级 Offload（`kv_sharing_env(Mixed)` 返空，需要同时为 Mixed 副本下发 `--kv-transfer-config`）。
