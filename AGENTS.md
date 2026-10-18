@@ -26,7 +26,7 @@ Hard limit **80 lines / 1200 tokens**. Near the limit: **zero-sum** (add one, re
 | Code review / PR audit | skill [`review`](.agents/skills/review/SKILL.md) |
 | etcd key / prefix / lease / owner | [`docs/dev/etcd.md`](docs/dev/etcd.md), [`docs/dev/ownership.md`](docs/dev/ownership.md) |
 | K8s / HAMi runtime | [`docs/dev/k8s.md`](docs/dev/k8s.md) |
-| KV affinity / `pd_split` / Stage boundary | [`docs/dev/direction.md`](docs/dev/direction.md), [`docs/arch/pool.md`](docs/arch/pool.md) |
+| KV affinity / `pd_split` / KV governance | [`docs/dev/direction.md`](docs/dev/direction.md), [`docs/arch/pool.md`](docs/arch/pool.md), [`docs/dev/kv-governance.md`](docs/dev/kv-governance.md) |
 | Docs under `docs/` | [`docs-layout.md`](docs/ai/agents/docs-layout.md) |
 | `tokio::spawn` / scripts / exit codes | [`engineering.md`](docs/ai/agents/engineering.md) |
 | Commit messages | [`commit-style.md`](docs/ai/agents/commit-style.md) |
@@ -46,7 +46,7 @@ Hard limit **80 lines / 1200 tokens**. Near the limit: **zero-sum** (add one, re
 10. **Local CI only**: Never add or revive GitHub Actions test workflows. Push gate is `./scripts/ci.sh` via skill [`pre-push-local-gates`](.agents/skills/pre-push-local-gates/SKILL.md).
 11. **Plugin/middleware** for custom data-plane logic (headers, auth decoration, masking). Never hardcode tenant branches into the core pipeline.
 12. **Docs layout**: `manual/` `versions/` `dev/` `arch/`; sole index `docs/README.md`; short names; `manual/` has no roadmap checkboxes. Details: [`docs-layout.md`](docs/ai/agents/docs-layout.md).
-13. **Zone C & Constraints over Coupling**: Nebula is **state- & stage-aware orchestration above engine black-boxes (Zone C / S2)**, not stateless LB. Never touch engine internals (Zone A/B / S1), never pass KV bytes through Nebula (S3), and never do per-request cross-node handoffs; align components via **deploy-time constraints, shared hash invariants (`NEBULA_KV_HASH_SEED`), and hint-only recomputable KV state**. See [`docs/dev/direction.md`](docs/dev/direction.md).
+13. **Zone C & Constraints over Coupling**: Nebula is **state- & stage-aware orchestration above engine black-boxes (Zone C / S2)**, not stateless LB. Treat KV Cache not merely as a read-only routing signal (`warm/cold`), but as a **first-class L2/L3/L4 tiered resource to declare, isolate, warm/pin, and account for**. Never touch engine internals (Zone A/B / S1), never pass KV bytes through Nebula (S3), and never do per-request cross-node handoffs; align components via **deploy-time constraints, shared hash invariants (`NEBULA_KV_HASH_SEED`), and hint-only recomputable KV state**. See [`docs/dev/direction.md`](docs/dev/direction.md), [`docs/dev/kv-governance.md`](docs/dev/kv-governance.md).
 
 ## Skills Index
 

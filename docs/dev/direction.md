@@ -1,16 +1,18 @@
 # Nebula 发展方向与编排边界备忘
 
-> 日期：2026-10-16（初版 2026-09-20）。性质：**战略与架构边界备忘**（结论性判断，批次勾选以 [`../arch/roadmap.md`](../arch/roadmap.md) 为准）。
-> 依据：[`landscape.md`](landscape.md)（Dynamo / llm-d 对照）、[`hw/vllm-serving-perf.md`](hw/vllm-serving-perf.md)（真机测量 + A/B/C 分区）、[`prefix-affinity.md`](prefix-affinity.md)（P1c + `nebula-indexd`）、[`benefit-verification.md`](benefit-verification.md)（客户端口径 A/B）、[`../arch/pool.md`](../arch/pool.md)（`pd_split` v1 角色化路由 + 故障注入）。
+> 日期：2026-10-18（初版 2026-09-20）。性质：**战略与架构边界备忘**（结论性判断，批次勾选以 [`../arch/roadmap.md`](../arch/roadmap.md) 为准）。
+> 依据：[`landscape.md`](landscape.md)（Dynamo / llm-d 对照）、[`hw/vllm-serving-perf.md`](hw/vllm-serving-perf.md)（真机测量 + A/B/C 分区）、[`prefix-affinity.md`](prefix-affinity.md)（P1c + `nebula-indexd`）、[`benefit-verification.md`](benefit-verification.md)（客户端口径 A/B）、[`../arch/pool.md`](../arch/pool.md)（`pd_split` v1 角色化路由 + 故障注入）、[`kv-governance.md`](kv-governance.md)（企业级 KV Cache 资源化治理）。
 
 ## 1. 核心定位
 
 > **Nebula = 不依赖 K8s 的多引擎推理编排 + 多租户治理控制面**（引擎之上、K8s 之外）。
-> **核心演进命题：把多副本推理从“无状态的盲目均摊（Stateless Load Balancing）”，变成“围绕 KV Cache 中间状态的数据亲和与阶段化解耦调度（State- & Stage-Aware Orchestration）”。**
+> **核心演进命题（双轮驱动）**：
+> 1. **数据面（State- & Stage-Aware Orchestration）**：把多副本推理从“无状态的盲目均摊（Stateless Load Balancing）”，变成**“围绕 KV Cache 中间状态的数据亲和与阶段化解耦调度”**；
+> 2. **控制面（Tiered Resource Governance）**：**不要把 KV Cache 只当成 Router 选路时的一个只读布尔信号（`warm/cold`），而要把它当成 Nebula 控制面（L2/L3/L4）的一等公民资源（Tiered Resource）来声明（Declare）、隔离（Isolate）、预热（Warm/Pin）和记账（Account）**（详见 [`kv-governance.md`](kv-governance.md)）。
 
-单实例推理引擎（vLLM/SGLang）有吞吐天花板（如 RTX 5090 单卡 ~3.4k tok/s），单纯加副本用 `LeastPending` 轮询会导致每个副本重复计算、重复存储相同的 Prefix KV（有效缓存容量除以 $N$）。Nebula 作为引擎之上的编排层，唯一能真正超越“单实例直连”的系统级手段，就是**管理好跨副本的 KV 状态与请求阶段**。
+单实例推理引擎（vLLM/SGLang）有吞吐天花板（如 RTX 5090 单卡 ~3.4k tok/s），单纯加副本用 `LeastPending` 轮询会导致每个副本重复计算、重复存储相同的 Prefix KV（有效缓存容量除以 $N$）。Nebula 作为引擎之上的编排与控制层，唯一能真正超越“单实例直连”与“纯开源连接器”的系统级手段，就是**在数据面做好跨副本 KV 亲和与阶段分流，在控制面把分级 KV Cache（L0 HBM / L1 DRAM / L2 NVMe & 远端池）管成可隔离、可预热、可算账的企业级资产**。
 
-「引擎之上编排」这一层（[`hw/vllm-serving-perf.md`](hw/vllm-serving-perf.md) §10 的 Zone C）已被 Dynamo（NVIDIA，Rust）与 llm-d（CNCF，K8s）占据，**正面拼广度必输**。Nebula 唯一未被占据的位置是**轻量、无需 K8s、引擎无关、带企业治理 + 基于约束解耦的 KV/Stage 感知编排**。
+「引擎之上编排」这一层（[`hw/vllm-serving-perf.md`](hw/vllm-serving-perf.md) §10 的 Zone C）已被 Dynamo（NVIDIA，Rust）与 llm-d（CNCF，K8s）占据，而商业缓存管理面（如 Tensormesh Platform）又强绑 K8s Operator；**正面拼广度必输**。Nebula 唯一未被占据的位置是**轻量、无需 K8s、引擎无关、带企业级多租户与 KV 资源化治理 + 基于约束解耦的 KV/Stage 感知编排**。
 
 ## 2. 三条主线
 
@@ -30,12 +32,13 @@ Nebula 是**单二进制 + etcd 权威 + 快速起栈**；Dynamo / llm-d 都要�
 | **跨副本前缀亲和** | ✅ P1c 已落地（[`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs) + `chat_template`） | **唯一能真超过单实例直连的系统级手段**（冷启动拒绝 12%→0%，暖态 goodput +23%） |
 | **全局 KV 索引 `nebula-indexd`** | ✅ Batch 2 已落地（[`indexd.rs`](../../crates/nebula-router/src/bin/indexd.rs)） | 原始帧转发 + 周期快照扇出；Router 热路径 100% 查本地内存 |
 | **`pd_split` 共享 KV 角色化路由** | ✅ Batch 3 v1 已落地（[`pool.md`](../arch/pool.md) §pd_split） | LMCache `lm://` 共享 KV + controller `/lookup`；暖态 TTFT p99 −21% |
-| 选路升级 **Filter→Score→Pick + 插件** | llm-d EPP、Dynamo `router-plugins` | 单阶段 `select()` → 可插拔管线（后续演进） |
+| 选路升级 **多 Owner 联合代价打分 + 短请求旁路** | ✅ Batch 5 已合入（[`strategy.rs`](../../crates/nebula-router/src/strategy.rs) / [`lib.rs`](../../crates/nebula-router/src/lib.rs)） | `SavedPrefill - QueueWait` + `<256 tokens` 短请求旁路 + `Tool-Pause` 租约保护 |
 
-### 主线 3（拉大）：深化企业治理
+### 主线 3（拉大）：深化企业治理与 KV 资源化管理（Tiered Resource Governance）
 
-Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 是 Nebula 已建成（P4/P5/P6 Batch 1）、对手相对弱的企业平台能力。
+Dynamo / llm-d 偏底层算力基础设施，纯开源 LMCache / Mooncake 缺企业治理，商业 Tensormesh Platform 强绑 K8s；**多租户 / SLO / 成本 / 审计 / Canary + 企业级 KV 资源治理** 是 Nebula 对手相对弱或绑定重的核心差异化能力。
 
+- **把 KV Cache 纳入 L2/L3/L4 企业治理**（详见 [`kv-governance.md`](kv-governance.md)）：声明式 L0/L1/L2 分层配额、租户级 `cache_salt` 安全隔离、基于 `lmcache_controller` 的主动预热与 `/pin`、以及 `Saved Prefill Tokens` 成本归因；
 - 补：**SLO 闭环自动扩缩**（现只到建议）、**成本与选型联动**、**Batch / async API**（对手都有）。
 
 ## 3. 优先级（结合真机数据）
@@ -46,8 +49,8 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
 | **P0** | **引擎级有界公平队列**（[`queue-admission.md`](queue-admission.md)） | 实测 C=256 时 P99 2.5s（✅ 已完成） | 准入控制 |
 | **P1** | **KV events 消费 + 跨副本前缀亲和 + `nebula-indexd`** | 超过单实例直连的核心手段（✅ 已完成） | 主线 2 |
 | **P1** | **`pd_split` v1：基于共享 KV 的角色化放置与路由** | 隔离冷 Prefill 长尾，TTFT p99 −21%（✅ 已完成） | 主线 2 |
-| **P2** | 多 owner 索引（`pd_split` v1.1 Decode 池内本地命中优先） | [`pool.md`](../arch/pool.md) 评审 #5 | 主线 2 |
-| **P2** | 选路 Filter→Score→Pick + 插件 | 对齐 EPP 语义 | Router 演进 |
+| **P2** | **多 owner 索引 + 联合代价打分 + 短请求旁路 + Tool-Pause 租约** | [`pool.md`](../arch/pool.md) 评审 #5 + Batch 5（✅ 代码与单测已合入，⏳ 待真机 A/B 验收） | 主线 2 |
+| **P2** | **企业级 KV Cache 资源化治理（Declare / Isolate / Warm / Account）** | 对照 Tensormesh Platform（⏳ 待实现，见 [`kv-governance.md`](kv-governance.md)） | 主线 3 |
 | **P3** | SLO 闭环扩缩、Batch API、GAIE 互操作 | 对手已有 | 产品补齐 |
 
 ## 4. 明确不做（已排除）

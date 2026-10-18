@@ -304,6 +304,16 @@ Q1–Q4 全部 ✅。可选：拆 `nebula-common`、前端拆包。
 | 5.6 | **L2 投机采样套件参数化 + Hybrid 模型 Prefix Cache 静默禁用体检**：vLLM 映射合法 `draft_model`/`mtp`/`ngram`，SGLang 拒绝不支持的 `ngram`/`prompt_lookup_*`；仅在 `vllm:prefix_cache_queries_total == 0` 时产生诊断事件 | 投机采样 draft/EAGLE/MTP 工程实践、vLLM `is_hybrid` 陷阱 | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`model_request.rs`](../../crates/nebula-common/src/model_request.rs), [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs), [`engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs) |
 | 5.7 | **L4 二元曲面（TTFT vs TPOT/KV 水位）驱动 `pd_split` 池配比建议**：从 Router Prometheus 直方图解析 TPOT，区分容量建议（KV>0.85）与 SLO 违约 | `Dynamo Planner` / `llm-d SLO Autoscaler` | ✅ 代码与单测已合入（⏳ 待真机 A/B 验收） [`slo.rs`](../../crates/nebula-common/src/slo.rs), [`router_metrics.rs`](../../crates/nebula-control/src/router_metrics.rs), [`capacity.rs`](../../crates/nebula-common/src/capacity.rs) |
 
+### Batch 6：企业级 KV Cache 资源化治理（Tiered Resource Governance，见 [`../dev/kv-governance.md`](../dev/kv-governance.md)）⏳ 待实现
+
+| # | 任务 | 参照来源 | 触点与状态 |
+|---|------|----------|------------|
+| 6.1 | **声明（Declare）：L0/L1/L2 分层缓存编排与 L3 容量联动**：扩展 [`KvSharingSpec`](../../crates/nebula-common/src/model_deployment.rs#L39) 支持 `local_cpu_size_gb`（L1 DRAM）、`local_disk_path / local_disk_size_gb`（L2 NVMe），允许 `replicated` 单池部署启用分级 Offload，并在 [`capacity.rs`](../../crates/nebula-common/src/capacity.rs#L40) 校验节点内存/磁盘安全水位 | Tensormesh L0/L1/L2 三层管理 + 开源 LMCache Offload | ⏳ 待实现 [`model_deployment.rs`](../../crates/nebula-common/src/model_deployment.rs), [`capacity.rs`](../../crates/nebula-common/src/capacity.rs) |
+| 6.2 | **隔离（Isolate）：多租户 KV 缓存安全隔离与防污染**：租户策略新增 `KvIsolationMode::{Shared, TenantIsolated}`，通过注入租户级 `cache_salt` 并同步混入 Router [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs#L158) 块哈希链，杜绝跨租户 TTFT 侧信道与低优批处理冲刷 | 企业多租户合规隔离 | ⏳ 待实现 `nebula-gateway`, [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs), [`prompt_hash.rs`](../../crates/nebula-router/src/prompt_hash.rs) |
+| 6.3 | **预热与控制（Warm & Pin）：对接 `lmcache_controller` 生命周期 API**：在 `nebula-control` / BFF 封装 `/lookup`、`/pin`、`/clear` 与预热动作（`POST /api/v2/models/{uid}/cache/{lookup,warmup,clear}`），支持核心 System Prompt 定时预热锁存与一键擦除 | `lmcache_controller` 原生控制接口 + Tensormesh Pin/Clear | ⏳ 待实现 `nebula-control`, `nebula-bff` |
+| 6.4 | **记账（Account）：L4 缓存收益度量与 ROI 成本归因**：汇总 Router 单请求 `saved_prefill_tokens = matched_blocks * 16` 与 Warm/Cold TTFT 直方图，在 BFF 租户报表与控制台展示节省 Token 数与等效节省 GPU 成本（$） | Tensormesh 缓存 ROI 可观测性 | ⏳ 待实现 [`lib.rs`](../../crates/nebula-router/src/lib.rs), `nebula-gateway`, `nebula-bff` |
+| 6.5 | **运维与边界（Operate & Guard）：双执行面 Cache 守护进程自愈 + CacheBlend 兼容门禁**：`nebula-node` / `nebula-k8s-controller` 原生探活自愈 `lmcache_server` 与 `lmcache_controller`；在 [`compat.rs`](../../crates/nebula-common/src/compat.rs#L221) 拦截非 Dense 模型开启 CacheBlend | 无 K8s / K8s 双栈运维对等 + EuroSys'25 CacheBlend 架构约束 | ⏳ 待实现 `nebula-node`, `nebula-k8s-controller`, [`compat.rs`](../../crates/nebula-common/src/compat.rs) |
+
 ### 顺手卫生项（夹带做）
 
 - 数据面 retry 语义收敛（首字节前可重试，单一实现）；review skill 增加引擎 adapter 仅声明 capability 规则。
