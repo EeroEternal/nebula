@@ -82,3 +82,32 @@
 - C>16、长上下文（≥8k prompt）、多 Prefill 池配比（1:2 / 2:1）；
 - `/stats/` 采集管道存在时的短请求旁路（本轮未跑 nebula-node，`pd_short_bypass_total=0`，冷短请求臂因此只用了单个 GPU：14.21 vs replicated 18.39 rps）；
 - `RUN_SMOKE=1` 的 CI 级回归。
+
+---
+
+## 2026-10-18 二次复测：首字节前状态承诺（#44/#45）之后
+
+> 目的：确认"先读首块再提交状态"这层缓冲**没有改变吞吐/TTFT 口径**，并复核此前 `pd_split` 的失败形态是否消失。
+> 环境同上（101 / 8×5090 / Qwen2.5-7B TP=1 / vLLM 0.23.0 + LMCache 0.5.5 探针镜像），负载 `96 前缀 ×1500 词`，每点 120 请求，`max_tokens=32`，SLO 2s/5s。
+> 预热：每臂先跑一轮 C=4 丢弃，再进入测量（§15 要求）。**两臂全部 0 失败、0 截断流、0 次首字节重试。**
+
+| 臂 | C=1 | C=2 | C=4 | C=8 | p50 @C8 | p99 @C8 |
+|---|---|---|---|---|---|---|
+| `replicated`（prefix_affinity + kv-events） | 1.97 | 3.47 | 6.80 | **12.48** | 117 ms | 223 ms |
+| `pd_split`（controller `/lookup`，见下方警告） | 1.84 | 3.38 | 6.41 | **12.02** | 161 ms | 219 ms |
+
+### 结论
+
+1. **首字节前状态承诺没有带来性能回退**：两臂各并发点与 #44 合并前的同口径数字（`replicated` 1.00/3.48/6.89/9.05）在噪声范围内，p50 甚至更低（117 vs 131 ms）。
+2. **失败形态确实消失**：此前同一负载下 `pd_split` 出现过 15/192 条流在 `[DONE]` 前被截断、以及提交后截断的 200；本轮 **0 失败、0 截断、0 次首字节重试**（`nebula_router_upstream_stream_error_total=0`、`first_byte_retry_total=0`）。缓冲层只在"副本不出字"时才介入，正常路径无额外开销。
+3. **这一轮不是有效的双副本 A/B**，原因必须写清楚：harness 里没有 `/stats/` 采集管道（nebula-node / k8s-controller 的 scrape），router 看不到任何副本的 `pending_requests`，`least_pending` 只能挑到一个 endpoint —— **两臂实际上都只用了单个引擎**，所以两组数字才会几乎相同（12.48 vs 12.02 rps）。
+4. **`pd_split` 的暖信号本轮没有生效**：`pd_lookup_total=600`、`pd_lookup_warm_total=0`。控制器日志显示它退回到 `builtin` 哈希（`Could not load 'builtin' from vLLM. Using builtin hash.`），与引擎侧的 `--prefix-caching-hash-algo sha256_cbor` 不同域 → 全部判冷。此前出现 `warm=46` 的那一轮不可复现，说明**控制器与引擎的哈希域一致性是一个前置条件，必须先验证**（否则 `pd_split` 静默退化成单 Prefill 副本）。
+
+### 做真正的双副本 A/B 还缺什么
+
+- `/stats/` 来源：跑 `nebula-node`（或给 harness 加一个 stats scraper），否则 router 无法在副本间分摊；
+- 控制器哈希域：确认 `lmcache_controller` 与引擎使用同一 hash algo（日志里 `Using hash algorithm:` 必须与引擎一致），否则 `pd_lookup_warm_total` 恒为 0；
+- 之后才能比较"亲和 replicated vs 暖路由 pd_split"的吞吐/尾延迟。
+
+在上述前置条件满足前，**不要引用本表作为 `pd_split` vs `replicated` 的收益结论** —— 它只说明"加了首字节承诺之后，单引擎路径没有变慢、也没有截断流"。
+
