@@ -903,6 +903,7 @@ mod tests {
         let kv = KvSharingSpec {
             remote_url: "lm://a:1".into(),
             serde: "naive".into(),
+            ..Default::default()
         };
         let base = config_fingerprint(
             "vllm",
@@ -947,6 +948,7 @@ mod tests {
         let kv2 = KvSharingSpec {
             remote_url: "lm://b:2".into(),
             serde: "naive".into(),
+            ..Default::default()
         };
         assert_ne!(
             base,

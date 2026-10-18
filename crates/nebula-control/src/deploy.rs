@@ -517,6 +517,7 @@ mod pd_split_tests {
             kv_sharing: kv.then(|| KvSharingSpec {
                 remote_url: "lm://store:6800".into(),
                 serde: "naive".into(),
+                ..Default::default()
             }),
         }
     }
@@ -651,6 +652,7 @@ mod pd_split_tests {
             gpus: vec![],
             api_addr: None,
             platform: Some(nebula_common::DEFAULT_NODE_PLATFORM.into()),
+            ..Default::default()
         };
         store
             .put(

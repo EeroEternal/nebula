@@ -27,7 +27,7 @@ pub struct GpuStatus {
     pub cuda_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeStatus {
     pub node_id: String,
     pub last_heartbeat_ms: u64,
@@ -43,6 +43,15 @@ pub struct NodeStatus {
     /// Used to match `EngineImage.platforms`. Empty/None = unknown (planner skips platform filter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+
+    /// Host DRAM total in MB. The KV L1 tier (`KvSharingSpec::local_cpu_size_gb`) lives in
+    /// host memory, so the capacity snapshot needs this to notice oversubscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_memory_total_mb: Option<u64>,
+
+    /// Host DRAM available in MB at heartbeat time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_memory_available_mb: Option<u64>,
 }
 
 /// Default platform when Node does not set one explicitly.
@@ -99,6 +108,7 @@ mod tests {
             gpus: vec![],
             api_addr: None,
             platform: Some("ascend-cann8".into()),
+            ..Default::default()
         };
         assert_eq!(resolve_node_platform(&node), "ascend-cann8");
     }

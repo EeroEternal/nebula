@@ -35,13 +35,31 @@ pub enum DeploymentTopology {
 
 /// Shared-KV orchestration params for pd_split (pool.md §pd_split v1.1).
 /// All values are the rig-verified defaults from engines.md §7.4.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KvSharingSpec {
     /// lm:// address of the lmcache_server (TCP, hardware-neutral).
     pub remote_url: String,
     /// v1 fixed "naive" (other values rejected until verified).
     #[serde(default = "default_kv_serde")]
     pub serde: String,
+
+    /// **L1 tier**: host DRAM offload size in GB.
+    ///
+    /// `None` keeps the engine default (LMCache 0.5.5: 5 GB per replica). It used to be
+    /// hardcoded at 5 GB for every `pd_split` replica with nothing declaring or reporting
+    /// it, so a node running N replicas silently reserved N x 5 GB of host memory
+    /// (Batch 6.1 / `docs/dev/kv-governance.md`). Set it to make the reservation
+    /// explicit and visible in the capacity snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_cpu_size_gb: Option<u32>,
+
+    /// **L2 tier**: local NVMe path for the disk tier. `None` = L2 disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_disk_path: Option<String>,
+
+    /// L2 tier size in GB (LMCache requires a size alongside the path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_disk_size_gb: Option<u32>,
 }
 
 fn default_kv_serde() -> String {
@@ -177,13 +195,29 @@ pub fn validate_replica_specs(replicas: u32, specs: &[ReplicaPlacementSpec]) -> 
 /// and node engine launch env) — engines.md §7.4 rig-verified values.
 /// `Mixed` returns empty (replicated deployments unchanged).
 pub fn kv_sharing_env(role: ReplicaRole, kv: &KvSharingSpec) -> Vec<(&'static str, String)> {
+    // L1 (host DRAM): declared size wins; undeclared keeps the historical 5 GB so
+    // existing deployments do not change behaviour when they upgrade.
+    let local_cpu_size = kv.local_cpu_size_gb.unwrap_or(5);
     let mut env = vec![
         ("LMCACHE_USE_EXPERIMENTAL", "True".to_string()),
         ("LMCACHE_LOCAL_CPU", "True".to_string()),
-        ("LMCACHE_MAX_LOCAL_CPU_SIZE", "5".to_string()),
+        ("LMCACHE_MAX_LOCAL_CPU_SIZE", local_cpu_size.to_string()),
         ("LMCACHE_REMOTE_URL", kv.remote_url.clone()),
         ("LMCACHE_REMOTE_SERDE", kv.serde.clone()),
     ];
+    // L2 (local NVMe): off unless a path is declared.
+    if let Some(path) = kv
+        .local_disk_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        env.push(("LMCACHE_LOCAL_DISK", path.to_string()));
+        env.push((
+            "LMCACHE_MAX_LOCAL_DISK_SIZE",
+            kv.local_disk_size_gb.unwrap_or(0).to_string(),
+        ));
+    }
     match role {
         ReplicaRole::Prefill => env.push(("LMCACHE_SAVE_UNFULL_CHUNK", "True".to_string())),
         ReplicaRole::Decode => {
@@ -508,6 +542,27 @@ pub fn validate_pd_split_with_context(
                     }
                 }
 
+                // Rule: declared tier quotas must be sane. A disk tier without a size is
+                // silently 0 GB in LMCache, i.e. declared but disabled.
+                if let Some(gb) = kv.local_cpu_size_gb {
+                    if gb == 0 {
+                        return Err("kv_sharing.local_cpu_size_gb must be > 0".into());
+                    }
+                }
+                if let Some(path) = kv.local_disk_path.as_deref() {
+                    if path.trim().is_empty() {
+                        return Err("kv_sharing.local_disk_path is empty".into());
+                    }
+                    match kv.local_disk_size_gb {
+                        Some(0) | None => {
+                            return Err(
+                                "kv_sharing.local_disk_path requires local_disk_size_gb > 0".into(),
+                            )
+                        }
+                        Some(_) => {}
+                    }
+                }
+
                 // Rule 7: conservative KV-compatibility scope per replica
                 let cfg = effective_replica_config(deployment, base_config, idx);
                 let tp = cfg
@@ -629,6 +684,7 @@ mod tests {
             kv_sharing: Some(KvSharingSpec {
                 remote_url: "lm://host:6800".into(),
                 serde: "naive".into(),
+                ..Default::default()
             }),
             version: 1,
             updated_at_ms: 0,
@@ -640,6 +696,7 @@ mod tests {
         let kv = KvSharingSpec {
             remote_url: "lm://h:6800".into(),
             serde: "naive".into(),
+            ..Default::default()
         };
         let prefill = kv_sharing_env(ReplicaRole::Prefill, &kv);
         let get = |env: &Vec<(&str, String)>, k: &str| {
@@ -916,6 +973,75 @@ mod tests {
             &[Some("cuda-12.4-sm89".into()), Some("cuda-12.4-sm90".into())],
         )
         .is_ok());
+    }
+
+    #[test]
+    fn kv_tier_declaration_maps_to_lmcache_env_and_defaults_stay_unchanged() {
+        // Undeclared: byte-for-byte the historical behaviour (L1 on, 5 GB, no L2).
+        let kv = KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            ..Default::default()
+        };
+        let env = kv_sharing_env(ReplicaRole::Prefill, &kv);
+        let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("LMCACHE_MAX_LOCAL_CPU_SIZE").as_deref(), Some("5"));
+        assert!(!env.iter().any(|(n, _)| *n == "LMCACHE_LOCAL_DISK"));
+
+        // Declared L1 + L2.
+        let kv = KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(24),
+            local_disk_path: Some("/nvme/kv".into()),
+            local_disk_size_gb: Some(512),
+        };
+        let env = kv_sharing_env(ReplicaRole::Decode, &kv);
+        let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("LMCACHE_MAX_LOCAL_CPU_SIZE").as_deref(), Some("24"));
+        assert_eq!(get("LMCACHE_LOCAL_DISK").as_deref(), Some("/nvme/kv"));
+        assert_eq!(get("LMCACHE_MAX_LOCAL_DISK_SIZE").as_deref(), Some("512"));
+        // role-specific keys still present
+        assert_eq!(
+            get("LMCACHE_RETRIEVE_LOCATIONS").as_deref(),
+            Some("RemoteBackend")
+        );
+    }
+
+    #[test]
+    fn kv_tier_declaration_is_validated() {
+        let mut d = pd_dep();
+        d.kv_sharing = Some(KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(0),
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&d, Some("vllm"))
+            .unwrap_err()
+            .contains("local_cpu_size_gb"));
+
+        let mut d2 = pd_dep();
+        d2.kv_sharing = Some(KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_disk_path: Some("/nvme/kv".into()),
+            local_disk_size_gb: None,
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&d2, Some("vllm"))
+            .unwrap_err()
+            .contains("local_disk_size_gb"));
+
+        let mut ok = pd_dep();
+        ok.kv_sharing = Some(KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(8),
+            local_disk_path: Some("/nvme/kv".into()),
+            local_disk_size_gb: Some(64),
+        });
+        assert!(validate_pd_split(&ok, Some("vllm")).is_ok());
     }
 
     #[test]
