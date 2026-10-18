@@ -51,16 +51,43 @@ pub fn replica_key(model_uid: &str, replica_id: u32) -> ReplicaKey {
 fn assignment_signature(assignment: &PlacementAssignment) -> String {
     serde_json::to_string(assignment).unwrap_or_else(|_| {
         format!(
-            "replica:{}:node:{}:port:{}:gpu:{:?}:extra:{:?}:engine:{:?}:image:{:?}",
+            "replica:{}:node:{}:port:{}:gpu:{:?}:extra:{:?}:engine:{:?}:image:{:?}:role:{:?}:kv:{:?}",
             assignment.replica_id,
             assignment.node_id,
             assignment.port,
             assignment.effective_gpu_indices(),
             assignment.extra_args,
             assignment.engine_type,
-            assignment.docker_image
+            assignment.docker_image,
+            assignment.role,
+            assignment.kv_sharing
         )
     })
+}
+
+fn build_ready_endpoint_info(
+    plan: &PlacementPlan,
+    assignment: &PlacementAssignment,
+    node_id: &str,
+    base_url: String,
+    engine_type: &str,
+    now_ms: u64,
+) -> EndpointInfo {
+    EndpointInfo {
+        model_uid: plan.model_uid.clone(),
+        replica_id: assignment.replica_id,
+        plan_version: plan.version,
+        node_id: node_id.to_string(),
+        endpoint_kind: EndpointKind::NativeHttp,
+        api_flavor: "openai".to_string(),
+        status: EndpointStatus::Ready,
+        last_heartbeat_ms: now_ms,
+        status_detail: None,
+        grpc_target: None,
+        base_url: Some(base_url),
+        engine_type: Some(engine_type.to_string()),
+        role: assignment.role,
+    }
 }
 
 fn should_reject_stale_epoch(plan: &PlacementPlan, last_epochs: &HashMap<String, u64>) -> bool {
@@ -308,6 +335,23 @@ async fn launch_replica_engine(
 
     let engine_type = assignment.engine_type.as_deref();
     let docker_image_override = assignment.docker_image.as_deref();
+    if assignment.role != nebula_common::ReplicaRole::Mixed || assignment.kv_sharing.is_some() {
+        let effective_image = docker_image_override.or(args.vllm_docker_image.as_deref());
+        let approved = nebula_common::approved_pd_images_from_env();
+        if let Err(reason) = nebula_common::validate_pd_split_image(effective_image, &approved) {
+            tracing::error!(
+                %model_uid,
+                replica_id,
+                image = ?effective_image,
+                %reason,
+                "pd_split runtime image rejected by allowlist on node"
+            );
+            if let Some(request_id) = plan.request_id.as_deref() {
+                mark_request_failed(store, request_id, reason).await;
+            }
+            return Ok(None);
+        }
+    }
     let engine: Arc<dyn Engine> = Arc::from(crate::engine::create_engine(
         args,
         engine_type,
@@ -456,21 +500,14 @@ async fn launch_replica_engine(
     let env_path = format!("{}-{}", args.engine_env_path, replica_id);
     write_engine_env(&env_path, &handle.base_url, &handle.engine_model).await?;
 
-    let info = EndpointInfo {
-        model_uid: plan.model_uid.clone(),
-        replica_id,
-        plan_version: plan.version,
-        node_id: args.node_id.clone(),
-        endpoint_kind: EndpointKind::NativeHttp,
-        api_flavor: "openai".to_string(),
-        status: EndpointStatus::Ready,
-        last_heartbeat_ms: now_ms(),
-        status_detail: None,
-        grpc_target: None,
-        base_url: Some(handle.base_url.clone()),
-        engine_type: Some(engine.engine_type().to_string()),
-        role: Default::default(),
-    };
+    let info = build_ready_endpoint_info(
+        plan,
+        assignment,
+        &args.node_id,
+        handle.base_url.clone(),
+        engine.engine_type(),
+        now_ms(),
+    );
 
     let rm = RunningModel {
         model_uid: plan.model_uid.clone(),
@@ -816,5 +853,46 @@ mod tests {
 
         assert_eq!(excess, vec![2]);
         assert_eq!(missing, vec![1]);
+    }
+
+    #[test]
+    fn build_ready_endpoint_preserves_assignment_role() {
+        let plan = PlacementPlan {
+            request_id: None,
+            model_uid: "m1".into(),
+            model_name: "m".into(),
+            version: 3,
+            updated_at_ms: 0,
+            leader_epoch: 1,
+            assignments: vec![],
+        };
+        let mut prefill = assignment(0, "node_a", 8000);
+        prefill.role = nebula_common::ReplicaRole::Prefill;
+        let mut decode = assignment(1, "node_a", 8001);
+        decode.role = nebula_common::ReplicaRole::Decode;
+
+        let ep0 = build_ready_endpoint_info(
+            &plan,
+            &prefill,
+            "node_a",
+            "http://127.0.0.1:8000".into(),
+            "vllm",
+            100,
+        );
+        let ep1 = build_ready_endpoint_info(
+            &plan,
+            &decode,
+            "node_a",
+            "http://127.0.0.1:8001".into(),
+            "vllm",
+            100,
+        );
+
+        assert_eq!(ep0.role, nebula_common::ReplicaRole::Prefill);
+        assert_eq!(ep1.role, nebula_common::ReplicaRole::Decode);
+        assert_ne!(
+            assignment_signature(&prefill),
+            assignment_signature(&decode)
+        );
     }
 }

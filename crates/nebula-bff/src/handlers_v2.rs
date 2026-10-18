@@ -505,7 +505,7 @@ pub async fn evaluate_slo(
     let text = service::fetch_router_metrics_text(&st.http, &st.router_url)
         .await
         .unwrap_or_default();
-    let ev = crate::compat_slo::evaluate_slo_from_router_metrics(&slo, &text);
+    let ev = crate::compat_slo::evaluate_slo_with_store(&*st.store, &slo, &text).await;
     Ok((StatusCode::OK, Json(ev)).into_response())
 }
 

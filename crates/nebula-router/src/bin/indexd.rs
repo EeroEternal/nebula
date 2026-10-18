@@ -106,16 +106,28 @@ async fn main() -> anyhow::Result<()> {
                 let mut pusher: zeromq::PubSocket = connect_pusher(&sinks).await;
                 tokio::time::sleep(Duration::from_secs(snapshot_secs)).await;
                 for model in index.models() {
+                    let epoch = index.epoch();
+                    let (snap_gen, replicas) = index.snapshot_for_with_gen(&model);
                     let _ = pusher
-                        .send(control_msg(format!("!reset/{model}"), vec![]))
+                        .send(control_msg(
+                            format!("!reset/{model}"),
+                            epoch,
+                            snap_gen,
+                            vec![],
+                        ))
                         .await;
-                    for (replica, keys) in index.snapshot_for(&model) {
+                    for (replica, keys) in replicas {
                         let payload = encode_stored_batch(&keys);
                         let _ = pusher
-                            .send(control_msg(format!("!snapshot/{model}/{replica}"), payload))
+                            .send(control_msg(
+                                format!("!snapshot/{model}/{replica}"),
+                                epoch,
+                                snap_gen,
+                                payload,
+                            ))
                             .await;
                     }
-                    tracing::debug!(model = %model, "snapshot pushed");
+                    tracing::debug!(model = %model, epoch, snap_gen, "snapshot pushed");
                 }
             }
         });
@@ -125,9 +137,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn control_msg(topic: String, payload: Vec<u8>) -> zeromq::ZmqMessage {
+fn control_msg(topic: String, epoch: u64, gen: u64, payload: Vec<u8>) -> zeromq::ZmqMessage {
+    use nebula_router::kv_events::encode_watermark;
     let mut msg = zeromq::ZmqMessage::from(topic);
-    msg.push_back(bytes::Bytes::from(vec![0u8; 8])); // seq placeholder
+    msg.push_back(bytes::Bytes::from(encode_watermark(epoch, gen).to_vec()));
     msg.push_back(bytes::Bytes::from(payload));
     msg
 }

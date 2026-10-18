@@ -282,6 +282,114 @@ pub fn validate_pd_split_image(
     Ok(())
 }
 
+/// Read the comma-separated `NEBULA_APPROVED_PD_IMAGES` allowlist from the process environment.
+pub fn approved_pd_images_from_env() -> Vec<String> {
+    std::env::var("NEBULA_APPROVED_PD_IMAGES")
+        .map(|v| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Merge two ModelConfig values. `overrides` fields win when present.
+pub fn merge_model_config(
+    base: Option<&ModelConfig>,
+    overrides: Option<&ModelConfig>,
+) -> Option<ModelConfig> {
+    match (base, overrides) {
+        (None, None) => None,
+        (Some(b), None) => Some(b.clone()),
+        (None, Some(o)) => Some(o.clone()),
+        (Some(b), Some(o)) => Some(ModelConfig {
+            tensor_parallel_size: o.tensor_parallel_size.or(b.tensor_parallel_size),
+            gpu_memory_utilization: o.gpu_memory_utilization.or(b.gpu_memory_utilization),
+            max_model_len: o.max_model_len.or(b.max_model_len),
+            required_vram_mb: o.required_vram_mb.or(b.required_vram_mb),
+            lora_modules: o.lora_modules.clone().or_else(|| b.lora_modules.clone()),
+            served_model_name: o
+                .served_model_name
+                .clone()
+                .or_else(|| b.served_model_name.clone()),
+            kv_cache_dtype: o
+                .kv_cache_dtype
+                .clone()
+                .or_else(|| b.kv_cache_dtype.clone()),
+            trust_remote_code: o.trust_remote_code.or(b.trust_remote_code),
+            enable_expert_parallel: o.enable_expert_parallel.or(b.enable_expert_parallel),
+            block_size: o.block_size.or(b.block_size),
+            tokenizer_mode: o
+                .tokenizer_mode
+                .clone()
+                .or_else(|| b.tokenizer_mode.clone()),
+            enable_prefix_caching: o.enable_prefix_caching.or(b.enable_prefix_caching),
+            speculative_config: o
+                .speculative_config
+                .clone()
+                .or_else(|| b.speculative_config.clone()),
+        }),
+    }
+}
+
+/// Effective merged ModelConfig for a specific replica index:
+/// `base_config` -> `deployment.config_overrides` -> `replica_specs[replica_id].config_overrides`.
+pub fn effective_replica_config(
+    deployment: &ModelDeployment,
+    base_config: Option<&ModelConfig>,
+    replica_id: usize,
+) -> Option<ModelConfig> {
+    let base = merge_model_config(base_config, deployment.config_overrides.as_ref());
+    let replica_override = deployment
+        .replica_specs
+        .as_ref()
+        .and_then(|specs| specs.get(replica_id))
+        .and_then(|s| s.config_overrides.as_ref());
+    merge_model_config(base.as_ref(), replica_override)
+}
+
+/// Effective image reference (image_id or docker_image) for a specific replica index:
+/// `replica_specs[replica_id].image_id` -> `deployment.image_id` -> `spec_docker_image`.
+pub fn effective_replica_image<'a>(
+    deployment: &'a ModelDeployment,
+    spec_docker_image: Option<&'a str>,
+    replica_id: usize,
+) -> Option<&'a str> {
+    deployment
+        .replica_specs
+        .as_ref()
+        .and_then(|specs| specs.get(replica_id))
+        .and_then(|s| s.image_id.as_deref())
+        .or(deployment.image_id.as_deref())
+        .or(spec_docker_image)
+}
+
+/// Normalize a platform identifier into its canonical hardware family
+/// (`"nvidia-cuda"` / `"cuda-12.4-sm89"` -> `"cuda"`,
+/// `"ascend-cann8.0-910b"` / `"huawei-ascend"` -> `"ascend"`,
+/// `"amd-rocm"` -> `"rocm"`).
+pub fn hardware_family_of_platform(platform: &str) -> String {
+    let lower = platform.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return String::new();
+    }
+    if lower.contains("cuda") || lower.starts_with("nvidia") {
+        return "cuda".to_string();
+    }
+    if lower.contains("ascend") || lower.contains("cann") || lower.contains("npu") {
+        return "ascend".to_string();
+    }
+    if lower.contains("rocm") || lower.starts_with("amd") {
+        return "rocm".to_string();
+    }
+    lower
+        .split(['-', '_', ':'])
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
 /// Shared validation for pd_split deployments (pool.md §pd_split v1.1).
 /// Called from BFF create/update AND CLI deploy — not BFF-only (assessment #4).
 ///
@@ -292,10 +400,22 @@ pub fn validate_pd_split_image(
 /// 3. pd_split requires engine_type=vllm (LMCacheConnector)
 /// 4. replicated + explicit roles = reject (prevent misunderstanding)
 /// 5. pd_split serde must be "naive" (only verified value)
-/// 6. v1 conservative KV-compat scope: TP=1 per replica (untested beyond)
+/// 6. pd_split v1 forbids autoscaling (min_replicas / max_replicas != replicas)
+/// 7. v1 conservative KV-compat scope: TP=1 per replica, uniform kv_cache_dtype,
+///    uniform block_size=16, and uniform CUDA hardware family across replicas
+#[cfg(test)]
 pub fn validate_pd_split(
     deployment: &ModelDeployment,
     engine_type: Option<&str>,
+) -> Result<(), String> {
+    validate_pd_split_with_context(deployment, engine_type, None, &[])
+}
+
+pub fn validate_pd_split_with_context(
+    deployment: &ModelDeployment,
+    engine_type: Option<&str>,
+    base_config: Option<&ModelConfig>,
+    replica_platforms: &[Option<String>],
 ) -> Result<(), String> {
     let topology = deployment
         .topology
@@ -320,6 +440,24 @@ pub fn validate_pd_split(
                 return Err(format!(
                     "pd_split requires engine_type=vllm (LMCacheConnector); got '{engine}'"
                 ));
+            }
+
+            // Rule 6: autoscaling is forbidden in pd_split v1
+            if let Some(min) = deployment.min_replicas {
+                if min != deployment.replicas {
+                    return Err(format!(
+                        "pd_split v1 does not support autoscaling; min_replicas ({min}) must equal replicas ({})",
+                        deployment.replicas
+                    ));
+                }
+            }
+            if let Some(max) = deployment.max_replicas {
+                if max != deployment.replicas {
+                    return Err(format!(
+                        "pd_split v1 does not support autoscaling; max_replicas ({max}) must equal replicas ({})",
+                        deployment.replicas
+                    ));
+                }
             }
 
             // Rule 1: kv_sharing required
@@ -355,6 +493,10 @@ pub fn validate_pd_split(
             }
             let mut has_prefill = false;
             let mut has_decode = false;
+            let mut expected_dtype: Option<String> = None;
+            let mut expected_block_size: Option<u32> = None;
+            let mut expected_hw_family: Option<String> = None;
+
             for (idx, spec) in specs.iter().enumerate() {
                 match spec.role {
                     Some(ReplicaRole::Prefill) => has_prefill = true,
@@ -363,6 +505,83 @@ pub fn validate_pd_split(
                         return Err(format!(
                             "pd_split replica_specs[{idx}] must have role=prefill or decode (not mixed)"
                         ));
+                    }
+                }
+
+                // Rule 7: conservative KV-compatibility scope per replica
+                let cfg = effective_replica_config(deployment, base_config, idx);
+                let tp = cfg
+                    .as_ref()
+                    .and_then(|c| c.tensor_parallel_size)
+                    .unwrap_or(1);
+                if tp != 1 {
+                    return Err(format!(
+                        "pd_split v1 requires tensor_parallel_size=1 per replica (replica_specs[{idx}] has tensor_parallel_size={tp})"
+                    ));
+                }
+                let gpus = spec
+                    .gpu_indices
+                    .as_ref()
+                    .or(deployment.gpu_affinity.as_ref());
+                if let Some(g) = gpus {
+                    if g.len() > 1 {
+                        return Err(format!(
+                            "pd_split v1 requires 1 GPU per replica (TP=1); replica_specs[{idx}] specifies {} GPUs",
+                            g.len()
+                        ));
+                    }
+                }
+
+                let dtype = cfg
+                    .as_ref()
+                    .and_then(|c| c.kv_cache_dtype.as_deref())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("auto")
+                    .to_ascii_lowercase();
+                if let Some(ref exp) = expected_dtype {
+                    if exp != &dtype {
+                        return Err(format!(
+                            "pd_split requires identical kv_cache_dtype across all replicas (replica 0 has '{exp}', replica {idx} has '{dtype}')"
+                        ));
+                    }
+                } else {
+                    expected_dtype = Some(dtype);
+                }
+
+                let block_size = cfg.as_ref().and_then(|c| c.block_size).unwrap_or(16);
+                if let Some(exp) = expected_block_size {
+                    if exp != block_size {
+                        return Err(format!(
+                            "pd_split requires identical block_size across all replicas (replica 0 has {exp}, replica {idx} has {block_size})"
+                        ));
+                    }
+                } else {
+                    expected_block_size = Some(block_size);
+                }
+                if block_size != 16 {
+                    return Err(format!(
+                        "pd_split v1 requires block_size=16 (replica {idx} has block_size={block_size})"
+                    ));
+                }
+
+                if let Some(Some(plat)) = replica_platforms.get(idx) {
+                    let fam = hardware_family_of_platform(plat);
+                    if !fam.is_empty() {
+                        if fam != "cuda" {
+                            return Err(format!(
+                                "pd_split v1 KV sharing is only verified on CUDA hardware family (replica {idx} resolved to platform '{plat}')"
+                            ));
+                        }
+                        if let Some(ref exp) = expected_hw_family {
+                            if exp != &fam {
+                                return Err(format!(
+                                    "pd_split requires identical hardware family across all replicas (replica 0 has '{exp}', replica {idx} has '{fam}')"
+                                ));
+                            }
+                        } else {
+                            expected_hw_family = Some(fam);
+                        }
                     }
                 }
             }
@@ -600,5 +819,125 @@ mod tests {
         ];
         let err = validate_replica_specs(2, &specs).unwrap_err();
         assert!(err.contains("duplicates gpu 1"));
+    }
+
+    #[test]
+    fn pd_split_rejects_autoscaling_bounds() {
+        let mut d = pd_dep();
+        d.min_replicas = Some(1);
+        assert!(validate_pd_split(&d, Some("vllm")).is_err());
+
+        let mut d2 = pd_dep();
+        d2.max_replicas = Some(4);
+        assert!(validate_pd_split(&d2, Some("vllm")).is_err());
+
+        let mut d3 = pd_dep();
+        d3.min_replicas = Some(2);
+        d3.max_replicas = Some(2);
+        assert!(validate_pd_split(&d3, Some("vllm")).is_ok());
+    }
+
+    #[test]
+    fn pd_split_enforces_kv_compat_scope() {
+        // TP > 1 in base config rejected
+        let base_tp2 = ModelConfig {
+            tensor_parallel_size: Some(2),
+            ..Default::default()
+        };
+        let err = validate_pd_split_with_context(&pd_dep(), Some("vllm"), Some(&base_tp2), &[])
+            .unwrap_err();
+        assert!(err.contains("tensor_parallel_size=1"), "{err}");
+
+        // TP > 1 in replica override rejected
+        let mut d_tp = pd_dep();
+        d_tp.replica_specs.as_mut().unwrap()[1].config_overrides = Some(ModelConfig {
+            tensor_parallel_size: Some(2),
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&d_tp, Some("vllm")).is_err());
+
+        // Mismatched kv_cache_dtype across replicas rejected
+        let mut d_dtype = pd_dep();
+        d_dtype.replica_specs.as_mut().unwrap()[0].config_overrides = Some(ModelConfig {
+            kv_cache_dtype: Some("fp8".into()),
+            ..Default::default()
+        });
+        let err = validate_pd_split(&d_dtype, Some("vllm")).unwrap_err();
+        assert!(err.contains("kv_cache_dtype"), "{err}");
+
+        // Uniform kv_cache_dtype across replicas accepted
+        d_dtype.replica_specs.as_mut().unwrap()[1].config_overrides = Some(ModelConfig {
+            kv_cache_dtype: Some("fp8".into()),
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&d_dtype, Some("vllm")).is_ok());
+
+        // Non-16 block_size rejected
+        let mut d_bs = pd_dep();
+        d_bs.config_overrides = Some(ModelConfig {
+            block_size: Some(32),
+            ..Default::default()
+        });
+        let err = validate_pd_split(&d_bs, Some("vllm")).unwrap_err();
+        assert!(err.contains("block_size=16"), "{err}");
+
+        // Non-CUDA hardware family rejected
+        let err = validate_pd_split_with_context(
+            &pd_dep(),
+            Some("vllm"),
+            None,
+            &[
+                Some(crate::DEFAULT_NODE_PLATFORM.into()),
+                Some("huawei-ascend".into()),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.contains("CUDA hardware family"), "{err}");
+
+        // Real production platform identifier ("nvidia-cuda") and CUDA variants accepted
+        assert_eq!(
+            hardware_family_of_platform(crate::DEFAULT_NODE_PLATFORM),
+            "cuda"
+        );
+        assert!(validate_pd_split_with_context(
+            &pd_dep(),
+            Some("vllm"),
+            None,
+            &[
+                Some(crate::DEFAULT_NODE_PLATFORM.into()),
+                Some("nvidia-cuda".into()),
+            ],
+        )
+        .is_ok());
+        assert!(validate_pd_split_with_context(
+            &pd_dep(),
+            Some("vllm"),
+            None,
+            &[Some("cuda-12.4-sm89".into()), Some("cuda-12.4-sm90".into())],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn effective_replica_image_precedence() {
+        let mut d = pd_dep();
+        assert_eq!(
+            effective_replica_image(&d, Some("spec/img:1"), 0),
+            Some("spec/img:1")
+        );
+        d.image_id = Some("dep/img:2".into());
+        assert_eq!(
+            effective_replica_image(&d, Some("spec/img:1"), 0),
+            Some("dep/img:2")
+        );
+        d.replica_specs.as_mut().unwrap()[1].image_id = Some("rep/img:3".into());
+        assert_eq!(
+            effective_replica_image(&d, Some("spec/img:1"), 0),
+            Some("dep/img:2")
+        );
+        assert_eq!(
+            effective_replica_image(&d, Some("spec/img:1"), 1),
+            Some("rep/img:3")
+        );
     }
 }

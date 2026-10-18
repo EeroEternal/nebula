@@ -22,13 +22,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use nebula_control::{
     callback_url_from_scale, callback_url_from_start, cluster_counts, create_async_operation,
     create_model, create_operation, create_pool, delete_pool, drain_node, drain_replica,
-    etcd_health, evaluate_slo_from_router_metrics, filter_canaries_by_model, get_canary,
-    get_cluster_status, get_model, get_model_deployment, get_operation, get_pool, get_slo,
-    list_canaries, list_models, list_nodes, list_pools, list_replicas, load_model, scale_model,
-    start_model, stop_model, update_pool, ComponentHealth, ComponentStatus, CreateModelRequest,
-    CreatePoolRequest, DrainReplicaRequest, HealthSummary, OperationKind, OperationOptions,
-    OperationStatus, ScaleDeploymentRequest, ServiceError, StartDeploymentRequest,
-    UpdatePoolRequest,
+    etcd_health, filter_canaries_by_model, get_canary, get_cluster_status, get_model,
+    get_model_deployment, get_operation, get_pool, get_slo, list_canaries, list_models, list_nodes,
+    list_pools, list_replicas, load_model, scale_model, start_model, stop_model, update_pool,
+    ComponentHealth, ComponentStatus, CreateModelRequest, CreatePoolRequest, DrainReplicaRequest,
+    HealthSummary, OperationKind, OperationOptions, OperationStatus, ScaleDeploymentRequest,
+    ServiceError, StartDeploymentRequest, UpdatePoolRequest,
 };
 
 use crate::audit::{fetch_audit_logs, AuditLogQuery};
@@ -653,10 +652,20 @@ pub struct CanariesQuery {
     pub model_uid: Option<String>,
 }
 
+pub(crate) fn render_embedded_slo_metrics(
+    metrics: &crate::metrics::Metrics,
+    router: &nebula_router::Router,
+) -> String {
+    let mut body = crate::metrics::render_metrics(metrics);
+    body.push_str(&crate::metrics::render_router_metrics(router));
+    body
+}
+
 async fn fetch_router_metrics(st: &AppState) -> String {
-    // Embedded mode has no router process; the gateway's own /metrics is the source.
-    if st.router.is_some() {
-        return String::new();
+    // Embedded mode has no standalone router process; render the gateway's own
+    // /metrics payload (including per-model route histograms) directly.
+    if let Some(router) = st.router.as_ref() {
+        return render_embedded_slo_metrics(&st.metrics, router);
     }
     let url = format!("{}/metrics", st.router_base_url.trim_end_matches('/'));
     match st.http.get(&url).send().await {
@@ -700,7 +709,12 @@ pub async fn platform_evaluate_slo(
         Err(e) => return control_error(e),
     };
     let metrics = fetch_router_metrics(&st).await;
-    let evaluation = evaluate_slo_from_router_metrics(&slo, &metrics);
+    let pool_telemetry = nebula_control::load_pd_pool_telemetry(&*st.store, &model_uid).await;
+    let evaluation = nebula_control::evaluate_slo_from_router_metrics_with_pools(
+        &slo,
+        &metrics,
+        &pool_telemetry,
+    );
     (StatusCode::OK, Json(evaluation)).into_response()
 }
 
@@ -860,5 +874,53 @@ pub async fn platform_delete_pool(
     match delete_pool(&*st.store, &pool_id).await {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => control_error(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nebula_common::{ModelSlo, PdPoolTelemetry, SloComplianceStatus};
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn embedded_slo_metrics_evaluate_end_to_end() {
+        let metrics = crate::metrics::Metrics::default();
+        let router = nebula_router::Router::new();
+        metrics.requests_total.store(200, Ordering::Relaxed);
+        metrics.status_2xx.store(200, Ordering::Relaxed);
+        for _ in 0..200 {
+            metrics.observe_ttft("m1", 0.12);
+            metrics.observe_e2e_latency("m1", 1.5);
+            metrics.observe_tpot("m1", 0.065);
+        }
+
+        let rendered = render_embedded_slo_metrics(&metrics, &router);
+        let slo = ModelSlo {
+            model_uid: "m1".into(),
+            availability_target: Some(0.99),
+            ttft_p95_ms: Some(1000.0),
+            tpot_p95_ms: Some(40.0),
+            latency_p95_ms: Some(10000.0),
+            throughput_tps: None,
+            window: "5m".into(),
+            exclude_abort_from_error_budget: true,
+            exclude_drain_from_error_budget: true,
+            notes: None,
+            updated_at_ms: 1,
+        };
+        let ev = nebula_control::evaluate_slo_from_router_metrics_with_pools(
+            &slo,
+            &rendered,
+            &PdPoolTelemetry {
+                is_pd_split: true,
+                tpot_p95_ms: None,
+                prefill_pending_max: Some(0),
+                decode_avg_kv_usage: Some(0.45),
+            },
+        );
+        assert_eq!(ev.status, SloComplianceStatus::Breaching);
+        assert!(ev.breaches.iter().any(|b| b.contains("tpot_p95")));
+        assert!(ev.suggestions.iter().any(|s| s.kind == "scale_decode_pool"));
     }
 }

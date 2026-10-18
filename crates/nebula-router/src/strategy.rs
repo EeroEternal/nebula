@@ -6,18 +6,19 @@ pub struct Candidate<'a> {
     pub stats: Option<&'a EndpointStats>,
 }
 
-/// Request-scoped routing context (P1c): the replica currently holding the
-/// request's KV prefix chain, when it could be computed.
+/// Request-scoped routing context (P1c / Batch 5.2): the primary replica holding
+/// the request's KV prefix chain plus per-replica matched block counts across
+/// all candidate owners.
 pub struct SelectionCtx<'a> {
     pub prefix_owner: Option<u32>,
-    pub _marker: std::marker::PhantomData<&'a ()>,
+    pub prefix_matches: Option<&'a std::collections::HashMap<u32, usize>>,
 }
 
 impl SelectionCtx<'_> {
     pub fn none() -> Self {
         Self {
             prefix_owner: None,
-            _marker: std::marker::PhantomData,
+            prefix_matches: None,
         }
     }
 }
@@ -25,7 +26,8 @@ impl SelectionCtx<'_> {
 /// Result of a strategy selection: the chosen candidate index plus the
 /// reason when the primary signal was unusable and the strategy fell back to
 /// `LeastPending` (`"no_signal"` / `"below_threshold"` /
-/// `"owner_unavailable"`), so fallbacks are observable instead of silent.
+/// `"owner_unavailable"` / `"owner_congested"`), so fallbacks are observable
+/// instead of silent.
 pub struct Selection {
     pub index: usize,
     pub fallback_reason: Option<&'static str>,
@@ -164,37 +166,97 @@ impl RoutingStrategy for PrefixCacheAware {
 }
 
 // ---------------------------------------------------------------------------
-// PrefixAffinity (P1c) — route to the replica that holds the request's KV
-// prefix (learned from vLLM KV events; see `kv_events::PrefixIndex`).
+// PrefixAffinity (P1c + Batch 5.2) — route by joint cost function:
+//   Score(w) = SavedPrefillTokens(w) - QueueWaitCost(w) - KvUsagePenalty(w)
+// across multi-owner prefix candidates, spilling over to an idle replica with
+// `fallback_reason = Some("owner_congested")` when all prefix owners are
+// queued deeper than the prefill savings justify.
 // ---------------------------------------------------------------------------
+
+const TOKENS_PER_KV_BLOCK: f64 = 16.0;
+const QUEUE_WAIT_COST_PER_PENDING: f64 = 64.0;
+const KV_USAGE_PENALTY_WEIGHT: f64 = 16.0;
 
 pub struct PrefixAffinity;
 
 impl RoutingStrategy for PrefixAffinity {
     fn select(&self, ctx: &SelectionCtx<'_>, candidates: &[Candidate]) -> Option<Selection> {
-        match ctx.prefix_owner {
-            Some(owner) => {
-                if let Some(index) = candidates
-                    .iter()
-                    .position(|c| c.endpoint.replica_id == owner)
-                {
-                    Some(Selection {
-                        index,
-                        fallback_reason: None,
-                    })
-                } else {
-                    // Owner was filtered out (draining / circuit / stale plan).
-                    LeastPending.select(ctx, candidates).map(|mut s| {
-                        s.fallback_reason = Some("owner_unavailable");
-                        s
-                    })
-                }
-            }
-            None => LeastPending.select(ctx, candidates).map(|mut s| {
+        if candidates.is_empty() {
+            return None;
+        }
+        let has_any_signal = ctx.prefix_owner.is_some()
+            || ctx.prefix_matches.map(|m| !m.is_empty()).unwrap_or(false);
+        if !has_any_signal {
+            return LeastPending.select(ctx, candidates).map(|mut s| {
                 s.fallback_reason = Some("no_signal");
                 s
-            }),
+            });
         }
+
+        let matched_blocks_for = |replica_id: u32| -> usize {
+            if let Some(m) = ctx.prefix_matches {
+                if let Some(&blocks) = m.get(&replica_id) {
+                    return blocks;
+                }
+            }
+            if ctx.prefix_owner == Some(replica_id) {
+                1
+            } else {
+                0
+            }
+        };
+
+        let any_owner_available = candidates
+            .iter()
+            .any(|c| matched_blocks_for(c.endpoint.replica_id) > 0);
+        if !any_owner_available {
+            // Owner was filtered out (draining / circuit / stale plan).
+            return LeastPending.select(ctx, candidates).map(|mut s| {
+                s.fallback_reason = Some("owner_unavailable");
+                s
+            });
+        }
+
+        let mut best_idx = 0usize;
+        let mut best_score = f64::NEG_INFINITY;
+        let mut best_blocks = 0usize;
+
+        for (i, c) in candidates.iter().enumerate() {
+            let blocks = matched_blocks_for(c.endpoint.replica_id);
+            let saved_tokens = (blocks as f64) * TOKENS_PER_KV_BLOCK;
+            let pending = c.stats.map(|s| s.pending_requests).unwrap_or(0) as f64;
+            let kv_usage = c
+                .stats
+                .and_then(|s| s.kv_cache_usage)
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let score = saved_tokens
+                - QUEUE_WAIT_COST_PER_PENDING * pending
+                - KV_USAGE_PENALTY_WEIGHT * kv_usage;
+            // Tie-break: higher score > deeper matched blocks > primary prefix_owner > lower index
+            let is_better = if (score - best_score).abs() > 1e-9 {
+                score > best_score
+            } else if blocks != best_blocks {
+                blocks > best_blocks
+            } else {
+                ctx.prefix_owner == Some(c.endpoint.replica_id)
+            };
+            if is_better {
+                best_score = score;
+                best_blocks = blocks;
+                best_idx = i;
+            }
+        }
+
+        let fallback_reason = if best_blocks == 0 {
+            Some("owner_congested")
+        } else {
+            None
+        };
+        Some(Selection {
+            index: best_idx,
+            fallback_reason,
+        })
     }
 
     fn name(&self) -> &'static str {
@@ -252,6 +314,7 @@ mod tests {
             last_updated_ms: 0,
             pending_requests: pending,
             prefix_cache_hit_rate: prefix_hit,
+            prefix_cache_queries_total: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: kv_usage,
         }
@@ -414,6 +477,54 @@ mod tests {
                 .select(&SelectionCtx::none(), &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((1, Some("no_signal")))
+        );
+    }
+
+    #[test]
+    fn test_prefix_affinity_joint_cost_spills_congested_short_owner_and_retains_deep_owner() {
+        let ep0 = make_ep("m", 0);
+        let ep1 = make_ep("m", 1);
+        // Replica 0 owns 1 block (16 tokens) but has 3 pending requests (cost = 192);
+        // Replica 1 is completely idle (0 pending).
+        let s0 = make_stats("m", 0, 3, Some(0.4), None);
+        let s1 = make_stats("m", 1, 0, Some(0.1), None);
+        let candidates = vec![
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
+        ];
+
+        let mut short_matches = std::collections::HashMap::new();
+        short_matches.insert(0u32, 1usize);
+        let ctx_short = SelectionCtx {
+            prefix_owner: Some(0),
+            prefix_matches: Some(&short_matches),
+        };
+        assert_eq!(
+            PrefixAffinity
+                .select(&ctx_short, &candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((1, Some("owner_congested")))
+        );
+
+        // When Replica 0 holds a deep prefix (32 blocks = 512 tokens), saved prefill
+        // (512) outweighs 3 pending requests (192), so it stays on Replica 0.
+        let mut deep_matches = std::collections::HashMap::new();
+        deep_matches.insert(0u32, 32usize);
+        let ctx_deep = SelectionCtx {
+            prefix_owner: Some(0),
+            prefix_matches: Some(&deep_matches),
+        };
+        assert_eq!(
+            PrefixAffinity
+                .select(&ctx_deep, &candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((0, None))
         );
     }
 }

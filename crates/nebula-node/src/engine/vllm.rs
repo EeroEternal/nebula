@@ -642,12 +642,18 @@ pub async fn scrape_vllm_stats(
         }
     };
 
-    Ok(parse_vllm_metrics_text(
-        &text,
-        model_uid,
-        replica_id,
-        now_ms(),
-    ))
+    let ts_ms = now_ms();
+    let stats = parse_vllm_metrics_text(&text, model_uid, replica_id, ts_ms);
+    let diag = nebula_common::parse_engine_scrape_diagnostics(Some("vllm"), &text);
+    if let Some(tau) = diag.spec_decode_mean_acceptance_length {
+        tracing::debug!(
+            model_uid = %model_uid,
+            replica_id,
+            spec_decode_mean_acceptance_length = tau,
+            "scraped speculative decoding acceptance length"
+        );
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]

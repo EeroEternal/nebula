@@ -17,6 +17,27 @@ const HISTOGRAM_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0,
 ];
 
+/// Fixed TPOT buckets (seconds per output token).///
+/// Deliberately **not** [`HISTOGRAM_BUCKETS`]: the latency ladder jumps 0.01 -> 0.05,
+/// which is exactly where a healthy TPOT lives (5-40 ms/token). Reusing it pinned
+/// `nebula_route_tpot_seconds` p95 at 50 ms on real hardware (measured 11.35 ms) and
+/// since `router_metrics` reports the bucket *boundary*, every `tpot_p95_ms` target in
+/// (10, 50] ms became a permanent false `Breaching` + `scale_decode_pool`.
+const TPOT_BUCKETS: &[f64] = &[
+    0.002, 0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.2, 0.5, 1.0, 5.0,
+];
+
+/// Fixed TTFT buckets (seconds to first token).
+///
+/// `HISTOGRAM_BUCKETS` jumps 0.01 -> 0.05 -> 0.1 -> 0.5, so a 10 ms TTFT is reported
+/// as 50 ms and a 60 ms one as 100 ms. Real TTFT targets are 100 ms - 10 s, which the
+/// ladder resolves at 2.5x-5x steps; that is enough to turn a met target into a
+/// breach. Finer below 1 s, 2x-3x above it.
+const TTFT_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5,
+    2.0, 3.0, 5.0, 10.0, 30.0, 60.0,
+];
+
 /// A simple histogram with fixed buckets, safe for concurrent use.
 #[derive(Debug)]
 pub struct Histogram {
@@ -99,6 +120,8 @@ pub struct Metrics {
     pub e2e_latency: DashMap<String, Histogram>,
     /// Per-model TTFT histogram (seconds) — only for SSE streaming responses.
     pub ttft: DashMap<String, Histogram>,
+    /// Per-model TPOT (time per output token, seconds) histogram — SSE streaming responses.
+    pub tpot: DashMap<String, Histogram>,
     /// Per-model request counters.
     pub model_counters: DashMap<String, ModelCounter>,
 }
@@ -114,7 +137,14 @@ impl Metrics {
     pub fn observe_ttft(&self, model_uid: &str, seconds: f64) {
         self.ttft
             .entry(model_uid.to_string())
-            .or_insert_with(|| Histogram::new(HISTOGRAM_BUCKETS))
+            .or_insert_with(|| Histogram::new(TTFT_BUCKETS))
+            .observe(seconds);
+    }
+
+    pub fn observe_tpot(&self, model_uid: &str, seconds: f64) {
+        self.tpot
+            .entry(model_uid.to_string())
+            .or_insert_with(|| Histogram::new(TPOT_BUCKETS))
             .observe(seconds);
     }
 
@@ -281,8 +311,12 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     body.push_str(&format!(
         "# HELP nebula_router_prefix_index_entries Live prefix-index entries (KV-event routing hints).\n\
          # TYPE nebula_router_prefix_index_entries gauge\n\
-         nebula_router_prefix_index_entries {}\n",
+         nebula_router_prefix_index_entries {}\n\
+         # HELP nebula_router_prefix_index_stale_dropped_total Stale snapshot or delta events dropped by watermark protection.\n\
+         # TYPE nebula_router_prefix_index_stale_dropped_total counter\n\
+         nebula_router_prefix_index_stale_dropped_total {}\n",
         st.router.prefix_index_entries(),
+        st.router.prefix_index_stale_dropped_total(),
     ));
     body.push_str(
         "# HELP nebula_router_prefix_lookup_total Prefix-index lookups by model.\n\
@@ -334,8 +368,41 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
             st.router.stage_fallback_total(stage),
         ));
     }
+    body.push_str(&format!(
+        "# HELP nebula_router_stage_prefill_spillover_total pd_split cold requests spilled over to idle Decode replicas when Prefill pool is saturated.\n\
+         # TYPE nebula_router_stage_prefill_spillover_total counter\n\
+         nebula_router_stage_prefill_spillover_total {}\n",
+        st.router.stage_prefill_spillover_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_pd_decode_local_hit_total pd_split warm requests routed to a Decode replica holding the prefix in local GPU VRAM.\n\
+         # TYPE nebula_router_pd_decode_local_hit_total counter\n\
+         nebula_router_pd_decode_local_hit_total {}\n",
+        st.router.pd_decode_local_hit_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_pd_short_bypass_total pd_split short cold requests bypassing controller lookup and prefill pool to unsaturated decode pool.\n\
+         # TYPE nebula_router_pd_short_bypass_total counter\n\
+         nebula_router_pd_short_bypass_total {}\n",
+        st.router.pd_short_bypass_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_tool_pause_marked_total Coding agent sessions marked as ToolPaused on tool_calls finish_reason.\n\
+         # TYPE nebula_router_tool_pause_marked_total counter\n\
+         nebula_router_tool_pause_marked_total {}\n\
+         # HELP nebula_router_tool_continuation_hit_total Coding agent continuation turns routed to anchored replica under active Tool-Pause lease.\n\
+         # TYPE nebula_router_tool_continuation_hit_total counter\n\
+         nebula_router_tool_continuation_hit_total {}\n",
+        st.router.tool_pause_marked_total(),
+        st.router.tool_continuation_hit_total(),
+    ));
     let strategy = st.router.strategy_name();
-    for reason in ["no_signal", "below_threshold", "owner_unavailable"] {
+    for reason in [
+        "no_signal",
+        "below_threshold",
+        "owner_unavailable",
+        "owner_congested",
+    ] {
         body.push_str(&format!(
             "nebula_router_strategy_fallback_total{{strategy=\"{strategy}\",reason=\"{reason}\"}} {}\n",
             st.router.strategy_fallback_total(strategy, reason),
@@ -383,6 +450,16 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         );
     }
 
+    // TPOT histograms
+    body.push_str("# HELP nebula_route_tpot_seconds Time per output token (streaming only).\n# TYPE nebula_route_tpot_seconds histogram\n");
+    for entry in st.metrics.tpot.iter() {
+        body.push_str(
+            &entry
+                .value()
+                .format_prometheus("nebula_route_tpot_seconds", entry.key()),
+        );
+    }
+
     (
         axum::http::StatusCode::OK,
         [(
@@ -413,4 +490,97 @@ pub async fn track_requests(
     }
 
     Ok(resp)
+}
+
+#[cfg(test)]
+mod route_histogram_bucket_tests {
+    use super::*;
+
+    /// Upper bound of the bucket a value is counted into — this is exactly what
+    /// `nebula_control::parse_histogram_quantile_filtered` reports as the quantile.
+    fn reported_upper_bound(buckets: &[f64], value: f64) -> f64 {
+        buckets
+            .iter()
+            .copied()
+            .find(|b| value <= *b)
+            .unwrap_or(f64::INFINITY)
+    }
+
+    #[test]
+    fn realistic_tpot_is_not_reported_as_50ms() {
+        // Measured on 8x RTX 5090, Qwen2.5-14B TP=2, vLLM 0.23.0: 11.35 ms/output token
+        // (sum=0.034046s over 3 requests x 63 decode tokens).
+        let tpot = 0.011_35;
+        assert!(
+            reported_upper_bound(TPOT_BUCKETS, tpot) <= 0.015,
+            "11.35ms TPOT must resolve below 20ms, got {}",
+            reported_upper_bound(TPOT_BUCKETS, tpot)
+        );
+        // The latency ladder reported 50ms for the same sample, which made every
+        // tpot_p95 target in (10, 50] ms a permanent false breach.
+        assert_eq!(reported_upper_bound(HISTOGRAM_BUCKETS, tpot), 0.05);
+    }
+
+    #[test]
+    fn tpot_buckets_resolve_the_5_to_50ms_band_within_2x() {
+        let mut low = 0.005_f64;
+        while low < 0.05 {
+            let next = TPOT_BUCKETS
+                .iter()
+                .copied()
+                .find(|b| *b > low)
+                .expect("TPOT buckets must cover the 5-50ms band");
+            assert!(
+                next / low <= 2.0,
+                "TPOT bucket gap {low} -> {next} is wider than 2x; a reported p95 could \
+                 overshoot the real value (and an SLO target) by more than one step"
+            );
+            low = next;
+        }
+    }
+
+    #[test]
+    fn realistic_ttft_is_not_reported_as_50ms() {
+        // Same box/run: warm TTFT 8-12 ms, one 44 s sample (torch.compile warmup).
+        let ttft = 0.011;
+        assert!(
+            reported_upper_bound(TTFT_BUCKETS, ttft) <= 0.015,
+            "11 ms TTFT must resolve below 20 ms, got {}",
+            reported_upper_bound(TTFT_BUCKETS, ttft)
+        );
+        // The latency ladder reported 50 ms for the same sample.
+        assert_eq!(reported_upper_bound(HISTOGRAM_BUCKETS, ttft), 0.05);
+        // A 600 ms TTFT target must still be resolvable, not quantised to 1 s.
+        assert!(reported_upper_bound(TTFT_BUCKETS, 0.62) <= 0.75);
+    }
+
+    #[test]
+    fn ttft_buckets_resolve_10ms_to_10s_within_2x() {
+        let mut low = 0.01_f64;
+        while low < 10.0 {
+            let next = TTFT_BUCKETS
+                .iter()
+                .copied()
+                .find(|b| *b > low)
+                .expect("TTFT buckets must cover 10ms-10s");
+            assert!(
+                next / low <= 2.0,
+                "TTFT bucket gap {low} -> {next} is wider than 2x; a reported p95 could \
+                 overshoot the real value (and an SLO target) by more than one step"
+            );
+            low = next;
+        }
+    }
+
+    #[test]
+    fn tpot_histogram_counts_into_the_tpot_ladder() {
+        let h = Histogram::new(TPOT_BUCKETS);
+        for _ in 0..9 {
+            h.observe(0.011_35);
+        }
+        h.observe(0.045);
+        let rendered = h.format_prometheus("nebula_route_tpot_seconds", "m1");
+        assert!(rendered.contains("le=\"0.015\"} 9"), "{rendered}");
+        assert!(rendered.contains("le=\"0.05\"} 10"), "{rendered}");
+    }
 }

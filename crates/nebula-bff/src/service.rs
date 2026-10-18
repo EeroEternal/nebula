@@ -810,6 +810,28 @@ pub async fn update_model(
 
     let resolved = ensure_engine_config(spec.engine_type.as_deref(), spec.config.as_ref())?;
     spec.engine_type = Some(resolved);
+
+    if let Some(dep) = get_model_deployment(store, model_uid).await? {
+        let replica_count = dep.replicas.max(1) as usize;
+        for idx in 0..replica_count {
+            let rep_cfg = nebula_common::effective_replica_config(&dep, spec.config.as_ref(), idx);
+            ensure_engine_config(spec.engine_type.as_deref(), rep_cfg.as_ref())?;
+        }
+        nebula_common::validate_pd_split_with_context(
+            &dep,
+            spec.engine_type.as_deref(),
+            spec.config.as_ref(),
+            &[],
+        )
+        .map_err(ServiceError::BadRequest)?;
+        nebula_control::validate_pd_split_deployment_images(
+            store,
+            &dep,
+            spec.docker_image.as_deref(),
+        )
+        .await?;
+    }
+
     spec.updated_at_ms = now_ms();
 
     put_model_spec(store, model_uid, &spec).await?;

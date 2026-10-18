@@ -19,9 +19,10 @@ use nebula_meta::MetaStore;
 
 use crate::auth::AuthContext;
 use crate::interface::{
-    anthropic_json_to_openai_chat, check_tooling_gate, maybe_normalize_router_error,
-    openai_chat_json_to_anthropic, parse_openai_sse_chunk, payload_too_large_response,
-    responses_json_to_openai_chat, upstream_transport_error, AnthropicSseMapper, OpenAiStreamChunk,
+    anthropic_json_to_openai_chat, check_score_gate, check_tooling_gate,
+    maybe_normalize_router_error, openai_chat_json_to_anthropic, parse_openai_sse_chunk,
+    payload_too_large_response, responses_json_to_openai_chat, upstream_transport_error,
+    AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
     classify_reqwest_error, forward_embedded, forward_upstream_response, post_router_chat,
@@ -135,6 +136,45 @@ pub async fn create_anthropic_messages(
     proxy_chat_as_anthropic(st, prepared, chat_body, requested_model, stream).await
 }
 
+async fn acquire_queue_permit(
+    st: &AppState,
+    prepared: &crate::proxy_common::PreparedUpstream,
+) -> Result<(Option<nebula_common::queue::EnginePermit>, u64), Response> {
+    let t_before_queue = std::time::Instant::now();
+    let permit = match st.queues.as_ref() {
+        Some(queues) => {
+            let model = prepared
+                .model
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            let is_continuation = st
+                .router
+                .as_ref()
+                .map(|r| {
+                    r.is_tool_continuation_for_tenant(
+                        prepared.ctx.tenant_id.as_deref(),
+                        prepared.ctx.session_id.as_deref(),
+                    )
+                })
+                .unwrap_or(false);
+            match queues
+                .for_model(&model)
+                .acquire_with_priority(prepared.ctx.tenant_id.as_deref(), is_continuation)
+                .await
+            {
+                Ok(p) => Some(p),
+                Err(deny) => {
+                    st.metrics.record_queue_deny(deny.code());
+                    return Err(queue_deny_response(deny));
+                }
+            }
+        }
+        None => None,
+    };
+    let queue_wait_ms = t_before_queue.elapsed().as_millis() as u64;
+    Ok((permit, queue_wait_ms))
+}
+
 async fn proxy_chat_as_responses(
     st: AppState,
     prepared: crate::proxy_common::PreparedUpstream,
@@ -142,12 +182,23 @@ async fn proxy_chat_as_responses(
     builder_seed: crate::responses::CreateResponseRequest,
     stream: bool,
 ) -> Response {
+    let (queue_permit, _queue_wait_ms) = match acquire_queue_permit(&st, &prepared).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
     // Keep admission guard alive until response finishes.
     let _guard = prepared._conc_guard;
+    let routed_endpoint = prepared
+        .routed_endpoint
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let tenant_id = prepared.ctx.tenant_id.clone();
+    let session_id = prepared.ctx.session_id.clone();
 
     if !resp.status().is_success() {
         let status =
@@ -167,9 +218,20 @@ async fn proxy_chat_as_responses(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
+        let router_for_stream = st.router.clone();
+        let model_for_metrics = routed_endpoint
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .or_else(|| builder_seed.model.clone())
+            .unwrap_or_else(|| "unknown".to_string());
         let mut builder = ResponseStreamBuilder::new(&builder_seed);
+        let started_at = std::time::Instant::now();
 
         tokio::spawn(async move {
+            let _permit = queue_permit;
+            let mut tool_pause_marked = false;
+            let mut first_chunk = true;
+            let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             if tx
                 .send(Ok(
                     Event::default().data(builder.created_event().to_string())
@@ -197,6 +259,14 @@ async fn proxy_chat_as_responses(
                     item = upstream.next() => {
                         match item {
                             Some(Ok(chunk)) => {
+                                if first_chunk {
+                                    first_chunk = false;
+                                    metrics.observe_ttft(
+                                        &model_for_metrics,
+                                        started_at.elapsed().as_secs_f64(),
+                                    );
+                                }
+                                decode_tracker.feed(&chunk);
                                 buf.push_str(&String::from_utf8_lossy(&chunk));
                                 while let Some(pos) = buf.find('\n') {
                                     let mut line = buf[..pos].to_string();
@@ -213,6 +283,13 @@ async fn proxy_chat_as_responses(
                                                 let _ = tx
                                                     .send(Ok(Event::default().data(completed.to_string())))
                                                     .await;
+                                                if let Some(tpot) = decode_tracker.finish_tpot() {
+                                                    metrics.observe_tpot(&model_for_metrics, tpot);
+                                                }
+                                                metrics.observe_e2e_latency(
+                                                    &model_for_metrics,
+                                                    started_at.elapsed().as_secs_f64(),
+                                                );
                                                 return;
                                             }
                                             OpenAiStreamChunk::Text(delta) => {
@@ -230,6 +307,21 @@ async fn proxy_chat_as_responses(
                                                 name,
                                                 arguments,
                                             } => {
+                                                if !tool_pause_marked {
+                                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                                        router_for_stream.as_ref(),
+                                                        session_id.as_deref(),
+                                                        routed_endpoint.as_ref(),
+                                                    ) {
+                                                        router.mark_tool_pause_for_tenant(
+                                                            tenant_id.as_deref(),
+                                                            sid,
+                                                            m,
+                                                            *r,
+                                                        );
+                                                        tool_pause_marked = true;
+                                                    }
+                                                }
                                                 for ev in builder.push_tool_call_delta(
                                                     index, id, name, arguments,
                                                 ) {
@@ -241,8 +333,24 @@ async fn proxy_chat_as_responses(
                                                     }
                                                 }
                                             }
-                                            OpenAiStreamChunk::FinishReason(_)
-                                            | OpenAiStreamChunk::Ignored => {}
+                                            OpenAiStreamChunk::FinishReason(reason) => {
+                                                if !tool_pause_marked && reason == "tool_calls" {
+                                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                                        router_for_stream.as_ref(),
+                                                        session_id.as_deref(),
+                                                        routed_endpoint.as_ref(),
+                                                    ) {
+                                                        router.mark_tool_pause_for_tenant(
+                                                            tenant_id.as_deref(),
+                                                            sid,
+                                                            m,
+                                                            *r,
+                                                        );
+                                                        tool_pause_marked = true;
+                                                    }
+                                                }
+                                            }
+                                            OpenAiStreamChunk::Ignored => {}
                                         }
                                     }
                                 }
@@ -252,6 +360,13 @@ async fn proxy_chat_as_responses(
                                 let _ = tx
                                     .send(Ok(Event::default().data(completed.to_string())))
                                     .await;
+                                if let Some(tpot) = decode_tracker.finish_tpot() {
+                                    metrics.observe_tpot(&model_for_metrics, tpot);
+                                }
+                                metrics.observe_e2e_latency(
+                                    &model_for_metrics,
+                                    started_at.elapsed().as_secs_f64(),
+                                );
                                 break;
                             }
                         }
@@ -265,7 +380,24 @@ async fn proxy_chat_as_responses(
             .into_response();
     }
 
+    let started_at = std::time::Instant::now();
     let bytes = resp.bytes().await.unwrap_or_default();
+    let elapsed = started_at.elapsed().as_secs_f64();
+    let model_for_metrics = routed_endpoint
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .or(builder_seed.model.as_deref())
+        .unwrap_or("unknown");
+    st.metrics.observe_e2e_latency(model_for_metrics, elapsed);
+    if let (Some(router), Some(sid), Some((m, r))) = (
+        st.router.as_ref(),
+        session_id.as_deref(),
+        routed_endpoint.as_ref(),
+    ) {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            router.mark_tool_pause_for_tenant(tenant_id.as_deref(), sid, m, *r);
+        }
+    }
     let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
     let text = openai
         .pointer("/choices/0/message/content")
@@ -311,11 +443,22 @@ async fn proxy_chat_as_anthropic(
     requested_model: String,
     stream: bool,
 ) -> Response {
+    let (queue_permit, _queue_wait_ms) = match acquire_queue_permit(&st, &prepared).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
     let _guard = prepared._conc_guard;
+    let routed_endpoint = prepared
+        .routed_endpoint
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let tenant_id = prepared.ctx.tenant_id.clone();
+    let session_id = prepared.ctx.session_id.clone();
 
     if !resp.status().is_success() {
         let status =
@@ -335,9 +478,19 @@ async fn proxy_chat_as_anthropic(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
+        let router_for_stream = st.router.clone();
         let model = requested_model.clone();
+        let model_for_metrics = routed_endpoint
+            .as_ref()
+            .map(|(m, _)| m.clone())
+            .unwrap_or_else(|| requested_model.clone());
+        let started_at = std::time::Instant::now();
 
         tokio::spawn(async move {
+            let _permit = queue_permit;
+            let mut tool_pause_marked = false;
+            let mut first_chunk = true;
+            let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             let msg_id = format!("msg_{}", Uuid::new_v4());
             let start = json!({
                 "type": "message_start",
@@ -394,6 +547,14 @@ async fn proxy_chat_as_anthropic(
                     item = upstream.next() => {
                         match item {
                             Some(Ok(chunk)) => {
+                                if first_chunk {
+                                    first_chunk = false;
+                                    metrics.observe_ttft(
+                                        &model_for_metrics,
+                                        started_at.elapsed().as_secs_f64(),
+                                    );
+                                }
+                                decode_tracker.feed(&chunk);
                                 buf.push_str(&String::from_utf8_lossy(&chunk));
                                 while let Some(pos) = buf.find('\n') {
                                     let mut line = buf[..pos].to_string();
@@ -404,6 +565,36 @@ async fn proxy_chat_as_anthropic(
                                     }
                                     let data = line.trim_start_matches("data:").trim();
                                     for parsed in parse_openai_sse_chunk(data) {
+                                        if !tool_pause_marked
+                                            && matches!(
+                                                &parsed,
+                                                OpenAiStreamChunk::ToolCallDelta { .. }
+                                                    | OpenAiStreamChunk::FinishReason(_)
+                                            )
+                                        {
+                                            let is_tool = match &parsed {
+                                                OpenAiStreamChunk::ToolCallDelta { .. } => true,
+                                                OpenAiStreamChunk::FinishReason(r) => {
+                                                    r == "tool_calls"
+                                                }
+                                                _ => false,
+                                            };
+                                            if is_tool {
+                                                if let (Some(router), Some(sid), Some((m, r))) = (
+                                                    router_for_stream.as_ref(),
+                                                    session_id.as_deref(),
+                                                    routed_endpoint.as_ref(),
+                                                ) {
+                                                    router.mark_tool_pause_for_tenant(
+                                                        tenant_id.as_deref(),
+                                                        sid,
+                                                        m,
+                                                        *r,
+                                                    );
+                                                    tool_pause_marked = true;
+                                                }
+                                            }
+                                        }
                                         let is_done =
                                             matches!(parsed, OpenAiStreamChunk::Done);
                                         let events = mapper.push(parsed);
@@ -422,6 +613,13 @@ async fn proxy_chat_as_anthropic(
                                             }
                                         }
                                         if is_done {
+                                            if let Some(tpot) = decode_tracker.finish_tpot() {
+                                                metrics.observe_tpot(&model_for_metrics, tpot);
+                                            }
+                                            metrics.observe_e2e_latency(
+                                                &model_for_metrics,
+                                                started_at.elapsed().as_secs_f64(),
+                                            );
                                             return;
                                         }
                                     }
@@ -435,6 +633,13 @@ async fn proxy_chat_as_anthropic(
                                             .data(payload.to_string())))
                                         .await;
                                 }
+                                if let Some(tpot) = decode_tracker.finish_tpot() {
+                                    metrics.observe_tpot(&model_for_metrics, tpot);
+                                }
+                                metrics.observe_e2e_latency(
+                                    &model_for_metrics,
+                                    started_at.elapsed().as_secs_f64(),
+                                );
                                 break;
                             }
                         }
@@ -448,7 +653,23 @@ async fn proxy_chat_as_anthropic(
             .into_response();
     }
 
+    let started_at = std::time::Instant::now();
     let bytes = resp.bytes().await.unwrap_or_default();
+    let elapsed = started_at.elapsed().as_secs_f64();
+    let model_for_metrics = routed_endpoint
+        .as_ref()
+        .map(|(m, _)| m.as_str())
+        .unwrap_or(&requested_model);
+    st.metrics.observe_e2e_latency(model_for_metrics, elapsed);
+    if let (Some(router), Some(sid), Some((m, r))) = (
+        st.router.as_ref(),
+        session_id.as_deref(),
+        routed_endpoint.as_ref(),
+    ) {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            router.mark_tool_pause_for_tenant(tenant_id.as_deref(), sid, m, *r);
+        }
+    }
     let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
     let anth = openai_chat_json_to_anthropic(&openai, &requested_model);
     (StatusCode::OK, Json(anth)).into_response()
@@ -495,6 +716,11 @@ pub async fn proxy_post(
                 return deny;
             }
         }
+    } else if uri_path.ends_with("/v1/score") {
+        let model = nebula_common::peek_json_model_field(&body_bytes);
+        if let Some(deny) = check_score_gate(&*st.store, model.as_deref()).await {
+            return deny;
+        }
     }
 
     let prepared = match prepare_upstream(&st, &auth, &headers, &body_bytes).await {
@@ -504,29 +730,11 @@ pub async fn proxy_post(
     let t_prep = std::time::Instant::now();
 
     // Engine-level bounded fair queue admission (opt-in via NEBULA_GATEWAY_QUEUE_*).
-    let t_before_queue = std::time::Instant::now();
-    let _queue_permit = match st.queues.as_ref() {
-        Some(queues) => {
-            let model = prepared
-                .model
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            match queues
-                .for_model(&model)
-                .acquire(prepared.ctx.tenant_id.as_deref())
-                .await
-            {
-                Ok(p) => Some(p),
-                Err(deny) => {
-                    st.metrics.record_queue_deny(deny.code());
-                    return queue_deny_response(deny);
-                }
-            }
-        }
-        None => None,
+    let (_queue_permit, queue_wait_ms) = match acquire_queue_permit(&st, &prepared).await {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let t_acquired = std::time::Instant::now();
-    let queue_wait_ms = (t_acquired - t_before_queue).as_millis() as u64;
 
     // Embedded router: route in-process and hit the engine directly (no router hop).
     let resp = if st.router.is_some() {
@@ -575,6 +783,11 @@ pub async fn proxy_post(
         );
     }
     let _guard = prepared._conc_guard;
+    let routed_endpoint = prepared
+        .routed_endpoint
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
 
     forward_upstream_response(
         &st,
@@ -584,6 +797,9 @@ pub async fn proxy_post(
         _queue_permit,
         queue_wait_ms,
         upstream_ttft_ms,
+        prepared.ctx.tenant_id.as_deref(),
+        prepared.ctx.session_id.as_deref(),
+        routed_endpoint,
     )
     .await
 }

@@ -316,8 +316,18 @@ pub async fn delete_slo(store: &dyn MetaStore, model_uid: &str) -> Result<(), Se
 ///
 /// Histograms are filtered by `slo.model_uid` so multi-model scrapes do not
 /// collapse to a bogus zero quantile (see `parse_histogram_quantile_filtered`).
+#[cfg(test)]
 pub fn evaluate_slo_from_router_metrics(slo: &ModelSlo, metrics_text: &str) -> SloEvaluation {
     nebula_control::evaluate_slo_from_router_metrics(slo, metrics_text)
+}
+
+pub async fn evaluate_slo_with_store(
+    store: &dyn MetaStore,
+    slo: &ModelSlo,
+    metrics_text: &str,
+) -> SloEvaluation {
+    let pool_telemetry = nebula_control::load_pd_pool_telemetry(store, &slo.model_uid).await;
+    nebula_control::evaluate_slo_from_router_metrics_with_pools(slo, metrics_text, &pool_telemetry)
 }
 
 pub async fn list_diagnostic_events(
@@ -325,6 +335,8 @@ pub async fn list_diagnostic_events(
     model_uid: Option<&str>,
 ) -> Result<Vec<DiagnosticEvent>, ServiceError> {
     let mut events = Vec::new();
+    let mut running_deps: std::collections::HashMap<String, nebula_common::ModelDeployment> =
+        std::collections::HashMap::new();
 
     // Deployments
     let deps = store.list_prefix("/deployments/").await?;
@@ -336,6 +348,9 @@ pub async fn list_diagnostic_events(
             if dep.model_uid != uid {
                 continue;
             }
+        }
+        if dep.desired_state == DesiredState::Running {
+            running_deps.insert(dep.model_uid.clone(), dep.clone());
         }
         let state = match dep.desired_state {
             DesiredState::Running => "running",
@@ -402,6 +417,60 @@ pub async fn list_diagnostic_events(
             node_id: None,
             data_source: Some("etcd".into()),
         });
+    }
+
+    // Engine scrape diagnostics (Batch 5.6: detect silent prefix-cache disablement
+    // on active vLLM / hybrid-attention replicas where prefix_cache_queries_total is 0).
+    let mut model_specs: std::collections::HashMap<String, nebula_common::ModelSpec> =
+        std::collections::HashMap::new();
+    if let Ok(specs_raw) = store.list_prefix("/models/").await {
+        for (_, v, _) in specs_raw {
+            if let Ok(spec) = serde_json::from_slice::<nebula_common::ModelSpec>(&v) {
+                model_specs.insert(spec.model_uid.clone(), spec);
+            }
+        }
+    }
+    if let Ok(stats_raw) = store.list_prefix("/stats/").await {
+        for (_, v, _) in stats_raw {
+            let Ok(st) = serde_json::from_slice::<nebula_common::EndpointStats>(&v) else {
+                continue;
+            };
+            if let Some(uid) = model_uid {
+                if st.model_uid != uid {
+                    continue;
+                }
+            }
+            let Some(dep) = running_deps.get(&st.model_uid) else {
+                continue;
+            };
+            let spec = model_specs.get(&st.model_uid);
+            let is_vllm = spec
+                .and_then(|s| s.engine_type.as_deref())
+                .map(|et| nebula_common::resolve_engine_type(Some(et)) == "vllm")
+                .unwrap_or(true);
+            if !is_vllm {
+                continue;
+            }
+            let prefix_caching_expected = nebula_common::effective_replica_config(
+                dep,
+                spec.and_then(|s| s.config.as_ref()),
+                st.replica_id as usize,
+            )
+            .and_then(|c| c.enable_prefix_caching)
+            .unwrap_or(true);
+            let active_traffic = st.pending_requests > 0 || st.prefix_cache_queries_total.is_some();
+            if let Some(ev) = nebula_common::diagnose_hybrid_prefix_cache(
+                &st.model_uid,
+                st.replica_id,
+                prefix_caching_expected,
+                active_traffic,
+                st.prefix_cache_hit_rate,
+                st.prefix_cache_queries_total,
+                st.last_updated_ms,
+            ) {
+                events.push(ev);
+            }
+        }
     }
 
     events.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms));

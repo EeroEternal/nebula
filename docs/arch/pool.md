@@ -92,7 +92,7 @@ Router 只读 endpoints；不知「池」也可选路
 
 ## `pd_split` 拓扑与角色化放置（P2c-pd 设计稿 v1.1，2026-10-12，经独立评审 REWORK 修订）
 
-> 依据：[`../dev/engines.md`](../dev/engines.md) §7（无 NIXL 共享 KV 形态已在 8×5090 实证：producer Stored 681/681 → `lm://` TCP → decoder Retrieved 512/512）。**代码未实现**；字段名即实现契约。v1.1 修订吸收独立评审（1 blocker + 5 major）：重新定位 v1 语义、补生命周期/故障验证/产物绑定/多 owner 索引/seed 契约。
+> 依据：[`../dev/engines.md`](../dev/engines.md) §7（无 NIXL 共享 KV 形态已在 8×5090 实证：producer Stored 681/681 → `lm://` TCP → decoder Retrieved 512/512）。**v1/v1.1 代码已合入（见下文各节实证与单测说明）**；字段名即实现契约。v1.1 修订吸收独立评审（1 blocker + 5 major）：重新定位 v1 语义、补生命周期/故障验证/产物绑定/多 owner 索引/seed 契约。
 
 ### v1 定位（评审 #1 修正）：角色化完整请求路由，**不是**单请求 PD
 
@@ -161,17 +161,17 @@ stage = warm → decode 池（便宜地 retrieve）
 池内选择 v1 = least_pending
 ```
 
-**实现修正（2026-10-12，rig 验证时发现）**：初版实现只看 session affinity，导致冷流量进 prefill 后被锚定、**decode 池永不可达**。正确信号是前缀索引命中——它回答的是"共享存储里有没有这个前缀"（store-level 事实），而不是"哪个 decode 副本本地持有"（review #5 的问题，仍需多 owner 索引，v1.1）。
+**初版演进记录（2026-10-12，rig 验证时发现）**：初版实现只看 session affinity，导致冷流量进 prefill 后被锚定、**decode 池永不可达**。当时曾尝试改用 P1c 前缀索引命中充当 store-level `warm` 信号，随即在真机验证中发现下述 `LMCacheConnectorV1` 停用 `kv-events` 的限制。
 
-**⚠️ rig 阻断（2026-10-12，必须解决的 v1 前置）**：启用 `LMCacheConnectorV1` 后，引擎日志明确输出 **`LMCache INFO: KV events are disabled.`**（`cache_engine.py:188`）——**LMCache 接管 KV 路径后停用了 vLLM 的 kv-events 发布**。实测：569-token prompt 只产生 1 条索引条目、`prefix_hit_total=0`，两条请求都落 prefill（`prefix_lookup_total=2` 证明哈希/查表已在跑）。因此**P1c 索引在 pd_split 形态下不能充当 warm 信号**。
+**⚠️ rig 阻断（2026-10-12，必须解决的 v1 前置）**：启用 `LMCacheConnectorV1` 后，引擎日志明确输出 **`LMCache INFO: KV events are disabled.`**（`cache_engine.py:188`）——**LMCache 接管 KV 路径后停用了 vLLM 的 kv-events 发布**。实测：569-token prompt 只产生 1 条索引条目、`prefix_hit_total=0`，两条请求都落 prefill（`prefix_lookup_total=2` 证明哈希/查表已在跑）。因此**在当前 `LMCacheConnectorV1` 下，P1c `PrefixIndex` 收不到 `BlockStored` 事件，不能充当 `pd_split` 的 `warm` 信号或线上 Decode 池本地命中信号**。
 
-**✅ 解法 1 已落地并真机验证（2026-10-13）**：warm 信号改用 **LMCache controller** 的 `POST /lookup`（store-level 权威事实）。
+**✅ 解法 1 已落地并真机验证（2026-10-13）**：`pd_split` 的 store-level `warm` 信号改用 **LMCache controller** 的 `POST /lookup`（store-level 权威事实）。
 
 ```
-请求 → Router 对 prompt 分词 → POST <controller>:9000/lookup {"tokens":[...]}
+请求 → Router 对 prompt / chat messages 分词 → POST <controller>:9000/lookup {"tokens":[...]}
      → {"layout_info":{"<instance>":["LocalCPUBackend", 569]}}   # 命中 token 数
      hit > 0 → warm → decode 池；否则 cold → prefill 池
-     响应按 (model, 首 token) 缓存 2s；任何错误/200ms 超时 → 降级为 cold（可见计数）
+     响应按 (model, sha256(token_ids)) 缓存 2s（上限 4096 条）；任何错误/200ms 超时 → 降级为 cold（可见计数）
 ```
 
 - 引擎侧注册：`lmcache_controller_env`（四项必填：`ENABLE_CONTROLLER` / `CONTROLLER_PULL_URL`(8300) / `CONTROLLER_REPLY_URL`(8400) / `WORKER_PORTS` + `INSTANCE_ID`）——缺 reply URL 会 crash-loop（rig 教训）。
@@ -191,8 +191,9 @@ stage = warm → decode 池（便宜地 retrieve）
 **已实证的部分（不受此阻断影响）**：角色注入（prefill `kv_producer`+`SAVE_UNFULL_CHUNK` / decode `kv_both`+`RETRIEVE_LOCATIONS`，同 seed=42）、scheduler 投影、EndpointInfo.role 注册、共享存储写入与取回（prefill 副本二次请求 **Retrieved 569/569 tokens**）、stage 过滤逻辑与计数器（单测全绿）。
 
 - session affinity 的锚定域限制在 decode 池内（首次命中 prefill 不锚定 prefill）。
-- **P1c 在 v1 不承担 decode 池内本地命中优先**：现索引每 hash 单 owner，prefill 的 Stored 会覆盖 decode 的 owner，角色过滤后必回落（评审 #5 指出）。多 owner 索引（`(model,hash) → {replica: ts}`，查询限定候选集；区分 GPU 本地持有 vs 远端已写入两个信号）为 **v1.1 项**，届时 `prefix_affinity` 才在 decode 池内恢复本地优先语义；replicated 拓扑下 P1c 行为不变。
-- 不引入 vLLM disagg proxy；分发协调由 nebula 承担（v1 即本节规则）。
+- **两级局部性（v1.1 多 owner 索引，MapReduce Locality 分级）**：`PrefixIndex` 存储 `(model_uid, block_hash) → {replica_id: (last_seen_ms, epoch, generation)}` 多持有者映射（带 per-replica 墓碑与 `(epoch, generation)` 水位），并提供限定候选集的 `lookup_in(model, hashes, allowed_replicas)`。当 `kv-events` 正常发布时（如 `replicated` 多副本共有前缀，或未来保留 `kv-events` 的连接器），阶段过滤缩小到 Decode 池后可通过池内 `lookup_in` 识别 Node-local 显存命中（计数 `nebula_router_pd_decode_local_hit_total`）；而在当前 `LMCacheConnectorV1`（停用 `kv-events`）下，`pd_split` 依赖 `lmcache_controller` `/lookup` 判暖 + Decode 池内 `session_affinity` / `least_pending`。
+- **冷启动单 Mapper 瓶颈溢出保护（Prefill Spillover，可选开启）**：默认关闭（`NEBULA_PD_PREFILL_SPILLOVER_PENDING=0`），确保冷请求优先经 Prefill 副本（`kv_producer`）填充共享存储；当运维显式配置 `NEBULA_PD_PREFILL_SPILLOVER_PENDING >= 1` 且所有 Prefill 副本均处于高积压（`min_prefill_pending >= threshold`）、而 Decode 池中存在有新鲜 `/stats/` 且 `pending_requests < min_prefill_pending` 的副本时，允许将冷请求溢出到 Decode 副本（计数 `nebula_router_stage_prefill_spillover_total`）。
+- 不引入 vLLM disagg proxy；分发协调由 nebula 承担（v1/v1.1 即本节规则）。
 
 ### 校验规则（共享控制逻辑，BFF/CLI 共用；不只覆盖 BFF——评审 #4）
 
@@ -225,8 +226,8 @@ stage = warm → decode 池（便宜地 retrieve）
 
 | 故障 | 预期行为 | 状态 |
 |---|---|---|
-| decode 池全灭 | 回落 prefill 池（完整请求能力） | 设计；实现+计数器后验证 |
-| `lmcache_server` 挂/断线/黑洞 | 引擎 recompute（可能抬升 GPU 负载、影响吞吐，非仅 TTFT） | **待故障注入验证** |
+| decode 池全灭 | 回落 prefill 池（完整请求能力） | 已落地（`stage_fallback_total` 计数） |
+| `lmcache_server` 挂/断线/黑洞 | 引擎 recompute（可能抬升 GPU 负载、影响吞吐，非仅 TTFT） | ✅ 已故障注入实证（见上表，0 拒绝） |
 | 远端 KV miss | decode 副本自 prefill | 已实证 |
 
 ### 收益 A/B（✅ 2026-07-13，客户端口径，评估建议 3）
@@ -247,7 +248,7 @@ stage = warm → decode 池（便宜地 retrieve）
 1. common：结构体增量 + **共享校验函数**（含兼容范围与 digest 白名单）+ 单测。
 2. scheduler：planner 投影 role/kv_sharing 进 PlacementAssignment；变更→新版本+Drain。
 3. controller + node：注入映射（复用 kv-events 注入点）；EndpointInfo.role 注册。
-4. Router：stage 判定（affinity 限 decode 域）+ 角色过滤 + `stage_fallback_total`；**不做** decode 池内 P1c 本地优先（v1.1）。
+4. Router：stage 判定（affinity 限 decode 域）+ 角色过滤 + `stage_fallback_total`；v1.1 补齐多 owner `PrefixIndex` 支撑 decode 池内 P1c 本地命中优先（Batch 5.2 代码与单测已合入）。
 5. BFF/UI：校验接入共享逻辑；deployment 编辑暴露 topology/role（admin-ui-change 流程）。
 6. scripts：nebula-stack/probe 增 lmcache_server；**故障注入脚本**（上节四场景）。
 

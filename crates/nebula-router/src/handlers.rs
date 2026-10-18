@@ -305,12 +305,19 @@ pub async fn proxy_chat_completions(
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
         let dual = st.dual_write.clone();
+        let router_for_stream = st.router.clone();
+        let tenant_for_stream = ctx.tenant_id.clone();
+        let session_for_stream = ctx.session_id.clone();
+        let replica_for_stream = _selected_ep.replica_id;
         let model_uid_for_stream = model_uid.clone();
         let status_code = status.as_u16();
         let request_id_for_task = request_id.clone();
         tokio::spawn(async move {
             let mut first_chunk = true;
+            let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             let mut aborted = false;
+            let mut tool_pause_marked = false;
+            let mut tool_scanner = nebula_router::ToolCallScanner::default();
             loop {
                 tokio::select! {
                     biased;
@@ -327,6 +334,20 @@ pub async fn proxy_chat_completions(
                                     metrics.observe_ttft(&model_uid_for_stream, ttft);
                                     dual.emit_ttft("nebula_router", &model_uid_for_stream, ttft);
                                 }
+                                decode_tracker.feed(&b);
+                                if !tool_pause_marked {
+                                    if let Some(ref sid) = session_for_stream {
+                                        if tool_scanner.feed(&b) {
+                                            router_for_stream.mark_tool_pause_for_tenant(
+                                                tenant_for_stream.as_deref(),
+                                                sid,
+                                                &model_uid_for_stream,
+                                                replica_for_stream,
+                                            );
+                                            tool_pause_marked = true;
+                                        }
+                                    }
+                                }
                                 if tx.send(Ok(b)).await.is_err() {
                                     aborted = true;
                                     break;
@@ -339,6 +360,11 @@ pub async fn proxy_chat_completions(
             }
             let e2e = request_start.elapsed().as_secs_f64();
             metrics.observe_e2e_latency(&model_uid_for_stream, e2e);
+            if !aborted {
+                if let Some(tpot) = decode_tracker.finish_tpot() {
+                    metrics.observe_tpot(&model_uid_for_stream, tpot);
+                }
+            }
             if aborted {
                 metrics
                     .requests_aborted_total
@@ -384,6 +410,16 @@ pub async fn proxy_chat_completions(
         Ok(b) => b,
         Err(_) => Bytes::new(),
     };
+    if let Some(ref sid) = ctx.session_id {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            st.router.mark_tool_pause_for_tenant(
+                ctx.tenant_id.as_deref(),
+                sid,
+                &model_uid,
+                _selected_ep.replica_id,
+            );
+        }
+    }
 
     let e2e = request_start.elapsed().as_secs_f64();
     st.metrics.observe_e2e_latency(&model_uid, e2e);

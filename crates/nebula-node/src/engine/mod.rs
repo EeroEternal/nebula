@@ -90,6 +90,7 @@ pub trait Engine: Send + Sync {
             kv_connector: None,
             grpc: None,
             tool_calling: nebula_common::SupportLevel::Unknown,
+            score_api: nebula_common::SupportLevel::Unknown,
             topologies: vec![],
             observability: Default::default(),
             notes: Some("unknown engine capability profile".into()),
