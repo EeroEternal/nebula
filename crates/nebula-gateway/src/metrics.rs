@@ -139,6 +139,8 @@ pub struct Metrics {
     pub hint_untrusted_total: AtomicU64,
     /// Client disconnect / explicit abort — not counted as 5xx error budget.
     pub requests_aborted_total: AtomicU64,
+    /// Streams that ended with an upstream error before `[DONE]` (truncated 200).
+    pub upstream_stream_error_total: AtomicU64,
     /// Engine queue admission denials by low-cardinality reason.
     pub queue_denied_full_total: AtomicU64,
     pub queue_denied_tenant_total: AtomicU64,
@@ -255,6 +257,12 @@ pub fn render_metrics(metrics: &Metrics) -> String {
          # TYPE nebula_gateway_responses_5xx counter\n\
          nebula_gateway_responses_5xx {}\n",
         metrics.status_5xx.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_gateway_upstream_stream_error_total Streams ended by an upstream error before [DONE] (client sees a truncated 200).\n\
+         # TYPE nebula_gateway_upstream_stream_error_total counter\n\
+         nebula_gateway_upstream_stream_error_total {}\n",
+        metrics.upstream_stream_error_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_gateway_auth_missing Requests with missing auth credentials.\n\

@@ -243,20 +243,22 @@ stage = warm → decode 池（便宜地 retrieve）
 
 **结论**：暖态下 pd_split 吞吐持平（−5%）、**尾部延迟更优（p99 −21%）**——共享存储让 KV 只存一份、decode 侧取回替代重复 prefill；但**宽前缀/冷启动场景更差**（1:1 池配比把全部冷 prefill 压到单个 prefill 副本，且 TCP 取回慢于本地命中）。v1 定位为"角色化路由 + 共享 KV 的尾部优化"，**不是吞吐方案**；池配比（prefill:decode）是后续调优旋钮。
 
-### 复测补充（2026-10-18，vLLM 0.23.0 + LMCache 0.5.5 真机，含暖信号有效性证据）
+### 复测补充（2026-10-18，vLLM 0.23.0 + LMCache 0.5.5 真机）
 
-> 该轮用 7B / TP=1 / 2 GPU / C=8，且引擎镜像为**探针构建**（非 `NEBULA_APPROVED_PD_IMAGES` 门禁产物）。完整数据、有效性与未覆盖项见 [`../dev/benefit-verification.md`](../dev/benefit-verification.md) §"2026-10-18 复测"。
+> 7B / TP=1 / 2 GPU / C=8 / 192 请求，引擎镜像为**探针构建**（非 `NEBULA_APPROVED_PD_IMAGES` 门禁产物）。完整数据、有效性与未覆盖项见 [`../dev/benefit-verification.md`](../dev/benefit-verification.md) §"2026-10-18 复测"。
 
-| 配置 | 有效吞吐 | TTFT p50 | TTFT p99 | 失败 |
+| 配置 | rps | TTFT p50 | TTFT p99 | 失败 |
 |---|---|---|---|---|
-| replicated（96 前缀 ×1500 词，prefix_affinity 生效） | **9.17 rps** | **155 ms** | 1164 ms | 0 |
-| pd_split（同负载，controller 判暖生效，warm=46/192） | 1.07 rps | 1073 ms | 2646 ms | **15（14 条流截断）** |
+| replicated（prefix_affinity 生效） | 9.05 | **131 ms** | 1163 ms | 0 |
+| pd_split，**共享存储为空**（首轮冷前缀） | 1.07 | 1073 ms | 2646 ms | **15（流无 `[DONE]`）** |
+| pd_split，**共享存储已预热** | **10.83** | 224 ms | **449 ms（−61%）** | 0 |
 
-**新增结论（与上表口径不同，不能互相替代）**：
+**修正后的结论**（初版曾误读首轮冷启动为"暖态变慢 8.6×"，原因与证据见 `benefit-verification.md`）：
 
-1. **暖态取回不一定划算**：暖请求确实检索成功（decode 侧 `Retrieved 1536/1536 tokens`），但 v1 是整请求级路由，每个暖请求仍要经 `lm://` TCP 拉全量 KV（实测 ≈0.6 ms/token），而 5090 重新 prefill 同样 1536 token 只需 ~150 ms。**当 TCP 取回的单位成本高于重算时，PD 分离是负收益** —— 因此"暖态尾部延迟更优"的前提是**取回远快于重算**（例如更大模型 / 更慢 prefill / 本地 tier 命中），不能当作普适结论。
-2. **流截断是可靠性缺陷，不只是慢**：7.3% 的暖态流在 `[DONE]` 前断开（见 [#37](https://github.com/EeroEternal/nebula/issues/37)）。在修复前，`pd_split` 不适合作为面向 Agent 长会话的默认拓扑。
-3. 短请求旁路的前置条件：`pd_short_bypass_total` 在仅有 `/endpoints/`、没有 `/stats/` 采集时为 0，冷短请求会全部落到 Prefill 池（实测 14.21 vs replicated 18.39 rps）。**Batch 5.1 的收益依赖 node/k8s-controller 的 stats 管道**。
+1. **稳态吞吐与 replicated 持平**（10.83 vs 9.05 rps），且**尾部延迟显著更优（p99 −61%）** —— 与本节 2026-07-13 的原始判断同向，v1 的定位（尾部优化）成立。
+2. **真正的风险是"冷存储 + 单 Prefill 池"的突发**：96 个前缀从零开始时全部压到唯一 Prefill 副本，C=8 下积压 → 1.07 rps 且 15/192 流截断。**预热/预热策略（Batch 6.3）与 Prefill 池配比是这条风险的对冲**，不是可选优化。
+3. 暖请求的 p50 劣化（131 → 224 ms）来自整请求级路由仍要经 `lm://` 取回全量 KV（实测 ≈0.6 ms/token），量级与 p50 差同向，但不足以抵消 p99 的收益。
+4. `nebula_router_upstream_stream_error_total` 为 0：截断流是"上游 EOF 无 `[DONE]`"，router 侧无错误信号 —— 该静默分支已由同批 instrumentation 补上日志与计数。
 
 ### 触点清单（第 3 步实现，评审后仍估 2-3 会话）
 

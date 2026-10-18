@@ -377,7 +377,19 @@ pub async fn forward_upstream_response(
                                     break;
                                 }
                             }
-                            Ok(Some(Err(_)) | None) => break,
+                            Ok(Some(Err(e))) => {
+                                metrics
+                                    .upstream_stream_error_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(
+                                    first,
+                                    error = %e,
+                                    "gateway upstream stream error; ending stream early"
+                                );
+                                aborted = true;
+                                break;
+                            }
+                            Ok(None) => break,
                             Err(_) => {
                                 metrics
                                     .requests_aborted_total

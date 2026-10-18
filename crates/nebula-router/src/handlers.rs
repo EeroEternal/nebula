@@ -356,7 +356,24 @@ pub async fn proxy_chat_completions(
                                     break;
                                 }
                             }
-                            Ok(Some(Err(_)) | None) => break,
+                            // A mid-stream upstream error (engine aborted the response,
+                            // KV retrieve failed, connection reset) used to `break`
+                            // silently: the client got a truncated 200 with no [DONE]
+                            // and nothing was logged or counted (issue #37).
+                            Ok(Some(Err(e))) => {
+                                metrics
+                                    .upstream_stream_error_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(
+                                    model_uid = %model_uid_for_stream,
+                                    replica_id = replica_for_stream,
+                                    first_chunk,
+                                    error = %e,
+                                    "router upstream stream error; ending stream early"
+                                );
+                                break;
+                            }
+                            Ok(None) => break,
                             Err(_) => {
                                 tracing::warn!(
                                     model_uid = %model_uid_for_stream,
