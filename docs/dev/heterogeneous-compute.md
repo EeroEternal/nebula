@@ -34,6 +34,8 @@
 
 ## 2. 架构总览：基于“细粒度计算抽象 × 声明式契约”的四层收敛体系
 
+![异构算力高效利用与细粒度计算契约四层架构图 (SVG)](heterogeneous-compute.svg)
+
 ```mermaid
 flowchart TB
     subgraph L4_Workload["第一层：细粒度计算形态抽象与入口契约 (Workload & Sub-Stage Abstraction)"]
