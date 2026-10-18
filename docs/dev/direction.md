@@ -1,7 +1,7 @@
 # Nebula 发展方向与编排边界备忘
 
 > 日期：2026-10-18（初版 2026-09-20）。性质：**战略与架构边界备忘**（结论性判断，批次勾选以 [`../arch/roadmap.md`](../arch/roadmap.md) 为准）。
-> 依据：[`landscape.md`](landscape.md)（Dynamo / llm-d 对照）、[`hw/vllm-serving-perf.md`](hw/vllm-serving-perf.md)（真机测量 + A/B/C 分区）、[`prefix-affinity.md`](prefix-affinity.md)（P1c + `nebula-indexd`）、[`benefit-verification.md`](benefit-verification.md)（客户端口径 A/B）、[`../arch/pool.md`](../arch/pool.md)（`pd_split` v1 角色化路由 + 故障注入）、[`kv-governance.md`](kv-governance.md)（企业级 KV Cache 资源化治理）。
+> 依据：[`landscape.md`](landscape.md)（Dynamo / llm-d 对照）、[`hw/vllm-serving-perf.md`](hw/vllm-serving-perf.md)（真机测量 + A/B/C 分区）、[`prefix-affinity.md`](prefix-affinity.md)（P1c + `nebula-indexd`）、[`benefit-verification.md`](benefit-verification.md)（客户端口径 A/B）、[`../arch/pool.md`](../arch/pool.md)（`pd_split` v1 角色化路由 + 故障注入）、[`kv-governance.md`](kv-governance.md)（企业级 KV Cache 资源化治理）、[`heterogeneous-compute.md`](heterogeneous-compute.md)（异构算力高效利用与细粒度计算契约方案）。
 
 ## 1. 核心定位
 
