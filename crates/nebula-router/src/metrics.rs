@@ -17,8 +17,7 @@ const HISTOGRAM_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0,
 ];
 
-/// Fixed TPOT buckets (seconds per output token).
-///
+/// Fixed TPOT buckets (seconds per output token).///
 /// Deliberately **not** [`HISTOGRAM_BUCKETS`]: the latency ladder jumps 0.01 -> 0.05,
 /// which is exactly where a healthy TPOT lives (5-40 ms/token). Reusing it pinned
 /// `nebula_route_tpot_seconds` p95 at 50 ms on real hardware (measured 11.35 ms) and
@@ -26,6 +25,17 @@ const HISTOGRAM_BUCKETS: &[f64] = &[
 /// (10, 50] ms became a permanent false `Breaching` + `scale_decode_pool`.
 const TPOT_BUCKETS: &[f64] = &[
     0.002, 0.005, 0.01, 0.015, 0.02, 0.03, 0.04, 0.05, 0.075, 0.1, 0.2, 0.5, 1.0, 5.0,
+];
+
+/// Fixed TTFT buckets (seconds to first token).
+///
+/// `HISTOGRAM_BUCKETS` jumps 0.01 -> 0.05 -> 0.1 -> 0.5, so a 10 ms TTFT is reported
+/// as 50 ms and a 60 ms one as 100 ms. Real TTFT targets are 100 ms - 10 s, which the
+/// ladder resolves at 2.5x-5x steps; that is enough to turn a met target into a
+/// breach. Finer below 1 s, 2x-3x above it.
+const TTFT_BUCKETS: &[f64] = &[
+    0.005, 0.01, 0.015, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 1.5,
+    2.0, 3.0, 5.0, 10.0, 30.0, 60.0,
 ];
 
 /// A simple histogram with fixed buckets, safe for concurrent use.
@@ -127,7 +137,7 @@ impl Metrics {
     pub fn observe_ttft(&self, model_uid: &str, seconds: f64) {
         self.ttft
             .entry(model_uid.to_string())
-            .or_insert_with(|| Histogram::new(HISTOGRAM_BUCKETS))
+            .or_insert_with(|| Histogram::new(TTFT_BUCKETS))
             .observe(seconds);
     }
 
@@ -483,7 +493,7 @@ pub async fn track_requests(
 }
 
 #[cfg(test)]
-mod tpot_bucket_tests {
+mod route_histogram_bucket_tests {
     use super::*;
 
     /// Upper bound of the bucket a value is counted into — this is exactly what
@@ -523,6 +533,39 @@ mod tpot_bucket_tests {
             assert!(
                 next / low <= 2.0,
                 "TPOT bucket gap {low} -> {next} is wider than 2x; a reported p95 could \
+                 overshoot the real value (and an SLO target) by more than one step"
+            );
+            low = next;
+        }
+    }
+
+    #[test]
+    fn realistic_ttft_is_not_reported_as_50ms() {
+        // Same box/run: warm TTFT 8-12 ms, one 44 s sample (torch.compile warmup).
+        let ttft = 0.011;
+        assert!(
+            reported_upper_bound(TTFT_BUCKETS, ttft) <= 0.015,
+            "11 ms TTFT must resolve below 20 ms, got {}",
+            reported_upper_bound(TTFT_BUCKETS, ttft)
+        );
+        // The latency ladder reported 50 ms for the same sample.
+        assert_eq!(reported_upper_bound(HISTOGRAM_BUCKETS, ttft), 0.05);
+        // A 600 ms TTFT target must still be resolvable, not quantised to 1 s.
+        assert!(reported_upper_bound(TTFT_BUCKETS, 0.62) <= 0.75);
+    }
+
+    #[test]
+    fn ttft_buckets_resolve_10ms_to_10s_within_2x() {
+        let mut low = 0.01_f64;
+        while low < 10.0 {
+            let next = TTFT_BUCKETS
+                .iter()
+                .copied()
+                .find(|b| *b > low)
+                .expect("TTFT buckets must cover 10ms-10s");
+            assert!(
+                next / low <= 2.0,
+                "TTFT bucket gap {low} -> {next} is wider than 2x; a reported p95 could \
                  overshoot the real value (and an SLO target) by more than one step"
             );
             low = next;
