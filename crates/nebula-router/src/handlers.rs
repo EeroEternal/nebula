@@ -303,6 +303,7 @@ pub async fn proxy_chat_completions(
     if is_sse {
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
+        let stream_idle = nebula_common::stream_idle_timeout();
         let metrics = st.metrics.clone();
         let dual = st.dual_write.clone();
         let router_for_stream = st.router.clone();
@@ -325,9 +326,9 @@ pub async fn proxy_chat_completions(
                         aborted = true;
                         break;
                     }
-                    item = upstream.next() => {
+                    item = tokio::time::timeout(stream_idle, upstream.next()) => {
                         match item {
-                            Some(Ok(b)) => {
+                            Ok(Some(Ok(b))) => {
                                 if first_chunk {
                                     first_chunk = false;
                                     let ttft = request_start.elapsed().as_secs_f64();
@@ -353,7 +354,15 @@ pub async fn proxy_chat_completions(
                                     break;
                                 }
                             }
-                            Some(Err(_)) | None => break,
+                            Ok(Some(Err(_)) | None) => break,
+                            Err(_) => {
+                                tracing::warn!(
+                                    model_uid = %model_uid_for_stream,
+                                    idle_ms = stream_idle.as_millis() as u64,
+                                    "router SSE idle timeout; ending stream"
+                                );
+                                break;
+                            }
                         }
                     }
                 }
@@ -406,9 +415,10 @@ pub async fn proxy_chat_completions(
         return out;
     }
 
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(_) => Bytes::new(),
+    let bytes = match tokio::time::timeout(nebula_common::stream_idle_timeout(), resp.bytes()).await
+    {
+        Ok(Ok(b)) => b,
+        Ok(Err(_)) | Err(_) => Bytes::new(),
     };
     if let Some(ref sid) = ctx.session_id {
         if nebula_router::response_has_tool_calls(&bytes) {
