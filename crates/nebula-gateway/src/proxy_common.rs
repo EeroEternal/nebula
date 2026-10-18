@@ -386,6 +386,12 @@ pub async fn forward_upstream_response(
                                     error = %e,
                                     "gateway upstream stream error; ending stream early"
                                 );
+                                let _ = tx
+                                    .send(Ok(nebula_router::sse_error_frame(
+                                        "upstream_stream_error",
+                                        "upstream stream failed before completion",
+                                    )))
+                                    .await;
                                 aborted = true;
                                 break;
                             }
@@ -399,6 +405,12 @@ pub async fn forward_upstream_response(
                                     idle_ms = stream_idle.as_millis() as u64,
                                     "gateway upstream SSE deadline exceeded; ending stream"
                                 );
+                                let _ = tx
+                                    .send(Ok(nebula_router::sse_error_frame(
+                                        "upstream_stream_timeout",
+                                        "upstream stream stalled past the deadline",
+                                    )))
+                                    .await;
                                 break;
                             }
                         }

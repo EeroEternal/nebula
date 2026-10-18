@@ -143,7 +143,11 @@ etcdctl_cmd put "/endpoints/$MODEL_UID/0" "$EP" >/dev/null
 ok "seeded spec/deployment/placement/endpoint"
 
 echo "--- start control plane ---"
-env NEBULA_AUTH_DISABLED=1 "$BIN/nebula-router" \
+# Short per-phase deadlines: the stalled-stream case below must not wait 60s/120s.
+env NEBULA_AUTH_DISABLED=1 \
+    NEBULA_PROXY_FIRST_BYTE_TIMEOUT_MS=1500 \
+    NEBULA_PROXY_STREAM_IDLE_TIMEOUT_MS=1500 \
+    "$BIN/nebula-router" \
   --listen-addr 127.0.0.1:18081 \
   --etcd-endpoint "$ETCD_ENDPOINT" \
   --model-uid "$MODEL_UID" >"$ROOT/logs/ci-router.log" 2>&1 &
@@ -178,6 +182,30 @@ done
 comp=$(curl -sf --max-time "$CURL_MAX" -X POST "$GATEWAY/v1/completions" -H "Content-Type: application/json" \
   -d "{\"model\":\"$SERVED_NAME\",\"prompt\":\"hi\",\"max_tokens\":8}" || true)
 echo "$comp" | grep -q mock && ok "completions" || bad "completions: $(echo "$comp" | head -c 120)"
+
+echo "--- stalled upstream stream (issue #37) ---"
+# The mock sends two frames then never a [DONE]; the router's idle deadline has to end
+# the response AND tell the client why. A silent truncation (body ends, no error frame)
+# is the failure mode this guards against.
+stall_start=$SECONDS
+stall_body=$(curl -sN --max-time 15 -X POST "$ROUTER/v1/chat/completions" -H "Content-Type: application/json" \
+  -d "{\"model\":\"$SERVED_NAME\",\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"__stall__\"}]}" || true)
+stall_secs=$((SECONDS - stall_start))
+if echo "$stall_body" | grep -q '"error"'; then
+  ok "stalled stream ends with an error frame"
+else
+  bad "stalled stream ended without an error frame: $(echo "$stall_body" | tail -c 120)"
+fi
+if echo "$stall_body" | grep -q '\[DONE\]'; then
+  bad "stalled stream must not claim completion with [DONE]"
+else
+  ok "stalled stream does not fake [DONE]"
+fi
+if [ "$stall_secs" -le 10 ]; then
+  ok "stalled stream bounded by the idle deadline (${stall_secs}s)"
+else
+  bad "stalled stream took ${stall_secs}s (idle deadline not applied)"
+fi
 
 echo "--- BFF console APIs ---"
 TOKEN=$(curl -sf --max-time "$CURL_MAX" -X POST "$BFF/api/auth/login" -H "Content-Type: application/json" \

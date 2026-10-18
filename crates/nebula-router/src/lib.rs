@@ -214,6 +214,20 @@ impl ToolCallScanner {
     }
 }
 
+/// OpenAI-shaped SSE error frame emitted when a stream ends before `[DONE]`.
+///
+/// Without it a deadline hit or a mid-stream upstream failure closed the response
+/// body silently: the client saw a truncated `200` and could not tell a finished
+/// turn from an aborted one (issue #37). Clients that already parse OpenAI error
+/// frames (including our own `scripts/verify_bench.py`) surface it as an error
+/// instead of a short answer.
+pub fn sse_error_frame(code: &str, message: &str) -> bytes::Bytes {
+    let payload = serde_json::json!({
+        "error": { "message": message, "type": "upstream_error", "code": code }
+    });
+    bytes::Bytes::from(format!("data: {payload}\n\n"))
+}
+
 #[derive(Debug, Clone, Default)]
 struct EndpointCircuitState {
     consecutive_failures: u32,
@@ -2974,5 +2988,46 @@ mod sse_decode_tracker_tests {
         tracker.feed(b"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"NYC\\\"}\"}}]}}]}\n\n");
         // 3 token frames total => 2 decode tokens after first token
         assert_eq!(tracker.decode_tokens(), 2);
+    }
+}
+
+#[cfg(test)]
+mod sse_error_frame_tests {
+    use super::*;
+
+    #[test]
+    fn frame_is_valid_openai_sse_without_done() {
+        let frame = sse_error_frame("upstream_stream_timeout", "upstream stalled");
+        let text = std::str::from_utf8(&frame).expect("utf8");
+        assert!(text.starts_with("data: "), "{text}");
+        assert!(
+            text.ends_with("\n\n"),
+            "SSE frames must end with a blank line"
+        );
+        assert!(
+            !text.contains("[DONE]"),
+            "an error frame must not claim the stream finished"
+        );
+        let payload = text.trim().strip_prefix("data: ").unwrap();
+        let v: serde_json::Value = serde_json::from_str(payload).expect("json payload");
+        assert_eq!(v["error"]["code"], "upstream_stream_timeout");
+        assert_eq!(v["error"]["message"], "upstream stalled");
+        assert_eq!(
+            v["error"]["type"], "upstream_error",
+            "clients switch on error.type"
+        );
+    }
+
+    #[test]
+    fn frame_is_detected_by_the_stream_scanner_path() {
+        // verify_bench.py and other clients treat a frame carrying `error` as a
+        // failure; make sure the payload we emit actually carries that key.
+        let frame = sse_error_frame("upstream_stream_error", "boom");
+        let text = std::str::from_utf8(&frame).unwrap();
+        let payload = text.trim().strip_prefix("data: ").unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(payload)
+            .unwrap()
+            .get("error")
+            .is_some());
     }
 }
