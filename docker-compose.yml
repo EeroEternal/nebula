@@ -8,7 +8,9 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: nebula
     ports:
-      - "5432:5432"
+      # Overridable: hosts commonly already run a postgres on 5432, which made the
+      # smoke gate unrunnable there.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
