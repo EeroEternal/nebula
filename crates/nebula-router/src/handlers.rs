@@ -70,6 +70,16 @@ fn copy_response_headers(src: &ReqwestHeaderMap, dst: &mut Response) {
     }
 }
 
+/// Upstream body state after the pre-first-byte gate.
+enum UpstreamBody {
+    /// SSE whose first chunk has already been read (nothing sent to the client yet).
+    Streamed {
+        rest: std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>>,
+    },
+    /// Non-SSE response, untouched (the body is read by the caller).
+    Whole(reqwest::Response),
+}
+
 pub async fn proxy_chat_completions(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -157,8 +167,15 @@ pub async fn proxy_chat_completions(
     let mut attempt: u32 = 0;
     let max_attempts = st.retry_max.saturating_add(1).max(1);
     let mut excluded_endpoint: Option<(String, u32)> = None;
+    // Pre-first-byte commitment (issue #42): the client must not see a status before
+    // the first chunk, so a stalling replica is retryable instead of merely reportable.
+    // Per attempt: first-byte budget; across attempts: this ceiling, or a broken
+    // cluster multiplies latency by the attempt count.
+    let first_byte_budget = nebula_common::first_byte_timeout();
+    let commit_deadline = std::time::Instant::now() + nebula_common::first_byte_total_budget();
+    let mut retried_before_first_byte = 0u32;
 
-    let (_selected_ep, resp) = loop {
+    let (_selected_ep, status, resp_headers, body) = loop {
         let ep = match (plan_version, excluded_endpoint.as_ref()) {
             (Some(pv), Some((exclude_model_uid, exclude_replica_id))) => {
                 st.router.route_with_plan_version_excluding(
@@ -249,16 +266,114 @@ pub async fn proxy_chat_completions(
                             .await;
                         continue;
                     }
-                } else if attempt > 0 {
-                    st.metrics
-                        .retry_success_total
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
 
-                st.router
-                    .record_endpoint_success(&ep.model_uid, ep.replica_id);
+                let status =
+                    StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                let resp_headers = resp.headers().clone();
+                let is_sse = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok())
+                    .map(|s: &str| s.contains("text/event-stream"))
+                    .unwrap_or(false);
 
-                break (ep, resp);
+                if !is_sse {
+                    st.router
+                        .record_endpoint_success(&ep.model_uid, ep.replica_id);
+                    if attempt > 0 {
+                        st.metrics
+                            .retry_success_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    break (ep, status, resp_headers, UpstreamBody::Whole(resp));
+                }
+
+                // SSE: nothing has been sent to the client yet. Wait for the first byte
+                // before committing a status; a silent replica is retryable.
+                let remaining =
+                    commit_deadline.saturating_duration_since(std::time::Instant::now());
+                let budget = match first_byte_budget {
+                    Some(b) => b.min(remaining),
+                    None => remaining,
+                };
+                let first = if budget.is_zero() {
+                    None
+                } else {
+                    nebula_router::first_byte::await_first_chunk(resp.bytes_stream(), budget).await
+                };
+                match first {
+                    // `rest` replays `head` first, so no byte is lost.
+                    Some((_head, rest)) => {
+                        st.router
+                            .record_endpoint_success(&ep.model_uid, ep.replica_id);
+                        let ttft = request_start.elapsed().as_secs_f64();
+                        st.metrics.observe_ttft(&model_uid, ttft);
+                        st.dual_write.emit_ttft("nebula_router", &model_uid, ttft);
+                        if retried_before_first_byte > 0 {
+                            st.metrics
+                                .first_byte_retry_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            st.metrics
+                                .retry_success_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        break (
+                            ep,
+                            status,
+                            resp_headers,
+                            UpstreamBody::Streamed {
+                                rest: Box::pin(rest),
+                            },
+                        );
+                    }
+                    None => {
+                        st.router
+                            .record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                        st.metrics.record_upstream_error("first_byte_timeout");
+                        let budget_left = std::time::Instant::now() < commit_deadline;
+                        if attempt + 1 < max_attempts && budget_left {
+                            attempt += 1;
+                            retried_before_first_byte += 1;
+                            excluded_endpoint = Some((ep.model_uid.clone(), ep.replica_id));
+                            st.metrics
+                                .retry_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!(
+                                model_uid = %ep.model_uid,
+                                replica_id = ep.replica_id,
+                                attempt,
+                                "no first byte before the deadline; retrying another replica"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                st.retry_backoff_ms,
+                            ))
+                            .await;
+                            continue;
+                        }
+                        st.metrics.record_model_status(&model_uid, 503);
+                        let e2e = request_start.elapsed().as_secs_f64();
+                        st.metrics.observe_e2e_latency(&model_uid, e2e);
+                        st.dual_write.emit_request_outcome(
+                            "nebula_router",
+                            Some(&model_uid),
+                            503,
+                            Some(e2e),
+                            false,
+                        );
+                        tracing::error!(
+                            model_uid = %model_uid,
+                            attempt,
+                            "no replica produced a first byte within the budget"
+                        );
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [(reqwest::header::RETRY_AFTER.as_str(), "1")],
+                            "upstream produced no first byte",
+                        )
+                            .into_response();
+                    }
+                }
             }
             Err(e) => {
                 st.router
@@ -291,21 +406,13 @@ pub async fn proxy_chat_completions(
         }
     };
 
-    let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let resp_headers = resp.headers().clone();
-    let is_sse = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v: &reqwest::header::HeaderValue| v.to_str().ok())
-        .map(|s: &str| s.contains("text/event-stream"))
-        .unwrap_or(false);
-
-    if is_sse {
-        let mut upstream = resp.bytes_stream();
+    if let UpstreamBody::Streamed { rest } = body {
+        let mut upstream = rest;
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(64);
         let stream_idle = nebula_common::stream_idle_timeout();
-        let mut chunk_deadline =
-            nebula_common::ChunkDeadline::new(nebula_common::first_byte_timeout(), stream_idle);
+        // The first byte already arrived (and TTFT is recorded above), so every
+        // remaining chunk gets the idle budget.
+        let mut chunk_deadline = nebula_common::ChunkDeadline::new(None, stream_idle);
         let metrics = st.metrics.clone();
         let dual = st.dual_write.clone();
         let router_for_stream = st.router.clone();
@@ -316,7 +423,6 @@ pub async fn proxy_chat_completions(
         let status_code = status.as_u16();
         let request_id_for_task = request_id.clone();
         tokio::spawn(async move {
-            let mut first_chunk = true;
             let mut decode_tracker = nebula_router::SseDecodeTracker::default();
             let mut aborted = false;
             let mut tool_pause_marked = false;
@@ -331,12 +437,6 @@ pub async fn proxy_chat_completions(
                     item = tokio::time::timeout(chunk_deadline.next_deadline().0, upstream.next()) => {
                         match item {
                             Ok(Some(Ok(b))) => {
-                                if first_chunk {
-                                    first_chunk = false;
-                                    let ttft = request_start.elapsed().as_secs_f64();
-                                    metrics.observe_ttft(&model_uid_for_stream, ttft);
-                                    dual.emit_ttft("nebula_router", &model_uid_for_stream, ttft);
-                                }
                                 decode_tracker.feed(&b);
                                 if !tool_pause_marked {
                                     if let Some(ref sid) = session_for_stream {
@@ -367,7 +467,6 @@ pub async fn proxy_chat_completions(
                                 tracing::warn!(
                                     model_uid = %model_uid_for_stream,
                                     replica_id = replica_for_stream,
-                                    first_chunk,
                                     error = %e,
                                     "router upstream stream error; ending stream early"
                                 );
@@ -383,7 +482,6 @@ pub async fn proxy_chat_completions(
                             Err(_) => {
                                 tracing::warn!(
                                     model_uid = %model_uid_for_stream,
-                                    first_chunk,
                                     idle_ms = stream_idle.as_millis() as u64,
                                     "router upstream SSE deadline exceeded; ending stream"
                                 );
@@ -447,6 +545,10 @@ pub async fn proxy_chat_completions(
         return out;
     }
 
+    let resp = match body {
+        UpstreamBody::Whole(resp) => resp,
+        UpstreamBody::Streamed { .. } => unreachable!("streamed body handled above"),
+    };
     let bytes = match tokio::time::timeout(nebula_common::stream_idle_timeout(), resp.bytes()).await
     {
         Ok(Ok(b)) => b,

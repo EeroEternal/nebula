@@ -261,7 +261,7 @@ stage = warm → decode 池（便宜地 retrieve）
 4. `nebula_router_upstream_stream_error_total` 为 0：截断流是"上游 EOF 无 `[DONE]`"，router 侧无错误信号 —— 该静默分支已由同批 instrumentation 补上日志与计数。
 5. **低并发的凹陷是 1:1 池配比的性质，不是缺陷**：同一栈上 `pd_split` 的 rps 在 C=1/2/4/8 为 1.59 / **0.72** / 5.77 / 10.66，C=2 反而低于 C=1；而 `replicated` 在同并发下单调上升（1.00 / 3.48 / 6.89）。原因是两条并发请求落在"一 Prefill + 一 Decode"的 1:1 配比上互相排队（单 Prefill 副本串行处理 ~2000 token 的 prefill，另一条在等 KV），C=4 以上才够并行填满两个池。这正是池配比需要按并发调的理由。
 
-> 后续设计项：流式请求目前在**拿到上游响应头时**就向客户端提交 `200`，因此首字节前失败只能"报错"不能"换副本重试"。改为"先缓冲首块再决定 `200`/`503`"的方案与验收标准见 [#42](https://github.com/EeroEternal/nebula/issues/42)。
+> 首字节前状态承诺：`nebula-router` 现在**先读首块再提交 `200`**，首字节前失败会换副本重试（超过跨尝试总预算才 `503 + Retry-After`），不再把"已提交的 200"变成截断流。见 [`first_byte.rs`](../../crates/nebula-router/src/first_byte.rs) 与 [#42](https://github.com/EeroEternal/nebula/issues/42)；embedded 模式（gateway 自己做 endpoint 选择）仍待接入同一机制。
 
 ### 触点清单（第 3 步实现，评审后仍估 2-3 会话）
 

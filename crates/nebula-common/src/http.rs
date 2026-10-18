@@ -76,6 +76,25 @@ pub fn first_byte_timeout() -> Option<Duration> {
     }
 }
 
+/// Default `NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS`: total wall-clock budget a single
+/// client request may spend waiting for a first byte across *all* replica attempts.
+///
+/// Per-attempt retries without a shared budget multiply latency by the attempt count,
+/// so the two knobs have to be read together: per attempt `first_byte_timeout()`,
+/// across attempts this budget.
+pub const DEFAULT_FIRST_BYTE_TOTAL_BUDGET_MS: u64 = 90_000;
+
+/// Total first-byte budget across retries (`NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS`).
+pub fn first_byte_total_budget() -> Duration {
+    Duration::from_millis(
+        std::env::var("NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(DEFAULT_FIRST_BYTE_TOTAL_BUDGET_MS),
+    )
+}
+
 /// Per-chunk deadline for a streamed response: the first-byte budget for the first
 /// chunk, then the idle budget for every later one.
 ///
@@ -210,6 +229,24 @@ mod tests {
         let (d, first) = dl.next_deadline();
         assert!(first);
         assert_eq!(d, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn first_byte_total_budget_default_and_override() {
+        std::env::remove_var("NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS");
+        assert_eq!(
+            first_byte_total_budget(),
+            Duration::from_millis(DEFAULT_FIRST_BYTE_TOTAL_BUDGET_MS)
+        );
+        std::env::set_var("NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS", "0");
+        assert_eq!(
+            first_byte_total_budget(),
+            Duration::from_millis(DEFAULT_FIRST_BYTE_TOTAL_BUDGET_MS),
+            "0 must not remove the cap: unbounded retry latency is the bug, not the fix"
+        );
+        std::env::set_var("NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS", "5000");
+        assert_eq!(first_byte_total_budget(), Duration::from_millis(5000));
+        std::env::remove_var("NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS");
     }
 
     #[test]

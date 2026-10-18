@@ -117,6 +117,9 @@ pub struct Metrics {
     pub requests_aborted_total: AtomicU64,
     /// Streams that ended with an upstream error before `[DONE]` (truncated 200).
     pub upstream_stream_error_total: AtomicU64,
+    /// Requests that were retried on another replica because no first byte arrived
+    /// within the budget (pre-first-byte commitment, issue #42).
+    pub first_byte_retry_total: AtomicU64,
 
     /// Per-model E2E latency histogram (seconds).
     pub e2e_latency: DashMap<String, Histogram>,
@@ -255,6 +258,12 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
          # TYPE nebula_router_requests_aborted_total counter\n\
          nebula_router_requests_aborted_total {}\n",
         st.metrics.requests_aborted_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_first_byte_retry_total Requests retried on another replica because no first byte arrived in time.\n\
+         # TYPE nebula_router_first_byte_retry_total counter\n\
+         nebula_router_first_byte_retry_total {}\n",
+        st.metrics.first_byte_retry_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_upstream_stream_error_total Streams ended by an upstream error before [DONE] (client sees a truncated 200).\n\

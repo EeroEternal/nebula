@@ -16,6 +16,9 @@ GATEWAY="${GATEWAY:-http://127.0.0.1:8081}"
 ROUTER="${ROUTER:-http://127.0.0.1:18081}"
 BFF="${BFF:-http://127.0.0.1:18090}"
 RUN_CANCEL_SSE="${RUN_CANCEL_SSE:-1}"
+# Pre-first-byte retry gate (issue #42): a second mock that stalls before any frame.
+RETRY_MODEL="${RETRY_MODEL:-ci_retry_model}"
+MOCK_STALL_PORT="${MOCK_STALL_PORT:-18998}"
 CURL_MAX="${CURL_MAX:-30}"
 
 PIDS=()
@@ -118,6 +121,13 @@ MOCK_URL="http://127.0.0.1:${MOCK_PORT}"
 wait_http "$MOCK_URL/health" "mock engine" 30
 ok "mock engine ready"
 
+# Same engine, but it accepts the request and never sends a frame.
+MOCK_STALL_FIRST=1 python3 "$ROOT/scripts/mock_openai_engine.py" "$MOCK_STALL_PORT" 127.0.0.1 &
+PIDS+=("$!")
+MOCK_STALL_URL="http://127.0.0.1:${MOCK_STALL_PORT}"
+wait_http "$MOCK_STALL_URL/health" "stalling mock engine" 30
+ok "stalling mock engine ready"
+
 echo "--- seed etcd ---"
 TS="$(now_ms)"
 SPEC=$(cat <<EOF
@@ -182,6 +192,28 @@ done
 comp=$(curl -sf --max-time "$CURL_MAX" -X POST "$GATEWAY/v1/completions" -H "Content-Type: application/json" \
   -d "{\"model\":\"$SERVED_NAME\",\"prompt\":\"hi\",\"max_tokens\":8}" || true)
 echo "$comp" | grep -q mock && ok "completions" || bad "completions: $(echo "$comp" | head -c 120)"
+
+echo "--- pre-first-byte retry (issue #42) ---"
+# replica 0 accepts and never answers, replica 1 is healthy: the client must see a
+# normal 200 stream (retried), not a committed-then-truncated response.
+retry_spec=$(cat <<EOF
+{"model_uid":"$RETRY_MODEL","model_name":"$SERVED_NAME","model_source":"local","engine_type":"vllm","config":{"served_model_name":"$SERVED_NAME"},"created_at_ms":$TS,"updated_at_ms":$TS}
+EOF
+)
+etcdctl_cmd put "/models/$RETRY_MODEL/spec" "$retry_spec" >/dev/null
+for pair in "0:$MOCK_STALL_URL" "1:$MOCK_URL"; do
+  rid=${pair%%:*}; base=${pair#*:}
+  etcdctl_cmd put "/endpoints/$RETRY_MODEL/$rid" "{\"model_uid\":\"$RETRY_MODEL\",\"replica_id\":$rid,\"plan_version\":1,\"node_id\":\"ci-node\",\"endpoint_kind\":\"native_http\",\"api_flavor\":\"openai\",\"status\":\"ready\",\"last_heartbeat_ms\":$TS,\"base_url\":\"$base\"}" >/dev/null
+done
+sleep 2
+retry_out=$(curl -sN --max-time 20 -X POST "$ROUTER/v1/chat/completions" -H "Content-Type: application/json" \
+  -d "{\"model\":\"$RETRY_MODEL\",\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" || true)
+echo "$retry_out" | grep -q 'mock' && ok "stalled-before-first-byte replica retried to a healthy one" \
+  || bad "pre-first-byte retry: $(echo "$retry_out" | tail -c 120)"
+echo "$retry_out" | grep -q '\[DONE\]' && ok "retried stream completed with [DONE]" \
+  || bad "retried stream did not complete"
+curl -s "$ROUTER/metrics" | grep -qE '^nebula_router_first_byte_retry_total [1-9]' \
+  && ok "first_byte_retry_total counted the retry" || bad "first_byte_retry_total not incremented"
 
 echo "--- stalled upstream stream (issue #37) ---"
 # The mock sends two frames then never a [DONE]; the router's idle deadline has to end

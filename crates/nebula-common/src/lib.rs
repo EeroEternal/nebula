@@ -105,6 +105,7 @@ pub use args::{parse_etcd_endpoints, CommonArgs};
 pub use dual_write::DualWriteEmitter;
 pub use http::{
     audit_http_client, build_http_client, control_plane_http_client, first_byte_timeout,
-    health_http_client, proxy_http_client, stream_idle_timeout, ChunkDeadline, HttpClientOptions,
+    first_byte_total_budget, health_http_client, proxy_http_client, stream_idle_timeout,
+    ChunkDeadline, HttpClientOptions, DEFAULT_FIRST_BYTE_TOTAL_BUDGET_MS,
     DEFAULT_PROXY_FIRST_BYTE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 };
