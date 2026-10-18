@@ -15,6 +15,8 @@ SERVED_NAME="${SERVED_NAME:-ci-mock-model}"
 GATEWAY="${GATEWAY:-http://127.0.0.1:8081}"
 ROUTER="${ROUTER:-http://127.0.0.1:18081}"
 BFF="${BFF:-http://127.0.0.1:18090}"
+POSTGRES_PORT="${POSTGRES_PORT:-5432}"   # override when the host already runs postgres on 5432
+BFF_DB_URL="${BFF_DATABASE_URL:-postgresql://postgres:postgres@127.0.0.1:${POSTGRES_PORT}/nebula}"
 RUN_CANCEL_SSE="${RUN_CANCEL_SSE:-1}"
 # Pre-first-byte retry gate (issue #42): a second mock that stalls before any frame.
 RETRY_MODEL="${RETRY_MODEL:-ci_retry_model}"
@@ -173,7 +175,7 @@ env OBSERVE_AUTH_MODE=internal "$BIN/nebula-bff" \
   --listen-addr 127.0.0.1:18090 \
   --etcd-endpoint "$ETCD_ENDPOINT" \
   --router-url "$ROUTER" \
-  --database-url postgresql://postgres:postgres@127.0.0.1:5432/nebula \
+  --database-url "$BFF_DB_URL" \
   >"$ROOT/logs/ci-bff.log" 2>&1 &
 PIDS+=("$!")
 
@@ -211,9 +213,13 @@ etcdctl_cmd put "/stats/$RETRY_MODEL/1" "{\"model_uid\":\"$RETRY_MODEL\",\"repli
 sleep 2
 retry_out=$(curl -sN --max-time 20 -X POST "$ROUTER/v1/chat/completions" -H "Content-Type: application/json" \
   -d "{\"model\":\"$RETRY_MODEL\",\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" || true)
-echo "$retry_out" | grep -q 'mock' && ok "stalled-before-first-byte replica retried to a healthy one" \
-  || bad "pre-first-byte retry: $(echo "$retry_out" | tail -c 120)"
-echo "$retry_out" | grep -q '\[DONE\]' && ok "retried stream completed with [DONE]" \
+# Grep a file, not a pipe: the payload is ~40 KB, so `grep -q` exits on the first
+# match, `echo` takes SIGPIPE, and `set -o pipefail` turns a *successful* match into a
+# failing pipeline (engineering.md §14).
+printf '%s' "$retry_out" > "$ROOT/logs/ci-retry-stream.out"
+grep -q 'mock' "$ROOT/logs/ci-retry-stream.out" && ok "stalled-before-first-byte replica retried to a healthy one" \
+  || bad "pre-first-byte retry: $(tail -c 120 "$ROOT/logs/ci-retry-stream.out")"
+grep -q '\[DONE\]' "$ROOT/logs/ci-retry-stream.out" && ok "retried stream completed with [DONE]" \
   || bad "retried stream did not complete"
 curl -s "$ROUTER/metrics" | grep -qE '^nebula_router_first_byte_retry_total [1-9]' \
   && ok "first_byte_retry_total counted the retry" || bad "first_byte_retry_total not incremented"
@@ -236,8 +242,9 @@ if wait_http "$EMBEDDED_GATEWAY/healthz" "embedded gateway" 20; then
   sleep 2
   emb_out=$(curl -sN --max-time 20 -X POST "$EMBEDDED_GATEWAY/v1/chat/completions" -H "Content-Type: application/json" \
     -d "{\"model\":\"$RETRY_MODEL\",\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" || true)
-  echo "$emb_out" | grep -q 'mock' && ok "embedded: stalled replica retried, client streamed normally" \
-    || bad "embedded pre-first-byte retry: $(echo "$emb_out" | tail -c 120)"
+  printf '%s' "$emb_out" > "$ROOT/logs/ci-retry-embedded.out"
+  grep -q 'mock' "$ROOT/logs/ci-retry-embedded.out" && ok "embedded: stalled replica retried, client streamed normally" \
+    || bad "embedded pre-first-byte retry: $(tail -c 120 "$ROOT/logs/ci-retry-embedded.out")"
   curl -s "$EMBEDDED_GATEWAY/metrics" | grep -qE '^nebula_gateway_first_byte_retry_total [1-9]' \
     && ok "embedded: first_byte_retry_total counted the retry" || bad "embedded: retry counter did not move"
 else
@@ -252,12 +259,13 @@ stall_start=$SECONDS
 stall_body=$(curl -sN --max-time 15 -X POST "$ROUTER/v1/chat/completions" -H "Content-Type: application/json" \
   -d "{\"model\":\"$SERVED_NAME\",\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"__stall__\"}]}" || true)
 stall_secs=$((SECONDS - stall_start))
-if echo "$stall_body" | grep -q '"error"'; then
+printf '%s' "$stall_body" > "$ROOT/logs/ci-stall-stream.out"
+if grep -q '"error"' "$ROOT/logs/ci-stall-stream.out"; then
   ok "stalled stream ends with an error frame"
 else
-  bad "stalled stream ended without an error frame: $(echo "$stall_body" | tail -c 120)"
+  bad "stalled stream ended without an error frame: $(tail -c 120 "$ROOT/logs/ci-stall-stream.out")"
 fi
-if echo "$stall_body" | grep -q '\[DONE\]'; then
+if grep -q '\[DONE\]' "$ROOT/logs/ci-stall-stream.out"; then
   bad "stalled stream must not claim completion with [DONE]"
 else
   ok "stalled stream does not fake [DONE]"
