@@ -19,61 +19,61 @@
 
   <!-- ==================== Left Boundary Annotation Bar (Vertical Planes) ==================== -->
   <g>
-    <!-- Plane 1: Fine-Grained Compute Abstraction -->
+    <!-- Plane 1: L4 -->
     <line x1="138" y1="48" x2="138" y2="122" stroke="#64748B" stroke-width="1.5"/>
     <circle cx="138" cy="48" r="3" fill="#64748B"/>
     <circle cx="138" cy="122" r="3" fill="#64748B"/>
     <text x="126" y="80" text-anchor="end" font-size="11" font-weight="700" fill="#475569">L4 · 负载计算分流</text>
-    <text x="126" y="96" text-anchor="end" font-size="9.5" font-weight="500" fill="#64748B">Workload &amp; Sub-Stage</text>
+    <text x="126" y="96" text-anchor="end" font-size="9.5" font-weight="500" fill="#64748B">细粒度子阶段抽象</text>
 
-    <!-- Plane 2: Stage Disaggregation & State Invariants (Focal) -->
+    <!-- Plane 2: L3 (Focal) -->
     <line x1="138" y1="168" x2="138" y2="348" stroke="#2563EB" stroke-width="2"/>
     <circle cx="138" cy="168" r="3" fill="#2563EB"/>
     <circle cx="138" cy="348" r="3" fill="#2563EB"/>
     <text x="126" y="252" text-anchor="end" font-size="11" font-weight="700" fill="#1D4ED8">L3 · 状态与读写解耦</text>
-    <text x="126" y="268" text-anchor="end" font-size="9.5" font-weight="600" fill="#2563EB">Stage &amp; KV Invariants</text>
+    <text x="126" y="268" text-anchor="end" font-size="9.5" font-weight="600" fill="#2563EB">全局寻址与分池协同</text>
 
-    <!-- Plane 3: Declarative Contracts + Heterogeneous Fleet -->
+    <!-- Plane 3: L2 + L1 -->
     <line x1="138" y1="396" x2="138" y2="626" stroke="#059669" stroke-width="1.5"/>
     <circle cx="138" cy="396" r="3" fill="#059669"/>
     <circle cx="138" cy="626" r="3" fill="#059669"/>
     <text x="126" y="430" text-anchor="end" font-size="11" font-weight="700" fill="#0F172A">L2 · 硬件契约与存储</text>
-    <text x="126" y="446" text-anchor="end" font-size="9.5" font-weight="500" fill="#64748B">Contracts &amp; Tiered KV</text>
+    <text x="126" y="446" text-anchor="end" font-size="9.5" font-weight="500" fill="#64748B">能力准入与分级缓存</text>
 
     <text x="126" y="582" text-anchor="end" font-size="11" font-weight="700" fill="#065F46">L1 · 异构池与错峰经营</text>
-    <text x="126" y="598" text-anchor="end" font-size="9.5" font-weight="600" fill="#059669">NPU + GPU + Host Tier</text>
+    <text x="126" y="598" text-anchor="end" font-size="9.5" font-weight="600" fill="#059669">国产 NPU + GPU + 主存</text>
   </g>
 
-  <!-- ==================== LAYER 4: WORKLOAD & SUB-STAGE ABSTRACTION ==================== -->
-  <text x="576" y="30" text-anchor="middle" font-size="11" font-weight="700" fill="#64748B" letter-spacing="0.06em">LAYER 4 · WORKLOAD DECOMPOSITION &amp; SUB-STAGE ABSTRACTION (客户负载形态精准分流)</text>
+  <!-- ==================== LAYER 4 ==================== -->
+  <text x="576" y="30" text-anchor="middle" font-size="11" font-weight="700" fill="#64748B" letter-spacing="0.06em">第四层（L4）· 客户负载计算分流与细粒度子阶段抽象</text>
 
   <g filter="url(#shadow)">
     <!-- Card 1 -->
     <rect x="160" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="176" cy="65" r="4" fill="#3B82F6"/>
     <text x="186" y="69" font-size="12.5" font-weight="700" fill="#1E293B">单次前向判别计算</text>
-    <text x="174" y="88" font-size="10.5" fill="#475569">EngineCapability.score_api</text>
+    <text x="174" y="88" font-size="10.5" fill="#475569">/v1/score 判别打分接口</text>
     <text x="174" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">单步前向直出概率 · 定向卸载算力池</text>
 
     <!-- Card 2 -->
     <rect x="372" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="388" cy="65" r="4" fill="#3B82F6"/>
     <text x="398" y="69" font-size="12.5" font-weight="700" fill="#1E293B">短请求就近直通旁路</text>
-    <text x="386" y="88" font-size="10.5" fill="#475569">Short-Prompt Bypass (&lt;256)</text>
+    <text x="386" y="88" font-size="10.5" fill="#475569">输入阈值 &lt; 256 Tokens</text>
     <text x="386" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">解码池空闲时原地处理 · 免跨网流转</text>
 
     <!-- Card 3 -->
     <rect x="584" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="600" cy="65" r="4" fill="#3B82F6"/>
     <text x="610" y="69" font-size="12.5" font-weight="700" fill="#1E293B">多步会话挂起续算</text>
-    <text x="598" y="88" font-size="10.5" fill="#475569">Tool-Pause Continuation</text>
+    <text x="598" y="88" font-size="10.5" fill="#475569">外部工具调用单次租约</text>
     <text x="598" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">工具等待期锁卡保活 · 杜绝历史重算</text>
 
     <!-- Card 4 -->
     <rect x="796" y="44" width="196" height="76" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="812" cy="65" r="4" fill="#3B82F6"/>
     <text x="822" y="69" font-size="12.5" font-weight="700" fill="#1E293B">并行草稿投机验证</text>
-    <text x="810" y="88" font-size="10.5" fill="#475569">Speculative · ngram / mtp</text>
+    <text x="810" y="88" font-size="10.5" fill="#475569">ngram / mtp 轻量草稿核验</text>
     <text x="810" y="104" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#64748B">单次权重访存吐多词 · 以算力补带宽</text>
   </g>
 
@@ -85,45 +85,45 @@
     <path d="M 894 120 C 894 144, 772 142, 722 164"/>
   </g>
   <rect x="466" y="134" width="220" height="18" rx="4" fill="#F1F5F9" stroke="#CBD5E1" stroke-width="0.8"/>
-  <text x="576" y="146" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#475569">Sub-Stage Classification + Block Keys</text>
+  <text x="576" y="146" text-anchor="middle" font-size="9.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#475569">按计算形态分流 + 16-Token 块编号</text>
 
-  <!-- ==================== LAYER 3: STAGE DISAGGREGATION & STATE INVARIANTS (FOCAL BOX) ==================== -->
+  <!-- ==================== LAYER 3 (FOCAL BOX) ==================== -->
   <g filter="url(#shadow)">
     <rect x="160" y="168" width="832" height="180" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="2"/>
   </g>
 
   <!-- L3 Header & Focal Pill -->
-  <text x="576" y="194" text-anchor="middle" font-size="15.5" font-weight="700" fill="#1E3A8A">NEBULA HETEROGENEOUS CONTROL PLANE (全局状态寻址与读写分离控制面)</text>
+  <text x="576" y="194" text-anchor="middle" font-size="15.5" font-weight="700" fill="#1E3A8A">第三层（L3）· 全局状态寻址与读写分离控制面</text>
   <rect x="336" y="203" width="480" height="20" rx="10" fill="#DBEAFE" stroke="#93C5FD" stroke-width="1"/>
-  <text x="576" y="217" text-anchor="middle" font-size="11" font-weight="600" fill="#1D4ED8">Contracts &amp; Invariants over Tight Coupling · Zero Engine Intrusion (Zone C)</text>
+  <text x="576" y="217" text-anchor="middle" font-size="11" font-weight="600" fill="#1D4ED8">以声明式契约与前置约定替代运行时强耦合 · 零底层引擎侵入</text>
 
   <!-- L3 Internal Sub-blocks (4 Horizontal Blocks inside Focal Box) -->
   <g text-anchor="middle">
-    <!-- Block A: Deterministic Block Hash -->
+    <!-- Block A -->
     <rect x="176" y="234" width="188" height="98" rx="6" fill="#FFFFFF" stroke="#BFDBFE" stroke-width="1.2"/>
     <text x="270" y="256" font-size="12" font-weight="700" fill="#1E293B">全局统一缓存寻址</text>
     <text x="270" y="274" font-size="10.5" fill="#1D4ED8" font-weight="600">NEBULA_KV_HASH_SEED</text>
-    <text x="270" y="294" font-size="10" fill="#475569">16-token 块编号全栈标准统一</text>
+    <text x="270" y="294" font-size="10" fill="#475569">16-Token 块编号全栈标准统一</text>
     <text x="270" y="310" font-size="10" fill="#64748B">免问询直接定位缓存卡 · 消除重复算</text>
 
-    <!-- Block B: Global Index & Joint Cost Scoring -->
+    <!-- Block B -->
     <rect x="380" y="234" width="188" height="98" rx="6" fill="#FFFFFF" stroke="#BFDBFE" stroke-width="1.2"/>
     <text x="474" y="256" font-size="12" font-weight="700" fill="#1E293B">多卡缓存地图与防拥塞</text>
-    <text x="474" y="274" font-size="10.5" fill="#1D4ED8" font-weight="600">nebula-indexd · Multi-Owner</text>
+    <text x="474" y="274" font-size="10.5" fill="#1D4ED8" font-weight="600">nebula-indexd 全局索引</text>
     <text x="474" y="294" font-size="10" fill="#475569">综合权衡省下算力与当前排队水位</text>
     <text x="474" y="310" font-size="10" fill="#64748B">多卡显存拼成大池 · 热点自动分流</text>
 
-    <!-- Block C: PD Role Split (Highlighted Sub-block) -->
+    <!-- Block C (Highlighted Sub-block) -->
     <rect x="584" y="234" width="188" height="98" rx="6" fill="#FFFFFF" stroke="#60A5FA" stroke-width="1.6"/>
     <text x="678" y="256" font-size="12" font-weight="700" fill="#1D4ED8">读写分离异构分池编排</text>
-    <text x="678" y="274" font-size="10.5" fill="#2563EB" font-weight="600">pd_split · Prefill ↔ Decode</text>
+    <text x="678" y="274" font-size="10.5" fill="#2563EB" font-weight="600">pd_split（Prefill ↔ Decode）</text>
     <text x="678" y="294" font-size="10" fill="#475569">算力卡专职读长文 · 带宽卡专职吐字</text>
-    <text x="678" y="310" font-size="10" fill="#64748B">消除长文阻塞 · 首字延迟 p99 -21%</text>
+    <text x="678" y="310" font-size="10" fill="#64748B">消除长文阻塞 · 首字延迟 p99 降 21%</text>
 
-    <!-- Block D: Hint-Only & Idempotent Recompute -->
+    <!-- Block D -->
     <rect x="788" y="234" width="188" height="98" rx="6" fill="#FFFFFF" stroke="#BFDBFE" stroke-width="1.2"/>
     <text x="882" y="256" font-size="12" font-weight="700" fill="#1E293B">无损降级重算兜底</text>
-    <text x="882" y="274" font-size="10.5" fill="#1D4ED8" font-weight="600">Hint-Only &amp; Recompute</text>
+    <text x="882" y="274" font-size="10.5" fill="#1D4ED8" font-weight="600">缓存仅作加速提示</text>
     <text x="882" y="294" font-size="10" fill="#475569">单卡抖动或超时自动退化本地计算</text>
     <text x="882" y="310" font-size="10" fill="#64748B">屏蔽异构硬件毛刺 · 生产 100% 零报错</text>
   </g>
@@ -136,22 +136,22 @@
     <path d="M 882 348 L 894 392"/>
   </g>
   <rect x="441" y="362" width="270" height="18" rx="4" fill="#DBEAFE"/>
-  <text x="576" y="374" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">Declarative Hardware Contracts &amp; lm:// TCP</text>
+  <text x="576" y="374" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#1D4ED8">声明式硬件契约映射 + lm:// 标准 TCP 传输</text>
 
-  <!-- ==================== LAYER 2: HARDWARE CONTRACTS & TIERED KV MEMORY ==================== -->
+  <!-- ==================== LAYER 2 ==================== -->
   <g filter="url(#shadow)">
     <!-- Roofline Selection Contract -->
     <rect x="160" y="396" width="196" height="80" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="176" cy="417" r="4" fill="#10B981"/>
     <text x="186" y="421" font-size="12.5" font-weight="700" fill="#0F172A">并发拐点动态适配</text>
-    <text x="174" y="441" font-size="10.5" fill="#475569">Roofline · selection.rs</text>
+    <text x="174" y="441" font-size="10.5" fill="#475569">Roofline 算术强度选型</text>
     <text x="174" y="458" font-size="9.5" fill="#64748B">低并发配4-bit带宽池·高并发切FP8算力池</text>
 
     <!-- Capability & Compat Gates -->
     <rect x="372" y="396" width="196" height="80" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
     <circle cx="388" cy="417" r="4" fill="#10B981"/>
     <text x="398" y="421" font-size="12.5" font-weight="700" fill="#0F172A">异构准入与防呆门禁</text>
-    <text x="386" y="441" font-size="10.5" fill="#475569">HardwarePool · compat.rs</text>
+    <text x="386" y="441" font-size="10.5" fill="#475569">硬件证据与镜像白名单校验</text>
     <text x="386" y="458" font-size="9.5" fill="#64748B">上线前核验卡型/镜像 · 巡检缓存失效</text>
 
     <!-- Tiered KV Storage Offload -->
@@ -159,7 +159,7 @@
     <circle cx="600" cy="417" r="4" fill="#10B981"/>
     <text x="610" y="421" font-size="12.5" font-weight="700" fill="#0F172A">三级存储以存代算</text>
     <text x="598" y="441" font-size="10.5" fill="#475569">L0 显存 → L1 主存 → L2 闪存</text>
-    <text x="598" y="458" font-size="9.5" fill="#64748B">用廉价主存/磁盘放大10x显存 (Batch 6)</text>
+    <text x="598" y="458" font-size="9.5" fill="#64748B">用廉价主存/磁盘放大10x显存（二期）</text>
 
     <!-- Hardware-Neutral lm:// & Tenant Isolation -->
     <rect x="796" y="396" width="196" height="80" rx="7" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="1.5"/>
@@ -177,35 +177,35 @@
     <path d="M 894 476 L 894 538"/>
   </g>
   <rect x="436" y="498" width="280" height="18" rx="4" fill="#DCFCE7" stroke="#86EFAC" stroke-width="0.8"/>
-  <text x="576" y="510" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#047857">(TTFT, TPOT, KV_Usage) Surface · Fair Queueing</text>
+  <text x="576" y="510" text-anchor="middle" font-size="9.5" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#047857">(TTFT, TPOT, KV_Usage) 三维水位反馈 · 公平队列调度</text>
 
-  <!-- ==================== LAYER 1: HETEROGENEOUS SILICON POOLS & FEEDBACK SURFACE ==================== -->
+  <!-- ==================== LAYER 1 ==================== -->
   <g filter="url(#shadow)">
-    <!-- Silicon 1: Compute-Dense Prefill Pool -->
+    <!-- Silicon 1 -->
     <rect x="160" y="542" width="196" height="84" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
     <text x="258" y="564" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">高算力预填充加速池</text>
-    <text x="258" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">Compute-Bound Prefill Pool</text>
+    <text x="258" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">算力密集型（Prefill 池）</text>
     <text x="258" y="600" text-anchor="middle" font-size="9.5" fill="#065F46">昇腾 910B/910C · H800 / A800</text>
     <text x="258" y="614" text-anchor="middle" font-size="9.5" fill="#047857">批量消化长文档阅读与判别打分</text>
 
-    <!-- Silicon 2: Bandwidth-Dense Decode Pool -->
+    <!-- Silicon 2 -->
     <rect x="372" y="542" width="196" height="84" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
     <text x="470" y="564" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">高带宽流式解码池</text>
-    <text x="470" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">Bandwidth-Bound Decode Pool</text>
+    <text x="470" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">带宽密集型（Decode 池）</text>
     <text x="470" y="600" text-anchor="middle" font-size="9.5" fill="#065F46">H20 / L40S / RTX 4090 / 5090</text>
     <text x="470" y="614" text-anchor="middle" font-size="9.5" fill="#047857">承接高并发流式吐字与短请求直通</text>
 
-    <!-- Silicon 3: Host DDR5 & Local NVMe Tier -->
+    <!-- Silicon 3 -->
     <rect x="584" y="542" width="196" height="84" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
     <text x="682" y="564" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">主机内存与高速闪存池</text>
-    <text x="682" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">Host DDR5 &amp; NVMe Offload Tier</text>
+    <text x="682" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">主机分级存储池（L1 / L2）</text>
     <text x="682" y="600" text-anchor="middle" font-size="9.5" fill="#065F46">数百GB空闲DDR5 + 本地高速NVMe</text>
     <text x="682" y="614" text-anchor="middle" font-size="9.5" fill="#047857">低成本驻留多轮会话与行业知识库缓存</text>
 
-    <!-- Silicon 4: Binary Feedback Surface & Fair Queueing -->
+    <!-- Silicon 4 -->
     <rect x="796" y="542" width="196" height="84" rx="7" fill="#F0FDF4" stroke="#86EFAC" stroke-width="1.5"/>
     <text x="894" y="564" text-anchor="middle" font-size="12.5" font-weight="700" fill="#065F46">统一瓶颈度量与错峰填谷</text>
-    <text x="894" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">slo.rs · capacity.rs · queue.rs</text>
+    <text x="894" y="582" text-anchor="middle" font-size="10" font-weight="600" fill="#047857">三维体感水位与优先级队列</text>
     <text x="894" y="600" text-anchor="middle" font-size="9.5" fill="#065F46">按首字/吐字延迟精准扩缩算力或带宽</text>
     <text x="894" y="614" text-anchor="middle" font-size="9.5" fill="#047857">白天保高SLA交互 · 夜间批处理填谷</text>
   </g>
