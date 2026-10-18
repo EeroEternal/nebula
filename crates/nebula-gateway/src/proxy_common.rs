@@ -174,7 +174,7 @@ pub async fn post_router_chat(
     st: &AppState,
     prepared: &PreparedUpstream,
     chat_body: &Value,
-) -> Result<reqwest::Response, Response> {
+) -> Result<(reqwest::Response, Option<Bytes>), Response> {
     let body = Bytes::from(serde_json::to_vec(chat_body).unwrap_or_default());
     if st.router.is_some() {
         return forward_embedded(
@@ -196,7 +196,8 @@ pub async fn post_router_chat(
         reqwest::header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    post_router_path(st, &url, req_headers, body).await
+    let resp = post_router_path(st, &url, req_headers, body).await?;
+    Ok((resp, None))
 }
 
 pub async fn load_tenant(store: &dyn MetaStore, tenant_id: &str) -> anyhow::Result<Option<Tenant>> {
@@ -283,6 +284,9 @@ pub async fn forward_upstream_response(
     tenant_id: Option<&str>,
     session_id: Option<&str>,
     routed_endpoint: Option<(String, u32)>,
+    // Embedded mode: the first chunk was already read (and TTFT accounted for) by
+    // `forward_embedded`, so the status was committed only after a byte arrived.
+    prefetched_first: Option<Bytes>,
 ) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
@@ -298,7 +302,23 @@ pub async fn forward_upstream_response(
     let resp_headers = resp.headers().clone();
 
     if is_sse {
-        let mut upstream = resp.bytes_stream();
+        let first_already_seen = prefetched_first.is_some();
+        if let (Some(_head), Some(req_t0), Some((ref m, _))) = (
+            prefetched_first.as_ref(),
+            req_start,
+            routed_endpoint.as_ref(),
+        ) {
+            // The byte that let us commit 200 arrived here; TTFT is measured once.
+            st.metrics.observe_ttft(m, req_t0.elapsed().as_secs_f64());
+        }
+        let mut upstream: std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>,
+        > = match prefetched_first {
+            Some(head) => Box::pin(
+                futures_util::stream::once(async move { Ok(head) }).chain(resp.bytes_stream()),
+            ),
+            None => Box::pin(resp.bytes_stream()),
+        };
         let stream_idle = nebula_common::stream_idle_timeout();
         let mut chunk_deadline =
             nebula_common::ChunkDeadline::new(nebula_common::first_byte_timeout(), stream_idle);
@@ -314,7 +334,7 @@ pub async fn forward_upstream_response(
         tokio::spawn(async move {
             // Engine queue permit is held for the whole streamed response.
             let _permit = permit;
-            let mut first = true;
+            let mut first = !first_already_seen;
             let mut aborted = false;
             let mut tool_pause_marked = false;
             let mut tool_scanner = nebula_router::ToolCallScanner::default();
@@ -518,7 +538,7 @@ pub async fn forward_embedded(
     uri_path: &str,
     uri_query: &str,
     body_bytes: &[u8],
-) -> Result<reqwest::Response, Response> {
+) -> Result<(reqwest::Response, Option<Bytes>), Response> {
     let Some(router) = st.router.as_ref() else {
         return Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -545,6 +565,11 @@ pub async fn forward_embedded(
     let max_attempts = st.retry_max.saturating_add(1).max(1);
     let mut attempt: u32 = 0;
     let mut excluded: Option<(String, u32)> = None;
+    // Pre-first-byte commitment (issue #42): never let the client see a status before
+    // the first chunk, so a replica that accepts and then stalls is retryable.
+    let first_byte_budget = nebula_common::first_byte_timeout();
+    let commit_deadline = std::time::Instant::now() + nebula_common::first_byte_total_budget();
+    let mut retried_before_first_byte = 0u32;
 
     loop {
         let routed = match (plan_version, excluded.as_ref()) {
@@ -617,7 +642,7 @@ pub async fn forward_embedded(
             .send()
             .await
         {
-            Ok(resp) => {
+            Ok(mut resp) => {
                 if resp.status().is_server_error() {
                     router.record_endpoint_failure(&ep.model_uid, ep.replica_id);
                     st.metrics.record_upstream_error("upstream_5xx");
@@ -631,20 +656,95 @@ pub async fn forward_embedded(
                             .await;
                         continue;
                     }
-                } else {
-                    router.record_endpoint_success(&ep.model_uid, ep.replica_id);
-                    if attempt > 0 {
-                        st.metrics
-                            .retry_success_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    *prepared
+                        .routed_endpoint
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) =
+                        Some((ep.model_uid.clone(), ep.replica_id));
+                    return Ok((resp, None));
+                }
+
+                let is_sse = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(|v| v.contains("text/event-stream"))
+                    .unwrap_or(false);
+                let mut prefetched = None;
+                if is_sse {
+                    let remaining =
+                        commit_deadline.saturating_duration_since(std::time::Instant::now());
+                    let budget = match first_byte_budget {
+                        Some(b) => b.min(remaining),
+                        None => remaining,
+                    };
+                    let head = if budget.is_zero() {
+                        None
+                    } else {
+                        nebula_router::first_byte::first_chunk_of(&mut resp, budget).await
+                    };
+                    match head {
+                        Some(head) => {
+                            if retried_before_first_byte > 0 {
+                                st.metrics
+                                    .first_byte_retry_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                st.metrics
+                                    .retry_success_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            prefetched = Some(head);
+                        }
+                        None => {
+                            router.record_endpoint_failure(&ep.model_uid, ep.replica_id);
+                            st.metrics.record_upstream_error("first_byte_timeout");
+                            let budget_left = std::time::Instant::now() < commit_deadline;
+                            if attempt + 1 < max_attempts && budget_left {
+                                attempt += 1;
+                                retried_before_first_byte += 1;
+                                excluded = Some((ep.model_uid.clone(), ep.replica_id));
+                                st.metrics
+                                    .retry_total
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                tracing::warn!(
+                                    model_uid = %ep.model_uid,
+                                    replica_id = ep.replica_id,
+                                    attempt,
+                                    "no first byte before the deadline; retrying another replica"
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    st.retry_backoff_ms,
+                                ))
+                                .await;
+                                continue;
+                            }
+                            tracing::error!(
+                                model_uid = %model_uid,
+                                attempt,
+                                "no replica produced a first byte within the budget"
+                            );
+                            return Err((
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [(reqwest::header::RETRY_AFTER.as_str(), "1")],
+                                "upstream produced no first byte",
+                            )
+                                .into_response());
+                        }
                     }
+                }
+
+                router.record_endpoint_success(&ep.model_uid, ep.replica_id);
+                if attempt > 0 && prefetched.is_none() {
+                    st.metrics
+                        .retry_success_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 *prepared
                     .routed_endpoint
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) =
                     Some((ep.model_uid.clone(), ep.replica_id));
-                return Ok(resp);
+                return Ok((resp, prefetched));
             }
             Err(e) => {
                 router.record_endpoint_failure(&ep.model_uid, ep.replica_id);

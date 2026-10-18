@@ -205,6 +205,9 @@ for pair in "0:$MOCK_STALL_URL" "1:$MOCK_URL"; do
   rid=${pair%%:*}; base=${pair#*:}
   etcdctl_cmd put "/endpoints/$RETRY_MODEL/$rid" "{\"model_uid\":\"$RETRY_MODEL\",\"replica_id\":$rid,\"plan_version\":1,\"node_id\":\"ci-node\",\"endpoint_kind\":\"native_http\",\"api_flavor\":\"openai\",\"status\":\"ready\",\"last_heartbeat_ms\":$TS,\"base_url\":\"$base\"}" >/dev/null
 done
+TS2="$(now_ms)"
+etcdctl_cmd put "/stats/$RETRY_MODEL/0" "{\"model_uid\":\"$RETRY_MODEL\",\"replica_id\":0,\"last_updated_ms\":$TS2,\"pending_requests\":0}" >/dev/null
+etcdctl_cmd put "/stats/$RETRY_MODEL/1" "{\"model_uid\":\"$RETRY_MODEL\",\"replica_id\":1,\"last_updated_ms\":$TS2,\"pending_requests\":5}" >/dev/null
 sleep 2
 retry_out=$(curl -sN --max-time 20 -X POST "$ROUTER/v1/chat/completions" -H "Content-Type: application/json" \
   -d "{\"model\":\"$RETRY_MODEL\",\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" || true)
@@ -214,6 +217,32 @@ echo "$retry_out" | grep -q '\[DONE\]' && ok "retried stream completed with [DON
   || bad "retried stream did not complete"
 curl -s "$ROUTER/metrics" | grep -qE '^nebula_router_first_byte_retry_total [1-9]' \
   && ok "first_byte_retry_total counted the retry" || bad "first_byte_retry_total not incremented"
+
+echo "--- pre-first-byte retry, embedded mode (issue #42) ---"
+EMBEDDED_GATEWAY="${EMBEDDED_GATEWAY:-http://127.0.0.1:8082}"
+env NEBULA_AUTH_DISABLED=1 NEBULA_ROUTER_MODE=embedded \
+    NEBULA_PROXY_FIRST_BYTE_TIMEOUT_MS=1500 NEBULA_PROXY_FIRST_BYTE_TOTAL_BUDGET_MS=8000 \
+    NEBULA_PROXY_STREAM_IDLE_TIMEOUT_MS=1500 \
+    "$BIN/nebula-gateway" \
+  --listen-addr 127.0.0.1:8082 \
+  --router-url "$EMBEDDED_GATEWAY" \
+  --etcd-endpoint "$ETCD_ENDPOINT" >"$ROOT/logs/ci-gateway-embedded.log" 2>&1 &
+PIDS+=("$!")
+sleep 5
+if wait_http "$EMBEDDED_GATEWAY/healthz" "embedded gateway" 20; then
+  TS3="$(now_ms)"
+  etcdctl_cmd put "/stats/$RETRY_MODEL/0" "{\"model_uid\":\"$RETRY_MODEL\",\"replica_id\":0,\"last_updated_ms\":$TS3,\"pending_requests\":0}" >/dev/null
+  etcdctl_cmd put "/stats/$RETRY_MODEL/1" "{\"model_uid\":\"$RETRY_MODEL\",\"replica_id\":1,\"last_updated_ms\":$TS3,\"pending_requests\":5}" >/dev/null
+  sleep 2
+  emb_out=$(curl -sN --max-time 20 -X POST "$EMBEDDED_GATEWAY/v1/chat/completions" -H "Content-Type: application/json" \
+    -d "{\"model\":\"$RETRY_MODEL\",\"stream\":true,\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}" || true)
+  echo "$emb_out" | grep -q 'mock' && ok "embedded: stalled replica retried, client streamed normally" \
+    || bad "embedded pre-first-byte retry: $(echo "$emb_out" | tail -c 120)"
+  curl -s "$EMBEDDED_GATEWAY/metrics" | grep -qE '^nebula_gateway_first_byte_retry_total [1-9]' \
+    && ok "embedded: first_byte_retry_total counted the retry" || bad "embedded: retry counter did not move"
+else
+  bad "embedded gateway did not start"
+fi
 
 echo "--- stalled upstream stream (issue #37) ---"
 # The mock sends two frames then never a [DONE]; the router's idle deadline has to end

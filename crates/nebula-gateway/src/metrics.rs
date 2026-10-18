@@ -141,6 +141,9 @@ pub struct Metrics {
     pub requests_aborted_total: AtomicU64,
     /// Streams that ended with an upstream error before `[DONE]` (truncated 200).
     pub upstream_stream_error_total: AtomicU64,
+    /// Embedded mode: requests retried on another replica because no first byte arrived
+    /// within the budget (pre-first-byte commitment, issue #42).
+    pub first_byte_retry_total: AtomicU64,
     /// Engine queue admission denials by low-cardinality reason.
     pub queue_denied_full_total: AtomicU64,
     pub queue_denied_tenant_total: AtomicU64,
@@ -257,6 +260,12 @@ pub fn render_metrics(metrics: &Metrics) -> String {
          # TYPE nebula_gateway_responses_5xx counter\n\
          nebula_gateway_responses_5xx {}\n",
         metrics.status_5xx.load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_gateway_first_byte_retry_total Requests retried because no first byte arrived in time (embedded mode).\n\
+         # TYPE nebula_gateway_first_byte_retry_total counter\n\
+         nebula_gateway_first_byte_retry_total {}\n",
+        metrics.first_byte_retry_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "# HELP nebula_gateway_upstream_stream_error_total Streams ended by an upstream error before [DONE] (client sees a truncated 200).\n\

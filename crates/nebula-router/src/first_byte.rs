@@ -37,6 +37,22 @@ where
     Some((head, stream::once(async move { Ok(replay) }).chain(stream)))
 }
 
+/// Read the first chunk of a `Response` **without consuming it**, so the caller can still
+/// use `Response::bytes_stream()` afterwards (the embedded gateway path, which needs the
+/// response object to build its own axum body).
+///
+/// `None` means nothing arrived in `budget` — no status has been committed, so retrying
+/// another replica is safe.
+pub async fn first_chunk_of(
+    resp: &mut reqwest::Response,
+    budget: Duration,
+) -> Option<bytes::Bytes> {
+    match tokio::time::timeout(budget, resp.chunk()).await {
+        Ok(Ok(Some(chunk))) if !chunk.is_empty() => Some(chunk),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
