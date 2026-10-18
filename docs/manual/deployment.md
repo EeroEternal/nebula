@@ -361,6 +361,87 @@ etcdctl snapshot restore /backup/etcd-xxx.db --data-dir /var/lib/etcd-restore
 
 **回滚** = 反向重跑上述步骤（版本回退 + 重启）；etcd 数据无需回滚（结构体 serde-default 向后兼容）。引擎回滚后**必须**抽查 `no_signal` 计数（线上格式校准风险点）。
 
+## 7.9 多 gateway 前置接入：xLB（TLS 卸载 + 整机故障切换）
+
+> ⚠️ **外部组件声明**：xLB（[`EeroEternal/xlb`](https://github.com/EeroEternal/xlb)，MIT，独立发布）**不在本仓**，不受 `./scripts/ci.sh` 覆盖，本仓也不为其配置/版本做回归。本章只声明接入点、约束与代价；参数以其官方 `config.toml` 为准，且**未经本仓真机验证**。
+
+### 什么时候值得加
+
+同时满足以下三条才值得（缺一条就先别加，见文末「什么时候不要用」）：
+
+1. **≥2 个 gateway 实例**（多机或同机多副本），需要**整机级**故障切换——即某个 gateway 进程/主机挂了，活跃流式请求能落到别的实例；
+2. 需要**在一处终止 TLS**（客户端 → Nebula 走 HTTPS），而不是让每个 gateway 各自管证书；
+3. 需要把 **POST 连接池与超时语义从 gateway 进程里剥离**，让 gateway 可以自由滚动重启而不掐断已有流。
+
+### 它不做什么（边界）
+
+- xLB **只搬字节，不懂 token**：不知道 replica、`/endpoints/`、KV 冷暖、`prefill/decode` 角色。**它不能替代 `nebula-router`**，两者不在同一层。
+- xLB 在 **gateway 外面**：`Client → xLB(TLS) → nebula-gateway ×N → nebula-router → 引擎`。Router 侧的 `prefix_affinity` / `pd_split` / `Tool-Pause` 全部照旧在 gateway/router 内部生效。
+- 它**不做**鉴权、配额、路由决策、SLO 归因 —— 这些仍是 Gateway/BFF 的职责。
+
+### 关键约束（顺序错了会丢错误归因）
+
+```text
+Client ──HTTPS──▶ xLB(thin-l7, TLS 终止) ──HTTP──▶ gateway-1 / gateway-2 / … ──▶ router ──▶ 引擎
+                       └─ 上游池 = gateway 地址（默认 8081）        └─ 内部端口见 §7 端口汇总
+```
+
+1. **xLB 的超时必须比 Nebula 自己更宽松**。Nebula 的代理分档是 `connect 3s / first_byte 60s（NEBULA_PROXY_FIRST_BYTE_TIMEOUT_MS）/ idle 120s（NEBULA_PROXY_STREAM_IDLE_TIMEOUT_MS）/ 无总超时`。若 xLB 先掐断，Nebula 就看不到这次失败，指标记在 xLB 上、`nebula_route_*` 直方图失真。建议 xLB 侧：
+
+   ```toml
+   [timeouts]
+   connect    = "5s"
+   first_byte = "75s"    # > NEBULA_PROXY_FIRST_BYTE_TIMEOUT_MS (60s)
+   idle       = "180s"   # > NEBULA_PROXY_STREAM_IDLE_TIMEOUT_MS (120s)
+   total      = "3600s"  # 只在极端兜底；不要设成会截断长生成的量级
+   ```
+
+2. **只在首字节之前重路由**。流式一旦开始吐字就不能换后端（客户端已经收到增量）。xLB `thin-l7` 的语义正是如此，不要为了"更高可用"去开首字节后重试。
+3. **重路由状态码要收窄**。在**gateway 副本之间**重试 `429` 是惊群放大器（429 通常意味着整个集群饱和，不是这个副本坏了）——这与 provider 型网关（各上游配额独立）不同。建议 `retry_statuses = [500, 502, 503, 504]` 并按需加 `404`（副本配置错时换一个有意义）。
+4. **健康检查指向 gateway 的 `/healthz`**，不要指 router 的 `/healthz`（否则 xLB 会认为 gateway 不可用）。要反映「这个 gateway 能不能接请求」。
+5. **容量按"并发流数"配**，不是按 QPS：每条长 SSE 都占住一条上游连接。`pool.max_idle_per_backend` / `max_conns_per_backend` 要 ≥ 目标并发流数 / gateway 副本数。
+
+### 代价（必须一起声明）
+
+| 代价 | 说明 |
+|------|------|
+| 串联两个代理 | TTFT 多一份 delta。用 xLB 自带 `xlb_ttft_delta_ms` 量化；若这段延迟不可接受，说明瓶颈本来不在代理层 |
+| 排障面翻倍 | 一个 5xx 可能来自 xLB、gateway 或引擎，需要 `x-request-id` 贯穿（Nebula 已注入，确认 xLB 透传） |
+| 新增一个故障域 | xLB 挂掉时即使 gateway 全健康也不可用 → **要么 ≥2 个 xLB + VIP/K8s Service，要么别上** |
+| 不在本仓 CI | 版本升级、配置漂移都要你自己回归；xLB 的发布节奏与 Nebula 无关 |
+| 双份 metrics | `nebula_route_*`（gateway/router）与 `xlb_*`（xLB）要分开看，别混成一套 SLO |
+
+### 最小配置片段（多机 + TLS 卸载）
+
+```toml
+[server]
+bind = "0.0.0.0:443"
+mode = "thin-l7"
+
+[server.tls]
+enabled = true
+cert = "/etc/xlb/tls/fullchain.pem"
+key  = "/etc/xlb/tls/privkey.pem"
+
+[backends]
+algorithm = "leastconn"
+servers = [
+  { addr = "10.0.0.11:8081", weight = 1 },   # gateway 副本 1
+  { addr = "10.0.0.12:8081", weight = 1 },   # gateway 副本 2
+]
+
+[retry]
+max_retries = -1
+retry_statuses = [404, 500, 502, 503, 504]   # 故意不含 429，见「关键约束 3」
+```
+
+### 什么时候不要用
+
+- **只有一个 gateway 实例**：多一跳代理，没有任何故障切换收益。
+- **已经跑 `NEBULA_ROUTER_MODE=embedded`（单跳数据面）**：再加一层就变成三段跳，TTFT 收益被抵消。
+- **前面已经有 L4 LB + VIP 或 K8s Service**：先确认那层是否已经满足「整机切换 + TLS 卸载」，多数环境已经够用。
+- **需要按 token/KV 做决策**：那是 `nebula-router` 的职责，xLB 永远做不了。
+
 ## 8. 常见问题
 
 ### 8.1 `{"message":"Unauthorized"}`（Audit Logs）
