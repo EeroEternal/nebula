@@ -12,7 +12,7 @@ import { v2 } from "@/lib/api"
 import type { ReplicaPlacementSpec } from "@/lib/types"
 import { useI18n } from "@/lib/useI18n"
 
-type Role = "prefill" | "decode"
+type Role = "mixed" | "prefill" | "decode"
 
 export interface DeployDialogProps {
     modelUid: string
@@ -40,7 +40,7 @@ export function DeployDialog({
     const [replicas, setReplicas] = useState(replicasDefault)
     const [topology, setTopology] = useState<"replicated" | "pd_split">("replicated")
     const [topologyTouched, setTopologyTouched] = useState(false)
-    const [roles, setRoles] = useState<Role[]>(Array.from({ length: replicasDefault }, () => "mixed" as unknown as Role))
+    const [roles, setRoles] = useState<Role[]>(Array.from({ length: replicasDefault }, () => "mixed"))
     const [baseReplicaSpecs, setBaseReplicaSpecs] = useState<ReplicaPlacementSpec[]>([])
     const [remoteUrl, setRemoteUrl] = useState("lm://127.0.0.1:6800")
     const [kvSerde, setKvSerde] = useState("naive")
@@ -67,16 +67,14 @@ export function DeployDialog({
                     setKvSerde(dep.kv_sharing?.serde || "naive")
                     const hydratedRoles: Role[] = Array.from({ length: repCount }, (_, idx) => {
                         const r = dep.replica_specs?.[idx]?.role
-                        return r === "prefill" || r === "decode"
-                            ? r
-                            : ("mixed" as unknown as Role)
+                        return r === "prefill" || r === "decode" ? r : "mixed"
                     })
                     setRoles(hydratedRoles)
                 } else {
                     setTopology("replicated")
                     setRemoteUrl("lm://127.0.0.1:6800")
                     setKvSerde("naive")
-                    setRoles(Array.from({ length: repCount }, () => "mixed" as unknown as Role))
+                    setRoles(Array.from({ length: repCount }, () => "mixed"))
                 }
             })
             .catch(() => {
@@ -95,7 +93,7 @@ export function DeployDialog({
         setReplicas(next)
         setRoles((prev) => {
             const out = prev.slice(0, next)
-            while (out.length < next) out.push("mixed" as unknown as Role)
+            while (out.length < next) out.push("mixed")
             return out
         })
     }
@@ -104,16 +102,13 @@ export function DeployDialog({
         setTopology(tp)
         setTopologyTouched(true)
         setError(null)
-        if (tp === "replicated") {
-            setRoles(Array.from({ length: replicas }, () => "mixed" as unknown as Role))
-            setRemoteUrl("lm://127.0.0.1:6800")
-            setKvSerde("naive")
-        }
     }
 
-    const hasPrefill = roles.slice(0, replicas).includes("prefill")
-    const hasDecode = roles.slice(0, replicas).includes("decode")
-    const pdSplitReady = hasPrefill && hasDecode
+    const activeRoles = roles.slice(0, replicas)
+    const hasPrefill = activeRoles.includes("prefill")
+    const hasDecode = activeRoles.includes("decode")
+    const allAssigned = activeRoles.every((r) => r === "prefill" || r === "decode")
+    const pdSplitReady = allAssigned && hasPrefill && hasDecode
 
     const submit = async () => {
         setBusy(true)

@@ -47,7 +47,14 @@ async fn main() -> anyhow::Result<()> {
     // 1. Reconcile loop
     loop {
         if let Err(e) = reconcile_once(&store, &namespace, &gpu_node, &metrics).await {
-            tracing::warn!(error=%e, "reconcile loop warning");
+            tracing::warn!(
+                error = %e,
+                model_success = metrics.model_reconcile_success_total.load(std::sync::atomic::Ordering::Relaxed),
+                model_errors = metrics.model_reconcile_errors_total.load(std::sync::atomic::Ordering::Relaxed),
+                replica_success = metrics.replica_reconcile_success_total.load(std::sync::atomic::Ordering::Relaxed),
+                replica_errors = metrics.replica_reconcile_errors_total.load(std::sync::atomic::Ordering::Relaxed),
+                "reconcile loop warning"
+            );
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
@@ -57,7 +64,9 @@ async fn main() -> anyhow::Result<()> {
 pub struct ControllerMetrics {
     pub deployment_parse_errors_total: std::sync::atomic::AtomicU64,
     pub spec_load_errors_total: std::sync::atomic::AtomicU64,
+    pub model_reconcile_success_total: std::sync::atomic::AtomicU64,
     pub model_reconcile_errors_total: std::sync::atomic::AtomicU64,
+    pub replica_reconcile_success_total: std::sync::atomic::AtomicU64,
     pub replica_reconcile_errors_total: std::sync::atomic::AtomicU64,
 }
 
@@ -76,9 +85,14 @@ async fn load_model_spec(
 }
 
 /// Renew existing `/endpoints/{model_uid}/{replica_id}` (and `/stats/`) TTLs
-/// without reconciling or recreating Pods when `/models/{model_uid}/spec`
-/// fails to load, preventing already-healthy Pods from dropping out of Router.
-async fn refresh_existing_model_endpoints(store: &dyn MetaStore, dep: &ModelDeployment) {
+/// for replicas on `gpu_node` without reconciling or recreating Pods when
+/// `/models/{model_uid}/spec` fails to load, preventing already-healthy Pods
+/// from dropping out of Router.
+async fn refresh_existing_model_endpoints(
+    store: &dyn MetaStore,
+    gpu_node: &str,
+    dep: &ModelDeployment,
+) {
     if dep.desired_state != DesiredState::Running {
         return;
     }
@@ -88,6 +102,9 @@ async fn refresh_existing_model_endpoints(store: &dyn MetaStore, dep: &ModelDepl
         .as_millis() as u64;
     let replicas = dep.replicas.max(1);
     for replica_id in 0..replicas {
+        if replica_node(dep, replica_id, gpu_node) != gpu_node {
+            continue;
+        }
         let ep_key = format!("/endpoints/{}/{replica_id}", dep.model_uid);
         if let Ok(Some((raw, _))) = store.get(&ep_key).await {
             let refreshed = if let Ok(mut ep) = serde_json::from_slice::<EndpointInfo>(&raw) {
@@ -107,6 +124,7 @@ async fn refresh_existing_model_endpoints(store: &dyn MetaStore, dep: &ModelDepl
 
 async fn reconcile_deployments_with<F, Fut>(
     store: &dyn MetaStore,
+    gpu_node: &str,
     metrics: &ControllerMetrics,
     mut step: F,
 ) -> anyhow::Result<()>
@@ -148,20 +166,27 @@ where
                     error = %e,
                     "failed to load model spec; refreshing existing endpoints without reconciling pods"
                 );
-                refresh_existing_model_endpoints(store, &dep).await;
+                refresh_existing_model_endpoints(store, gpu_node, &dep).await;
                 continue;
             }
         };
 
-        if let Err(e) = step(dep, spec).await {
-            metrics
-                .model_reconcile_errors_total
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                model_uid = %model_uid,
-                error = %e,
-                "failed to reconcile model deployment; continuing with remaining models"
-            );
+        match step(dep, spec).await {
+            Ok(()) => {
+                metrics
+                    .model_reconcile_success_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                metrics
+                    .model_reconcile_errors_total
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    model_uid = %model_uid,
+                    error = %e,
+                    "failed to reconcile model deployment; continuing with remaining models"
+                );
+            }
         }
     }
 
@@ -175,7 +200,7 @@ async fn reconcile_once(
     metrics: &Arc<ControllerMetrics>,
 ) -> anyhow::Result<()> {
     let metrics_for_step = Arc::clone(metrics);
-    reconcile_deployments_with(store.as_ref(), metrics.as_ref(), |dep, spec| {
+    reconcile_deployments_with(store.as_ref(), gpu_node, metrics.as_ref(), |dep, spec| {
         let store = Arc::clone(store);
         let namespace = namespace.to_string();
         let gpu_node = gpu_node.to_string();
@@ -217,18 +242,23 @@ async fn ensure_model_running(
         if replica_node(dep, replica_id, gpu_node) != gpu_node {
             continue;
         }
-        if let Err(e) =
-            ensure_replica_running(store, namespace, gpu_node, dep, spec, replica_id).await
-        {
-            metrics
-                .replica_reconcile_errors_total
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::warn!(
-                model_uid = %dep.model_uid,
-                replica_id,
-                error = %e,
-                "failed to reconcile replica; continuing with remaining replicas"
-            );
+        match ensure_replica_running(store, namespace, gpu_node, dep, spec, replica_id).await {
+            Ok(()) => {
+                metrics
+                    .replica_reconcile_success_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(e) => {
+                metrics
+                    .replica_reconcile_errors_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    model_uid = %dep.model_uid,
+                    replica_id,
+                    error = %e,
+                    "failed to reconcile replica; continuing with remaining replicas"
+                );
+            }
         }
     }
     if let Err(e) = cleanup_extra_replicas(store, namespace, &dep.model_uid, replicas).await {
@@ -1032,7 +1062,7 @@ mod tests {
         let metrics = ControllerMetrics::default();
         let visited = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let visited_clone = std::sync::Arc::clone(&visited);
-        reconcile_deployments_with(&store, &metrics, move |dep, _spec| {
+        reconcile_deployments_with(&store, "node-1", &metrics, move |dep, _spec| {
             let visited = std::sync::Arc::clone(&visited_clone);
             async move {
                 visited.lock().unwrap().push(dep.model_uid.clone());
@@ -1062,6 +1092,12 @@ mod tests {
         assert_eq!(
             metrics
                 .model_reconcile_errors_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            metrics
+                .model_reconcile_success_total
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );

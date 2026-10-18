@@ -224,7 +224,6 @@ pub async fn start_model(
     validate_start_replica_specs(replicas, &req.replica_specs)?;
 
     let image_id = req.image_id.clone().or_else(|| spec.docker_image.clone());
-    let _ = &image_id; // used by the fresh-deployment branch below
     let now = now_ms();
     let deployment = match get_model_deployment(store, model_uid).await? {
         Some(mut dep) => {

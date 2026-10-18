@@ -37,7 +37,7 @@ bad()  { echo "  ✘ $1"; FAIL=$((FAIL+1)); }
 note() { echo "  · $1"; }
 
 WORK="$(mktemp -d /tmp/lmcache-gate.XXXXXX)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK"; docker rm -f lmcache-gate >/dev/null 2>&1 || true' EXIT
 
 echo "== lmcache compat gate ($MODE) =="
 echo "   image=$VLLM_IMAGE pin=lmcache-$LMCACHE_PIN allow_runtime_pip=$ALLOW_RUNTIME_PIP"
@@ -198,14 +198,31 @@ EOS
   docker run -d --name lmcache-gate --gpus all -v "$MODEL_PATH:$MODEL_PATH:ro" \
     -v "$WORK:/work" --network host --entrypoint bash "$VLLM_IMAGE" /work/run.sh >/dev/null
   OUT=""
+  TIMED_OUT=1
   for i in $(seq 1 60); do
     sleep 10
     OUT=$(docker logs lmcache-gate 2>&1 | tail -4 || true)
-    echo "$OUT" | grep -qE "TRANSFER-(OK|FAIL)|ENGINES-UP-FAIL" && break
-    [ "$(docker inspect -f '{{.State.Running}}' lmcache-gate 2>/dev/null || echo false)" = "false" ] && break
+    if echo "$OUT" | grep -qE "TRANSFER-(OK|FAIL)|ENGINES-UP-FAIL"; then
+      TIMED_OUT=0
+      break
+    fi
+    if [ "$(docker inspect -f '{{.State.Running}}' lmcache-gate 2>/dev/null || echo false)" = "false" ]; then
+      TIMED_OUT=0
+      break
+    fi
   done
+  if [ "$TIMED_OUT" -eq 0 ]; then
+    for j in $(seq 1 10); do
+      [ "$(docker inspect -f '{{.State.Running}}' lmcache-gate 2>/dev/null || echo false)" = "false" ] && break
+      sleep 1
+    done
+  fi
   OUT=$(docker logs lmcache-gate 2>&1 | tail -8 || true)
-  FULL_RC=$(docker inspect -f '{{.State.ExitCode}}' lmcache-gate 2>/dev/null || echo 1)
+  if [ "$TIMED_OUT" -eq 1 ]; then
+    FULL_RC=124
+  else
+    FULL_RC=$(docker inspect -f '{{.State.ExitCode}}' lmcache-gate 2>/dev/null || echo 1)
+  fi
   docker rm -f lmcache-gate >/dev/null 2>&1 || true
   if [ "$FULL_RC" = "0" ] && echo "$OUT" | grep -q TRANSFER-OK; then
     ok "cross-engine store→retrieve over lm:// TCP ($(echo "$OUT" | grep -a Stored | tail -1 | grep -oE '[0-9]+/[0-9]+ tokens' | head -1))"

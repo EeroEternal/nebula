@@ -391,7 +391,8 @@ pub async fn build_plan_from_deployment(
             replica_id as usize,
         );
         let concrete_image = resolve_concrete_image(store, image_ref).await?;
-        if deployment.topology == Some(nebula_common::DeploymentTopology::PdSplit) {
+        let is_pd_split = deployment.topology == Some(nebula_common::DeploymentTopology::PdSplit);
+        if is_pd_split {
             let approved = nebula_common::approved_pd_images_from_env();
             nebula_common::validate_pd_split_image(concrete_image.as_deref(), &approved)
                 .map_err(|e| anyhow::anyhow!(e))?;
@@ -405,6 +406,7 @@ pub async fn build_plan_from_deployment(
             &used_gpus,
             image_ref,
             deployment.allowed_pools.as_deref(),
+            is_pd_split,
         )
         .await?;
 
@@ -452,8 +454,43 @@ pub async fn build_plan_from_deployment(
     })
 }
 
+/// Pure check whether `node` has a fresh heartbeat and satisfies `require_cuda`.
+pub fn node_eligible_for_placement(node: &NodeStatus, now: u64, require_cuda: bool) -> bool {
+    if now.saturating_sub(node.last_heartbeat_ms) > NODE_STALE_MS {
+        return false;
+    }
+    if require_cuda
+        && nebula_common::hardware_family_of_platform(&resolve_node_platform(node)) != "cuda"
+    {
+        return false;
+    }
+    true
+}
+
+/// Check whether `node_id` has a fresh `/nodes/` heartbeat (and is CUDA if `require_cuda`).
+pub async fn is_node_healthy_for_placement(
+    store: &EtcdMetaStore,
+    node_id: &str,
+    require_cuda: bool,
+) -> bool {
+    let now = now_ms();
+    let Ok(kvs) = store.list_prefix("/nodes/").await else {
+        return false;
+    };
+    for (_, val, _) in kvs {
+        let Ok(node) = serde_json::from_slice::<NodeStatus>(&val) else {
+            continue;
+        };
+        if node.node_id == node_id {
+            return node_eligible_for_placement(&node, now, require_cuda);
+        }
+    }
+    false
+}
+
 /// Node/GPU selection for deployment path. Respects optional affinity and pool constraints.
-async fn select_node_and_gpus_for_deployment(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn select_node_and_gpus_for_deployment(
     store: &EtcdMetaStore,
     config: &Option<ModelConfig>,
     node_affinity: Option<&str>,
@@ -461,6 +498,7 @@ async fn select_node_and_gpus_for_deployment(
     used_gpus: &HashMap<String, HashSet<u32>>,
     docker_image: Option<&str>,
     allowed_pools: Option<&[String]>,
+    require_cuda: bool,
 ) -> anyhow::Result<(String, Vec<u32>)> {
     let image_platforms = load_image_platforms(store, docker_image).await;
     let allowed_nodes_from_pool = load_allowed_pool_nodes(store, allowed_pools).await?;
@@ -475,19 +513,30 @@ async fn select_node_and_gpus_for_deployment(
                 );
             }
         }
-        if !image_platforms.is_empty() {
+        if !image_platforms.is_empty() || require_cuda {
             if let Ok(kvs) = store.list_prefix("/nodes/").await {
                 for (_, val, _) in kvs {
                     let Ok(status) = serde_json::from_slice::<NodeStatus>(&val) else {
                         continue;
                     };
-                    if status.node_id == target_node
-                        && !node_matches_platforms(&status, &image_platforms)
-                    {
-                        anyhow::bail!(
-                            "node '{target_node}' platform incompatible with image platforms {:?}",
-                            image_platforms
-                        );
+                    if status.node_id == target_node {
+                        if require_cuda
+                            && nebula_common::hardware_family_of_platform(&resolve_node_platform(
+                                &status,
+                            )) != "cuda"
+                        {
+                            anyhow::bail!(
+                                "node '{target_node}' hardware family is not 'cuda' (required by pd_split)"
+                            );
+                        }
+                        if !image_platforms.is_empty()
+                            && !node_matches_platforms(&status, &image_platforms)
+                        {
+                            anyhow::bail!(
+                                "node '{target_node}' platform incompatible with image platforms {:?}",
+                                image_platforms
+                            );
+                        }
                     }
                 }
             }
@@ -530,6 +579,12 @@ async fn select_node_and_gpus_for_deployment(
                 rejected_pool += 1;
                 continue;
             }
+        }
+        if require_cuda
+            && nebula_common::hardware_family_of_platform(&resolve_node_platform(node)) != "cuda"
+        {
+            rejected_platform += 1;
+            continue;
         }
         if !node_matches_platforms(node, &image_platforms) {
             rejected_platform += 1;
@@ -593,6 +648,11 @@ async fn select_node_and_gpus_for_deployment(
                 continue;
             }
         }
+        if require_cuda
+            && nebula_common::hardware_family_of_platform(&resolve_node_platform(node)) != "cuda"
+        {
+            continue;
+        }
         if !node_matches_platforms(node, &image_platforms) {
             continue;
         }
@@ -607,9 +667,14 @@ async fn select_node_and_gpus_for_deployment(
         );
     }
 
-    if rejected_platform > 0 && !image_platforms.is_empty() {
+    if rejected_platform > 0 && (!image_platforms.is_empty() || require_cuda) {
+        let wanted = if image_platforms.is_empty() {
+            vec!["cuda".to_string()]
+        } else {
+            image_platforms
+        };
         let reason = nebula_common::PlacementRejectReason::platform_incompatible(
-            image_platforms,
+            wanted,
             rejected_platform,
             None,
         );

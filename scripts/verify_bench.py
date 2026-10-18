@@ -43,11 +43,11 @@ def build_prompt(prefix_idx: int, prefix_words: int, suffix_idx: int, suffix_wor
     return " ".join(prefix + suffix)
 
 
-def percentile(sorted_vals: list[float], pct: float) -> float:
+def percentile(sorted_vals: list[float], pct: float) -> float | None:
     if not sorted_vals:
-        return float("nan")
+        return None
     idx = min(len(sorted_vals) - 1, max(0, math.ceil((pct / 100.0) * len(sorted_vals)) - 1))
-    return sorted_vals[idx]
+    return round(sorted_vals[idx], 1)
 
 
 def run_one(
@@ -222,14 +222,14 @@ def main() -> int:
         "goodput_rps": round(len(slo_ok) / wall_s, 2),
         "slo_ttft_ms": args.slo_ttft_ms,
         "slo_e2e_ms": args.slo_e2e_ms,
-        "ttft_p50_ms": round(percentile(ttfts, 50), 1),
-        "ttft_p99_ms": round(percentile(ttfts, 99), 1),
-        "ttft_p999_ms": round(percentile(ttfts, 99.9), 1),
-        "e2e_p50_ms": round(percentile(e2es, 50), 1),
-        "e2e_p99_ms": round(percentile(e2es, 99), 1),
+        "ttft_p50_ms": percentile(ttfts, 50),
+        "ttft_p99_ms": percentile(ttfts, 99),
+        "ttft_p999_ms": percentile(ttfts, 99.9),
+        "e2e_p50_ms": percentile(e2es, 50),
+        "e2e_p99_ms": percentile(e2es, 99),
     }
-    print(json.dumps(summary, indent=2))
-    return 0
+    print(json.dumps(summary, indent=2, allow_nan=False))
+    return 0 if len(ok_rows) > 0 else 1
 
 
 if __name__ == "__main__":

@@ -195,7 +195,7 @@ cmd_start() {
 # and running engine Pods untouched.
 cmd_restart_control_plane() {
   ensure_etcd_up
-  local p i
+  local p i failed=0
   for p in nebula-router nebula-gateway nebula-bff nebula-k8s-controller; do
     if proc_running "$p"; then
       log "stopping $p for binary upgrade"
@@ -212,9 +212,17 @@ cmd_restart_control_plane() {
     fi
     start_one_proc "$p"
     sleep 1
+    if ! proc_running "$p"; then
+      log "ERROR: $p failed to stay running after restart"
+      failed=1
+    fi
   done
-  log "control plane restarted (deployments and engine pods untouched)"
   cmd_status
+  if [ "$failed" -ne 0 ]; then
+    log "ERROR: one or more control-plane binaries failed to restart"
+    return 1
+  fi
+  log "control plane restarted (deployments and engine pods untouched)"
 }
 
 cmd_stop() {

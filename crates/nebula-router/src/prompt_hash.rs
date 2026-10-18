@@ -120,6 +120,7 @@ impl PromptHasher {
 
     /// Tokenize `prompt` and chain its block hashes. `None` when no tokenizer
     /// is available for the model (caller falls back visibly).
+    #[cfg(test)]
     pub fn prompt_hashes(
         &self,
         model_uid: &str,

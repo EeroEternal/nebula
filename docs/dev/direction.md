@@ -91,7 +91,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
    - **做法**：独立二进制 [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs) 作为引擎 KV 事件的唯一稳定汇聚点，维护权威索引并通过“原始帧增量转发 + 周期快照（`!reset` / `!snapshot`）”扇出给多个 Router / 嵌入式 Gateway。
    - **收益**：Router 热路径 100% 查本地内存（零外部 RPC），重启可在单个快照周期内自愈，indexd 挂掉只退化为本地存量，不阻塞推理。
 3. **`pd_split` v1：基于共享 KV 的角色化放置与路由（见 [`../arch/pool.md` §pd_split](../arch/pool.md#pd_split-拓扑与角色化放置p2c-pd-设计稿-v112026-10-12经独立评审-rework-修订)、[`engines.md` §7](engines.md#7-pd-分离传输选型与引擎版本钉死batch-3-第一步2026-10-11)）**
-   - **做法**：不绑 NVIDIA 专属的 NIXL / `p2p_nccl`，选型硬件无关的 **LMCache（`lm://` 纯 TCP 共享 KV 存储 + `lmcache_controller`）**。副本按角色划分为 `prefill`（`kv_producer`，负责算冷前缀并写入共享存储）和 `decode`（`kv_both`，命中暖前缀直接从共享存储 Retrieve）。Router 通过查询 controller `/lookup` 判断冷暖（[`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L635)）：**冷流量进 Prefill 池生产 KV，暖流量进 Decode 池消费 KV**。
+   - **做法**：不绑 NVIDIA 专属的 NIXL / `p2p_nccl`，选型硬件无关的 **LMCache（`lm://` 纯 TCP 共享 KV 存储 + `lmcache_controller`）**。副本按角色划分为 `prefill`（`kv_producer`，负责算冷前缀并写入共享存储）和 `decode`（`kv_both`，命中暖前缀直接从共享存储 Retrieve）。Router 通过查询 controller `/lookup` 判断冷暖（[`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L707)）：**冷流量进 Prefill 池生产 KV，暖流量进 Decode 池消费 KV**。
    - **收益**：消除了重度冷 Prefill 对稳态请求尾延迟的阻塞，暖态下客户端 **TTFT p99 降低 21%、e2e p99 降低 18%**。
 
 ---
@@ -214,7 +214,7 @@ Dynamo / llm-d 偏基础设施；**多租户 / SLO / 成本 / 审计 / canary** 
   - **触点**：[`crates/nebula-router/src/lib.rs`](../../crates/nebula-router/src/lib.rs)（`Router::controller_warm` 与 `Router::route_internal` 的 `pd_split` 分支）。
   - **设计**：引入阈值配置 `NEBULA_PD_BYPASS_TOKENS`（默认 `256`，对齐 LMCache chunk 大小）：
     1. 当请求分词长度 `token_ids.len() < NEBULA_PD_BYPASS_TOKENS` 时，`controller_warm` 直接短路返回，**省掉一次对 `lmcache_controller:9000/lookup` 的 HTTP POST**；
-    2. 在 `route_internal` 中，若属于短请求且 `Decode` 池候选副本具有新鲜 `/stats/` 且最小 `pending_requests == 0`（空闲未饱和），允许短冷请求直接进入 `ReplicaRole::Decode` 原地完成，避免单点打爆 `Prefill` 池。
+    2. 在 `route_internal` 中，若属于短请求且 `Decode` 池候选副本具有新鲜 `/stats/` 且排队深度满足 `pending_requests == 0 || pending_requests <= min_prefill_pending`（空闲或队列不深于最闲 Prefill 副本），则过滤至满足条件的 Decode 候选直接原地完成，避免单点打爆 `Prefill` 池。
     3. 暴露计数器 `nebula_router_pd_short_bypass_total` 保持可观测。
 
 #### 2. 多 Owner 前缀索引 + “节省 Prefill vs 排队等待”联合代价打分（Joint Cost Function）

@@ -100,8 +100,10 @@ const MAX_CONSECUTIVE_PRIORITY_HANDOFFS: usize = 4;
 
 #[derive(Default)]
 struct PriorityWaiterState {
-    waiters: VecDeque<oneshot::Sender<OwnedSemaphorePermit>>,
+    waiters: VecDeque<(u64, oneshot::Sender<OwnedSemaphorePermit>)>,
+    next_waiter_id: u64,
     consecutive_handoffs: usize,
+    cold_waiters: usize,
 }
 
 type PriorityWaiterQueue = Arc<Mutex<PriorityWaiterState>>;
@@ -124,7 +126,7 @@ pub struct EngineQueue {
 /// Held for the request lifetime (including the streamed response). Dropping it
 /// releases the concurrency slot, handing off directly to any queued
 /// continuation waiter (up to `MAX_CONSECUTIVE_PRIORITY_HANDOFFS` consecutive
-/// times) before falling back to the cold FIFO semaphore.
+/// times when cold waiters are present) before falling back to the cold FIFO semaphore.
 pub struct EnginePermit {
     permit: Option<OwnedSemaphorePermit>,
     priority_waiters: PriorityWaiterQueue,
@@ -139,31 +141,29 @@ impl Drop for EnginePermit {
                 .priority_waiters
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if st.consecutive_handoffs >= MAX_CONSECUTIVE_PRIORITY_HANDOFFS {
-                // Yield one slot back to `self.sem` so the head cold FIFO waiter
-                // wakes up; reset the consecutive priority counter.
+            if st.consecutive_handoffs >= MAX_CONSECUTIVE_PRIORITY_HANDOFFS && st.cold_waiters > 0 {
+                // Yield one slot back to `self.sem` while holding `st` so the head
+                // cold FIFO waiter wakes up; reset the consecutive priority counter.
                 st.consecutive_handoffs = 0;
+                drop(permit);
                 return;
             }
             let mut handoff = Some(permit);
-            while let Some(tx) = st.waiters.pop_front() {
+            while let Some((_id, tx)) = st.waiters.pop_front() {
                 match tx.send(handoff.take().unwrap()) {
                     Ok(()) => {
                         st.consecutive_handoffs += 1;
                         break;
                     }
                     Err(returned_permit) => {
-                        // That priority waiter already timed out or acquired via
-                        // semaphore; try the next priority waiter.
                         handoff = Some(returned_permit);
                     }
                 }
             }
-            if handoff.is_some() {
+            if let Some(unclaimed) = handoff {
                 st.consecutive_handoffs = 0;
+                drop(unclaimed);
             }
-            // If `handoff` is still `Some`, dropping it here returns the slot to
-            // `self.sem` for cold FIFO waiters.
         }
     }
 }
@@ -336,34 +336,114 @@ impl EngineQueue {
             self.cfg.max_wait
         };
 
-        let waited = if priority_continuation {
-            let (tx, mut rx) = oneshot::channel();
+        if priority_continuation {
+            let (tx, rx) = oneshot::channel();
+            let waiter_id = {
+                let mut q = self
+                    .priority_waiters
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if let Ok(permit) = self.sem.clone().try_acquire_owned() {
+                    return Ok(self.make_permit(permit, true));
+                }
+                let id = q.next_waiter_id;
+                q.next_waiter_id = q.next_waiter_id.wrapping_add(1);
+                q.waiters.push_back((id, tx));
+                id
+            };
+
+            struct PriorityCancelGuard<'a> {
+                queue: &'a EngineQueue,
+                waiter_id: u64,
+                rx: Option<oneshot::Receiver<OwnedSemaphorePermit>>,
+            }
+            impl Drop for PriorityCancelGuard<'_> {
+                fn drop(&mut self) {
+                    if let Some(mut rx) = self.rx.take() {
+                        {
+                            let mut q = self
+                                .queue
+                                .priority_waiters
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner());
+                            q.waiters.retain(|(id, _)| *id != self.waiter_id);
+                        }
+                        if let Ok(permit) = rx.try_recv() {
+                            // Re-wrap and drop without incrementing `admitted*` so
+                            // EnginePermit::drop hands the slot to the next priority
+                            // waiter (or back to `self.sem`).
+                            self.queue.inflight.fetch_add(1, Ordering::Relaxed);
+                            drop(EnginePermit {
+                                permit: Some(permit),
+                                priority_waiters: self.queue.priority_waiters.clone(),
+                                inflight: self.queue.inflight.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+
+            let mut cancel_guard = PriorityCancelGuard {
+                queue: self,
+                waiter_id,
+                rx: Some(rx),
+            };
+            let recv_res = tokio::time::timeout(
+                effective_wait,
+                cancel_guard.rx.as_mut().expect("rx present"),
+            )
+            .await;
+
+            match recv_res {
+                Ok(Ok(permit)) => {
+                    cancel_guard.rx = None;
+                    Ok(self.make_permit(permit, true))
+                }
+                Ok(Err(_)) => {
+                    cancel_guard.rx = None;
+                    Err(QueueDeny::Closed)
+                }
+                Err(_) => {
+                    let mut rx = cancel_guard.rx.take().expect("rx present");
+                    {
+                        let mut q = self
+                            .priority_waiters
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        q.waiters.retain(|(id, _)| *id != waiter_id);
+                    }
+                    if let Ok(permit) = rx.try_recv() {
+                        return Ok(self.make_permit(permit, true));
+                    }
+                    self.denied_timeout.fetch_add(1, Ordering::Relaxed);
+                    Err(QueueDeny::Timeout)
+                }
+            }
+        } else {
+            struct ColdWaiterGuard<'a>(&'a PriorityWaiterQueue);
+            impl Drop for ColdWaiterGuard<'_> {
+                fn drop(&mut self) {
+                    let mut q = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                    q.cold_waiters = q.cold_waiters.saturating_sub(1);
+                }
+            }
             {
                 let mut q = self
                     .priority_waiters
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
-                q.waiters.push_back(tx);
+                q.cold_waiters += 1;
             }
-            let sem = self.sem.clone();
-            tokio::time::timeout(effective_wait, async move {
-                tokio::select! {
-                    biased;
-                    Ok(permit) = &mut rx => Ok(permit),
-                    res = sem.acquire_owned() => res,
+            let _cold_guard = ColdWaiterGuard(&self.priority_waiters);
+            let waited =
+                tokio::time::timeout(effective_wait, self.sem.clone().acquire_owned()).await;
+            match waited {
+                Ok(Ok(permit)) => Ok(self.make_permit(permit, false)),
+                Ok(Err(_)) => Err(QueueDeny::Closed),
+                Err(_) => {
+                    self.denied_timeout.fetch_add(1, Ordering::Relaxed);
+                    Err(QueueDeny::Timeout)
                 }
-            })
-            .await
-        } else {
-            tokio::time::timeout(effective_wait, self.sem.clone().acquire_owned()).await
-        };
-
-        match waited {
-            Ok(Ok(permit)) => Ok(self.make_permit(permit, priority_continuation)),
-            Ok(Err(_)) => Err(QueueDeny::Closed),
-            Err(_) => {
-                self.denied_timeout.fetch_add(1, Ordering::Relaxed);
-                Err(QueueDeny::Timeout)
             }
         }
     }

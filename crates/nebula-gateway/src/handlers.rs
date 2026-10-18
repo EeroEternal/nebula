@@ -136,6 +136,45 @@ pub async fn create_anthropic_messages(
     proxy_chat_as_anthropic(st, prepared, chat_body, requested_model, stream).await
 }
 
+async fn acquire_queue_permit(
+    st: &AppState,
+    prepared: &crate::proxy_common::PreparedUpstream,
+) -> Result<(Option<nebula_common::queue::EnginePermit>, u64), Response> {
+    let t_before_queue = std::time::Instant::now();
+    let permit = match st.queues.as_ref() {
+        Some(queues) => {
+            let model = prepared
+                .model
+                .clone()
+                .unwrap_or_else(|| "default".to_string());
+            let is_continuation = st
+                .router
+                .as_ref()
+                .map(|r| {
+                    r.is_tool_continuation_for_tenant(
+                        prepared.ctx.tenant_id.as_deref(),
+                        prepared.ctx.session_id.as_deref(),
+                    )
+                })
+                .unwrap_or(false);
+            match queues
+                .for_model(&model)
+                .acquire_with_priority(prepared.ctx.tenant_id.as_deref(), is_continuation)
+                .await
+            {
+                Ok(p) => Some(p),
+                Err(deny) => {
+                    st.metrics.record_queue_deny(deny.code());
+                    return Err(queue_deny_response(deny));
+                }
+            }
+        }
+        None => None,
+    };
+    let queue_wait_ms = t_before_queue.elapsed().as_millis() as u64;
+    Ok((permit, queue_wait_ms))
+}
+
 async fn proxy_chat_as_responses(
     st: AppState,
     prepared: crate::proxy_common::PreparedUpstream,
@@ -143,12 +182,23 @@ async fn proxy_chat_as_responses(
     builder_seed: crate::responses::CreateResponseRequest,
     stream: bool,
 ) -> Response {
+    let (queue_permit, _queue_wait_ms) = match acquire_queue_permit(&st, &prepared).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
     // Keep admission guard alive until response finishes.
     let _guard = prepared._conc_guard;
+    let routed_endpoint = prepared
+        .routed_endpoint
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let tenant_id = prepared.ctx.tenant_id.clone();
+    let session_id = prepared.ctx.session_id.clone();
 
     if !resp.status().is_success() {
         let status =
@@ -168,9 +218,12 @@ async fn proxy_chat_as_responses(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
+        let router_for_stream = st.router.clone();
         let mut builder = ResponseStreamBuilder::new(&builder_seed);
 
         tokio::spawn(async move {
+            let _permit = queue_permit;
+            let mut tool_pause_marked = false;
             if tx
                 .send(Ok(
                     Event::default().data(builder.created_event().to_string())
@@ -231,6 +284,21 @@ async fn proxy_chat_as_responses(
                                                 name,
                                                 arguments,
                                             } => {
+                                                if !tool_pause_marked {
+                                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                                        router_for_stream.as_ref(),
+                                                        session_id.as_deref(),
+                                                        routed_endpoint.as_ref(),
+                                                    ) {
+                                                        router.mark_tool_pause_for_tenant(
+                                                            tenant_id.as_deref(),
+                                                            sid,
+                                                            m,
+                                                            *r,
+                                                        );
+                                                        tool_pause_marked = true;
+                                                    }
+                                                }
                                                 for ev in builder.push_tool_call_delta(
                                                     index, id, name, arguments,
                                                 ) {
@@ -242,8 +310,24 @@ async fn proxy_chat_as_responses(
                                                     }
                                                 }
                                             }
-                                            OpenAiStreamChunk::FinishReason(_)
-                                            | OpenAiStreamChunk::Ignored => {}
+                                            OpenAiStreamChunk::FinishReason(reason) => {
+                                                if !tool_pause_marked && reason == "tool_calls" {
+                                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                                        router_for_stream.as_ref(),
+                                                        session_id.as_deref(),
+                                                        routed_endpoint.as_ref(),
+                                                    ) {
+                                                        router.mark_tool_pause_for_tenant(
+                                                            tenant_id.as_deref(),
+                                                            sid,
+                                                            m,
+                                                            *r,
+                                                        );
+                                                        tool_pause_marked = true;
+                                                    }
+                                                }
+                                            }
+                                            OpenAiStreamChunk::Ignored => {}
                                         }
                                     }
                                 }
@@ -267,6 +351,15 @@ async fn proxy_chat_as_responses(
     }
 
     let bytes = resp.bytes().await.unwrap_or_default();
+    if let (Some(router), Some(sid), Some((m, r))) = (
+        st.router.as_ref(),
+        session_id.as_deref(),
+        routed_endpoint.as_ref(),
+    ) {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            router.mark_tool_pause_for_tenant(tenant_id.as_deref(), sid, m, *r);
+        }
+    }
     let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
     let text = openai
         .pointer("/choices/0/message/content")
@@ -312,11 +405,22 @@ async fn proxy_chat_as_anthropic(
     requested_model: String,
     stream: bool,
 ) -> Response {
+    let (queue_permit, _queue_wait_ms) = match acquire_queue_permit(&st, &prepared).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
     let resp = match post_router_chat(&st, &prepared, &chat_body).await {
         Ok(r) => r,
         Err(r) => return r,
     };
     let _guard = prepared._conc_guard;
+    let routed_endpoint = prepared
+        .routed_endpoint
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let tenant_id = prepared.ctx.tenant_id.clone();
+    let session_id = prepared.ctx.session_id.clone();
 
     if !resp.status().is_success() {
         let status =
@@ -336,9 +440,12 @@ async fn proxy_chat_as_anthropic(
         let mut upstream = resp.bytes_stream();
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
+        let router_for_stream = st.router.clone();
         let model = requested_model.clone();
 
         tokio::spawn(async move {
+            let _permit = queue_permit;
+            let mut tool_pause_marked = false;
             let msg_id = format!("msg_{}", Uuid::new_v4());
             let start = json!({
                 "type": "message_start",
@@ -405,6 +512,36 @@ async fn proxy_chat_as_anthropic(
                                     }
                                     let data = line.trim_start_matches("data:").trim();
                                     for parsed in parse_openai_sse_chunk(data) {
+                                        if !tool_pause_marked
+                                            && matches!(
+                                                &parsed,
+                                                OpenAiStreamChunk::ToolCallDelta { .. }
+                                                    | OpenAiStreamChunk::FinishReason(_)
+                                            )
+                                        {
+                                            let is_tool = match &parsed {
+                                                OpenAiStreamChunk::ToolCallDelta { .. } => true,
+                                                OpenAiStreamChunk::FinishReason(r) => {
+                                                    r == "tool_calls"
+                                                }
+                                                _ => false,
+                                            };
+                                            if is_tool {
+                                                if let (Some(router), Some(sid), Some((m, r))) = (
+                                                    router_for_stream.as_ref(),
+                                                    session_id.as_deref(),
+                                                    routed_endpoint.as_ref(),
+                                                ) {
+                                                    router.mark_tool_pause_for_tenant(
+                                                        tenant_id.as_deref(),
+                                                        sid,
+                                                        m,
+                                                        *r,
+                                                    );
+                                                    tool_pause_marked = true;
+                                                }
+                                            }
+                                        }
                                         let is_done =
                                             matches!(parsed, OpenAiStreamChunk::Done);
                                         let events = mapper.push(parsed);
@@ -450,6 +587,15 @@ async fn proxy_chat_as_anthropic(
     }
 
     let bytes = resp.bytes().await.unwrap_or_default();
+    if let (Some(router), Some(sid), Some((m, r))) = (
+        st.router.as_ref(),
+        session_id.as_deref(),
+        routed_endpoint.as_ref(),
+    ) {
+        if nebula_router::response_has_tool_calls(&bytes) {
+            router.mark_tool_pause_for_tenant(tenant_id.as_deref(), sid, m, *r);
+        }
+    }
     let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
     let anth = openai_chat_json_to_anthropic(&openai, &requested_model);
     (StatusCode::OK, Json(anth)).into_response()
@@ -497,14 +643,9 @@ pub async fn proxy_post(
             }
         }
     } else if uri_path.ends_with("/v1/score") {
-        if let Ok(payload) = serde_json::from_slice::<Value>(&body_bytes) {
-            let model = payload
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            if let Some(deny) = check_score_gate(&*st.store, model.as_deref()).await {
-                return deny;
-            }
+        let model = nebula_common::peek_json_model_field(&body_bytes);
+        if let Some(deny) = check_score_gate(&*st.store, model.as_deref()).await {
+            return deny;
         }
     }
 
@@ -515,39 +656,11 @@ pub async fn proxy_post(
     let t_prep = std::time::Instant::now();
 
     // Engine-level bounded fair queue admission (opt-in via NEBULA_GATEWAY_QUEUE_*).
-    let t_before_queue = std::time::Instant::now();
-    let _queue_permit = match st.queues.as_ref() {
-        Some(queues) => {
-            let model = prepared
-                .model
-                .clone()
-                .unwrap_or_else(|| "default".to_string());
-            let is_continuation = st
-                .router
-                .as_ref()
-                .map(|r| {
-                    r.is_tool_continuation_for_tenant(
-                        prepared.ctx.tenant_id.as_deref(),
-                        prepared.ctx.session_id.as_deref(),
-                    )
-                })
-                .unwrap_or(false);
-            match queues
-                .for_model(&model)
-                .acquire_with_priority(prepared.ctx.tenant_id.as_deref(), is_continuation)
-                .await
-            {
-                Ok(p) => Some(p),
-                Err(deny) => {
-                    st.metrics.record_queue_deny(deny.code());
-                    return queue_deny_response(deny);
-                }
-            }
-        }
-        None => None,
+    let (_queue_permit, queue_wait_ms) = match acquire_queue_permit(&st, &prepared).await {
+        Ok(v) => v,
+        Err(r) => return r,
     };
     let t_acquired = std::time::Instant::now();
-    let queue_wait_ms = (t_acquired - t_before_queue).as_millis() as u64;
 
     // Embedded router: route in-process and hit the engine directly (no router hop).
     let resp = if st.router.is_some() {

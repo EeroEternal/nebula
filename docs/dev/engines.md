@@ -69,9 +69,13 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
 
 1. **PD 传输主路径 = LMCache**。理由：vLLM 官方 disagg 示例即 lmcache（`examples/disaggregated/lmcache/`，双镜像都带）；传输在 torch tensor 层（D2H → TCP/本地/远端），**不绑传输库与 GPU 厂商**；与 P1c 同源的 block-hash 语义（前缀定位与 KV 对象定位一套键）。
 2. **排除**：NIXL（用户决策，Dynamo 系）、Mooncake（用户决策，收敛到 LMCache 单路径）、p2p_nccl（NVIDIA 专属）、hf3fs/flexkv/moriio（特定基础设施）。
-4. **引擎版本钉死：vLLM v0.23.x**。CUDA 用 `vllm/vllm-openai:v0.23.0`；昇腾用 `vllm-ascend v0.23.0rc1+`。理由：kv-events 线上格式已在 v0.23 上字节级校准（§5.2 的 map-form/int-hash 学费），connector 集合双硬件同构。升级版本前必须重跑 prefix-affinity §5 的校准流程。
+3. **引擎版本钉死：vLLM v0.23.x**。CUDA 用 `vllm/vllm-openai:v0.23.0`；昇腾用 `vllm-ascend v0.23.0rc1+`。理由：kv-events 线上格式已在 v0.23 上字节级校准（§5.2 的 map-form/int-hash 学费），connector 集合双硬件同构。升级版本前必须重跑 prefix-affinity §5 的校准流程。
 
+### 7.3 待验证（PD 实现的前置）
 
+- [ ] 昇腾真机（arm64 + NPU）：`pip install lmcache` + LMCacheConnector PD e2e——rig 的昇腾镜像是 arm64 无法在 x86 主机执行，需昇腾机器。
+- [x] CUDA 侧最小 PD 验证（2026-10-11，见 §7.4）：角色语义确认（producer/consumer + `lm://` 共享 KV 存储），lmcache 0.5.5 跑通。
+- [x] nebula 侧设计：`replica_specs` 角色字段（prefill/decode/混合）+ connector 参数进 ModelDeployment（见 [`../arch/pool.md`](../arch/pool.md) §pd_split）。
 
 ### 7.4 CUDA 侧 LMCache TCP PD 实测（2026-10-11，8×5090）
 
@@ -89,11 +93,5 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
   - **纯 TCP、零 NIXL、跨引擎**。此前的 hit=0 根因：短 prompt（26 tok）不满一个 chunk（chunk_size=256），decoder 标准路径不计命中——测试须用 ≥chunk 的 prompt。
 - **形态结论**：无 NIXL 时 LMCache 的正确 PD 形态是"**共享 KV 存储**"（prefill 池写 `lm://`、decode 池读），而非官方 proxy+kv_consumer 流程（那条路的直传通道在 0.5.5 只有 nixl）。这恰好更贴 nebula：路由与角色编排由 nebula 自己做（P1c 索引 + 角色化放置），不依赖上游 proxy。
 - **升级门禁**：`scripts/check_lmcache_compat.sh`（quick 无 GPU ~1min / `--full` 双 GPU 端到端；真机两模式均 8/8 通过）。改 `LMCACHE_PIN`/`VLLM_IMAGE` 前必须先跑它。
-- ** Nebula 编排参数（Batch 3 实现输入）**：prefill 副本 = `kv_role: kv_producer` + store 远端；decode 副本 = `kv_role: kv_both` + `retrieve_locations: [RemoteBackend]`；共享 `PYTHONHASHSEED`（chunk key 一致）；`lmcache_server` 为部署新增组件（TCP，硬件无关，昇腾可用）。
+- **Nebula 编排参数（Batch 3 实现输入）**：prefill 副本 = `kv_role: kv_producer` + store 远端；decode 副本 = `kv_role: kv_both` + `retrieve_locations: [RemoteBackend]`；共享 `PYTHONHASHSEED`（chunk key 一致）；`lmcache_server` 为部署新增组件（TCP，硬件无关，昇腾可用）。
 - **Nebula 侧无需 Rust 重写**：LMCache 是引擎进程内的 KV 面，nebula 的边界仍是"控制面 + 路由"（启动参数/角色/放置 + P1c 索引），KV 字节永远不经过 nebula。重写 LMCache 于 Rust = 重写引擎侧组件，违反引擎零侵入原则，无路由收益。
-
-### 7.3 待验证（PD 实现的前置）
-
-- [ ] 昇腾真机（arm64 + NPU）：`pip install lmcache` + LMCacheConnector PD e2e——rig 的昇腾镜像是 arm64 无法在 x86 主机执行，需昇腾机器。
-- [x] CUDA 侧最小 PD 验证（2026-10-11，见 §7.4）：角色语义确认（producer/consumer + disagg_proxy 前置），无 NIXL 路径待 lmcache 修复/升级。
-- [ ] nebula 侧设计：`replica_specs` 角色字段（prefill/decode/混合）+ connector 参数进 ModelSpec（adapter 声明能力，不走 Router 分支）——`pool.md` 扩展后评审。

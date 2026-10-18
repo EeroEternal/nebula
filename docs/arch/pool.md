@@ -226,8 +226,8 @@ stage = warm → decode 池（便宜地 retrieve）
 
 | 故障 | 预期行为 | 状态 |
 |---|---|---|
-| decode 池全灭 | 回落 prefill 池（完整请求能力） | 设计；实现+计数器后验证 |
-| `lmcache_server` 挂/断线/黑洞 | 引擎 recompute（可能抬升 GPU 负载、影响吞吐，非仅 TTFT） | **待故障注入验证** |
+| decode 池全灭 | 回落 prefill 池（完整请求能力） | 已落地（`stage_fallback_total` 计数） |
+| `lmcache_server` 挂/断线/黑洞 | 引擎 recompute（可能抬升 GPU 负载、影响吞吐，非仅 TTFT） | ✅ 已故障注入实证（见上表，0 拒绝） |
 | 远端 KV miss | decode 副本自 prefill | 已实证 |
 
 ### 收益 A/B（✅ 2026-07-13，客户端口径，评估建议 3）
@@ -248,7 +248,7 @@ stage = warm → decode 池（便宜地 retrieve）
 1. common：结构体增量 + **共享校验函数**（含兼容范围与 digest 白名单）+ 单测。
 2. scheduler：planner 投影 role/kv_sharing 进 PlacementAssignment；变更→新版本+Drain。
 3. controller + node：注入映射（复用 kv-events 注入点）；EndpointInfo.role 注册。
-4. Router：stage 判定（affinity 限 decode 域）+ 角色过滤 + `stage_fallback_total`；**不做** decode 池内 P1c 本地优先（v1.1）。
+4. Router：stage 判定（affinity 限 decode 域）+ 角色过滤 + `stage_fallback_total`；v1.1 补齐多 owner `PrefixIndex` 支撑 decode 池内 P1c 本地命中优先（Batch 5.2 代码与单测已合入）。
 5. BFF/UI：校验接入共享逻辑；deployment 编辑暴露 topology/role（admin-ui-change 流程）。
 6. scripts：nebula-stack/probe 增 lmcache_server；**故障注入脚本**（上节四场景）。
 

@@ -323,10 +323,6 @@ impl PrefixIndex {
         self.clear_model_at_watermark(model_uid, 0, 0);
     }
 
-    pub fn clear_model_at_gen(&self, model_uid: &str, reset_gen: u64) {
-        self.clear_model_at_watermark(model_uid, self.epoch, reset_gen);
-    }
-
     /// Drop entries of `model_uid` for a snapshot reset at `(epoch, reset_gen)`.
     ///
     /// - Within the same `epoch`, preserves any newer delta (`e_gen > reset_gen`)
@@ -366,16 +362,18 @@ impl PrefixIndex {
             }
             self.model_reset_watermark
                 .insert(model_uid.to_string(), (epoch, reset_gen));
-            if let Some(old_epoch) = prev_epoch_to_purge {
-                let tkeys: Vec<(String, Vec<u8>, u32)> = self
-                    .tombstones
-                    .iter()
-                    .filter(|e| e.key().0 == model_uid && e.value().0 == old_epoch)
-                    .map(|e| e.key().clone())
-                    .collect();
-                for k in tkeys {
-                    self.tombstones.remove(&k);
-                }
+            let tkeys: Vec<(String, Vec<u8>, u32)> = self
+                .tombstones
+                .iter()
+                .filter(|e| {
+                    e.key().0 == model_uid
+                        && (prev_epoch_to_purge.is_some_and(|old_ep| e.value().0 == old_ep)
+                            || (e.value().0 == epoch && e.value().1 < reset_gen))
+                })
+                .map(|e| e.key().clone())
+                .collect();
+            for k in tkeys {
+                self.tombstones.remove(&k);
             }
         }
 
@@ -422,6 +420,7 @@ impl PrefixIndex {
         self.apply_with_watermark_locked(model_uid, replica_id, events, now_ms, self.epoch, gen);
     }
 
+    #[cfg(test)]
     pub fn apply_with_gen(
         &self,
         model_uid: &str,
@@ -611,6 +610,15 @@ impl PrefixIndex {
     /// holding `watermark_lock` so concurrent snapshots never observe an
     /// allocated generation before its entries are applied.
     pub fn ingest_and_stamp_frames(&self, frames: &mut [bytes::Bytes]) -> (u64, u64) {
+        let parsed = if let Some((model_uid, replica_id)) = parse_topic(&frames[0]) {
+            Some((model_uid, replica_id, parse_batch(&frames[2])))
+        } else {
+            tracing::warn!(
+                topic = %String::from_utf8_lossy(&frames[0]),
+                "unparseable kv event topic"
+            );
+            None
+        };
         let _guard = self
             .watermark_lock
             .write()
@@ -618,8 +626,7 @@ impl PrefixIndex {
         let gen = self.next_generation();
         let epoch = self.epoch;
         frames[1] = bytes::Bytes::from(encode_watermark(epoch, gen));
-        if let Some((model_uid, replica_id)) = parse_topic(&frames[0]) {
-            let events = parse_batch(&frames[2]);
+        if let Some((model_uid, replica_id, events)) = parsed {
             if !events.is_empty() {
                 self.apply_with_watermark_locked(
                     &model_uid,
@@ -630,11 +637,6 @@ impl PrefixIndex {
                     gen,
                 );
             }
-        } else {
-            tracing::warn!(
-                topic = %String::from_utf8_lossy(&frames[0]),
-                "unparseable kv event topic"
-            );
         }
         (epoch, gen)
     }
@@ -914,6 +916,7 @@ fn apply_control(topic: &str, payload: &[u8], index: &PrefixIndex) {
     apply_control_with_watermark(topic, index.epoch(), 0, payload, index);
 }
 
+#[cfg(test)]
 pub fn apply_control_with_gen(topic: &str, gen: u64, payload: &[u8], index: &PrefixIndex) {
     apply_control_with_watermark(topic, index.epoch(), gen, payload, index);
 }

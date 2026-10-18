@@ -284,7 +284,7 @@ pub fn evaluate_slo_with_pools(
         ev.samples.push(SloMetricSample {
             name: "tpot_p95".into(),
             value: Some(tpot),
-            data_source: "engine".into(),
+            data_source: "router".into(),
             unit: "ms".into(),
         });
     }

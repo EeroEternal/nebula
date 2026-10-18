@@ -335,6 +335,23 @@ async fn launch_replica_engine(
 
     let engine_type = assignment.engine_type.as_deref();
     let docker_image_override = assignment.docker_image.as_deref();
+    if assignment.role != nebula_common::ReplicaRole::Mixed || assignment.kv_sharing.is_some() {
+        let effective_image = docker_image_override.or(args.vllm_docker_image.as_deref());
+        let approved = nebula_common::approved_pd_images_from_env();
+        if let Err(reason) = nebula_common::validate_pd_split_image(effective_image, &approved) {
+            tracing::error!(
+                %model_uid,
+                replica_id,
+                image = ?effective_image,
+                %reason,
+                "pd_split runtime image rejected by allowlist on node"
+            );
+            if let Some(request_id) = plan.request_id.as_deref() {
+                mark_request_failed(store, request_id, reason).await;
+            }
+            return Ok(None);
+        }
+    }
     let engine: Arc<dyn Engine> = Arc::from(crate::engine::create_engine(
         args,
         engine_type,

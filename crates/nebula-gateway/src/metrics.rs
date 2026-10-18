@@ -278,8 +278,6 @@ pub fn render_metrics(metrics: &Metrics) -> String {
 
 /// Embedded mode: expose the in-process Router's counters using the same metric
 /// names as a standalone `nebula-router`, so existing dashboards keep working.
-/// Embedded mode: expose the in-process Router's counters using the same metric
-/// names as a standalone `nebula-router`, so existing dashboards keep working.
 pub fn render_router_metrics(router: &nebula_router::Router) -> String {
     use std::fmt::Write as _;
     let mut body = String::new();
@@ -328,12 +326,45 @@ pub fn render_router_metrics(router: &nebula_router::Router) -> String {
         router.hint_expired_total(),
         router.hint_stale_degraded_total()
     );
+    let pre_fb = router.stage_fallback_total("prefill");
+    let dec_fb = router.stage_fallback_total("decode");
     let _ = writeln!(
         body,
-        "# HELP nebula_router_pd_short_bypass_total Short prompts bypassed directly to Decode pool.\n\
+        "# HELP nebula_router_stage_fallback_total pd_split stage pool empty fallbacks by stage.\n\
+         # TYPE nebula_router_stage_fallback_total counter\n\
+         nebula_router_stage_fallback_total{{stage=\"prefill\"}} {pre_fb}\n\
+         nebula_router_stage_fallback_total{{stage=\"decode\"}} {dec_fb}"
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_stage_prefill_spillover_total pd_split cold requests spilled over from a saturated Prefill pool to an idle Decode pool.\n\
+         # TYPE nebula_router_stage_prefill_spillover_total counter\n\
+         nebula_router_stage_prefill_spillover_total {}",
+        router.stage_prefill_spillover_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_pd_short_bypass_total pd_split short prompts (< NEBULA_PD_BYPASS_TOKENS) bypassed directly to Decode pool.\n\
          # TYPE nebula_router_pd_short_bypass_total counter\n\
          nebula_router_pd_short_bypass_total {}",
         router.pd_short_bypass_total()
+    );
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_pd_decode_local_hit_total pd_split warm requests served by a Decode replica that already holds the prefix in local GPU VRAM.\n\
+         # TYPE nebula_router_pd_decode_local_hit_total counter\n\
+         nebula_router_pd_decode_local_hit_total {}",
+        router.pd_decode_local_hit_total()
+    );
+    let (pd_lookups, pd_warm) = router.pd_lookup_stats();
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_pd_lookup_total LMCache controller /lookup queries for pd_split warm detection.\n\
+         # TYPE nebula_router_pd_lookup_total counter\n\
+         nebula_router_pd_lookup_total {pd_lookups}\n\
+         # HELP nebula_router_pd_lookup_warm_total LMCache controller /lookup hits that routed to decode.\n\
+         # TYPE nebula_router_pd_lookup_warm_total counter\n\
+         nebula_router_pd_lookup_warm_total {pd_warm}"
     );
     let _ = writeln!(
         body,

@@ -291,8 +291,11 @@ async fn reconcile_once(
             }
         }
 
-        // Skip CAS if assignment set is unchanged (e.g. scale-up could not place).
-        let same_as_plan = new_assignments.len() == plan.assignments.len()
+        // Skip CAS only when no stale endpoints were evicted and the assignment set is unchanged
+        // (e.g. scale-up could not place). When a stale replica is replaced in-place on a healthy
+        // node, bumping PlacementPlan.version is required so execution agents observe the recovery.
+        let same_as_plan = stale_replica_ids.is_empty()
+            && new_assignments.len() == plan.assignments.len()
             && new_assignments.iter().all(|a| {
                 plan.assignments
                     .iter()
@@ -461,8 +464,7 @@ async fn add_replacement_replicas_from_plan(
     let engine_type = template.and_then(|a| a.engine_type.clone());
     let docker_image = template.and_then(|a| a.docker_image.clone());
 
-    // Build a minimal ModelRequest-like struct for node selection.
-    // We use the plan's existing config (from extra_args) to infer required resources.
+    // Build a minimal ModelRequest-like struct for fallback node selection.
     let dummy_req = ModelRequest {
         id: String::new(),
         request: nebula_common::ModelLoadRequest {
@@ -489,49 +491,136 @@ async fn add_replacement_replicas_from_plan(
     let mut next_new_id = 0_u32;
 
     for i in 0..deficit {
-        if let Some(stale) = stale_templates.get(i as usize) {
-            let port = if used_ports.contains(&stale.port) {
-                allocate_port(default_port, &used_ports)
-            } else {
-                stale.port
-            };
-            used_ports.insert(port);
+        let stale = stale_templates
+            .get(i as usize)
+            .filter(|s| !used_replica_ids.contains(&s.replica_id));
+        let new_replica_id = if let Some(s) = stale {
+            used_replica_ids.insert(s.replica_id);
+            s.replica_id
+        } else {
+            next_unused_replica_id(&mut used_replica_ids, &mut next_new_id)
+        };
 
-            if let Some(indices) = stale.effective_gpu_indices() {
-                let entry = used_gpus.entry(stale.node_id.clone()).or_default();
-                for idx in indices {
-                    entry.insert(idx);
+        let (role, kv_sharing) =
+            replacement_role_and_kv(plan, dep, new_replica_id, new_assignments);
+        let is_pd_split = dep
+            .map(|d| d.topology == Some(nebula_common::DeploymentTopology::PdSplit))
+            .unwrap_or(false)
+            || role != nebula_common::ReplicaRole::Mixed
+            || kv_sharing.is_some();
+
+        let fallback_image = stale
+            .and_then(|s| s.docker_image.as_deref())
+            .or(docker_image.as_deref());
+        let raw_image_ref = if let Some(d) = dep {
+            nebula_common::effective_replica_image(d, fallback_image, new_replica_id as usize)
+        } else {
+            fallback_image
+        };
+        let rep_image = if dep.is_some() {
+            match crate::planner::resolve_concrete_image(store, raw_image_ref).await {
+                Ok(resolved) => resolved.or_else(|| fallback_image.map(str::to_string)),
+                Err(e) => {
+                    warn!(
+                        model_uid=%plan.model_uid,
+                        replica_id=new_replica_id,
+                        error=%e,
+                        "failed to resolve replacement replica image from /images/; skipping replacement tick"
+                    );
+                    break;
                 }
             }
+        } else {
+            raw_image_ref.map(str::to_string)
+        };
 
-            new_assignments.push(nebula_common::PlacementAssignment {
-                replica_id: stale.replica_id,
-                node_id: stale.node_id.clone(),
-                engine_config_path: stale.engine_config_path.clone(),
-                port,
-                gpu_index: stale.gpu_index,
-                gpu_indices: stale.gpu_indices.clone(),
-                extra_args: stale.extra_args.clone().or(extra_args.clone()),
-                engine_type: stale.engine_type.clone().or(engine_type.clone()),
-                docker_image: stale.docker_image.clone().or(docker_image.clone()),
-                pool_id: stale.pool_id.clone(),
-                role: stale.role,
-                kv_sharing: stale.kv_sharing.clone(),
-            });
-            used_replica_ids.insert(stale.replica_id);
-
-            info!(
-                model_uid=%plan.model_uid,
-                replica_id=stale.replica_id,
-                node_id=%stale.node_id,
-                "replaced assignment reusing stale replica placement"
-            );
-            continue;
+        if is_pd_split {
+            let approved = nebula_common::approved_pd_images_from_env();
+            if let Err(reason) =
+                nebula_common::validate_pd_split_image(rep_image.as_deref(), &approved)
+            {
+                warn!(
+                    model_uid=%plan.model_uid,
+                    replica_id=new_replica_id,
+                    reason=%reason,
+                    "replacement replica image rejected by pd_split allowlist; skipping"
+                );
+                break;
+            }
         }
 
-        let new_replica_id = next_unused_replica_id(&mut used_replica_ids, &mut next_new_id);
+        // Reuse the stale replica's node/GPU only when that node still has a fresh heartbeat
+        // (and satisfies CUDA requirement for pd_split); otherwise re-select a healthy node.
+        if let Some(s) = stale {
+            if crate::planner::is_node_healthy_for_placement(store, &s.node_id, is_pd_split).await {
+                let port = if used_ports.contains(&s.port) {
+                    allocate_port(default_port, &used_ports)
+                } else {
+                    s.port
+                };
+                used_ports.insert(port);
 
-        match select_node_and_gpus(store, &dummy_req, &used_gpus).await {
+                if let Some(indices) = s.effective_gpu_indices() {
+                    let entry = used_gpus.entry(s.node_id.clone()).or_default();
+                    for idx in indices {
+                        entry.insert(idx);
+                    }
+                }
+
+                new_assignments.push(nebula_common::PlacementAssignment {
+                    replica_id: new_replica_id,
+                    node_id: s.node_id.clone(),
+                    engine_config_path: s.engine_config_path.clone(),
+                    port,
+                    gpu_index: s.gpu_index,
+                    gpu_indices: s.gpu_indices.clone(),
+                    extra_args: s.extra_args.clone().or_else(|| extra_args.clone()),
+                    engine_type: s.engine_type.clone().or_else(|| engine_type.clone()),
+                    docker_image: rep_image,
+                    pool_id: s.pool_id.clone(),
+                    role,
+                    kv_sharing,
+                });
+
+                info!(
+                    model_uid=%plan.model_uid,
+                    replica_id=new_replica_id,
+                    node_id=%s.node_id,
+                    "replaced assignment reusing healthy node placement"
+                );
+                continue;
+            }
+        }
+
+        let node_selection = if let Some(d) = dep {
+            let replica_spec = d
+                .replica_specs
+                .as_ref()
+                .and_then(|specs| specs.get(new_replica_id as usize));
+            let node_affinity = replica_spec
+                .and_then(|s| s.node_id.as_deref())
+                .or(d.node_affinity.as_deref());
+            let gpu_affinity = replica_spec
+                .and_then(|s| s.gpu_indices.as_deref())
+                .or(d.gpu_affinity.as_deref());
+            let merged_cfg =
+                nebula_common::effective_replica_config(d, None, new_replica_id as usize);
+            crate::planner::select_node_and_gpus_for_deployment(
+                store,
+                &merged_cfg,
+                node_affinity,
+                gpu_affinity,
+                &used_gpus,
+                raw_image_ref,
+                d.allowed_pools.as_deref(),
+                is_pd_split,
+            )
+            .await
+        } else {
+            select_node_and_gpus(store, &dummy_req, &used_gpus).await
+        };
+
+        match node_selection {
             Ok((node_id, gpu_indices)) => {
                 let port = allocate_port(default_port, &used_ports);
                 used_ports.insert(port);
@@ -554,48 +643,6 @@ async fn add_replacement_replicas_from_plan(
                     Some(gpu_indices)
                 };
 
-                let (role, kv_sharing) =
-                    replacement_role_and_kv(plan, dep, new_replica_id, new_assignments);
-                let rep_image = if let Some(d) = dep {
-                    let raw = nebula_common::effective_replica_image(
-                        d,
-                        docker_image.as_deref(),
-                        new_replica_id as usize,
-                    );
-                    match crate::planner::resolve_concrete_image(store, raw).await {
-                        Ok(resolved) => resolved.or_else(|| docker_image.clone()),
-                        Err(e) => {
-                            warn!(
-                                model_uid=%plan.model_uid,
-                                replica_id=new_replica_id,
-                                error=%e,
-                                "failed to resolve replacement replica image from /images/; skipping replacement tick"
-                            );
-                            break;
-                        }
-                    }
-                } else {
-                    docker_image.clone()
-                };
-                if dep
-                    .map(|d| d.topology == Some(nebula_common::DeploymentTopology::PdSplit))
-                    .unwrap_or(false)
-                    || role != nebula_common::ReplicaRole::Mixed
-                {
-                    let approved = nebula_common::approved_pd_images_from_env();
-                    if let Err(reason) =
-                        nebula_common::validate_pd_split_image(rep_image.as_deref(), &approved)
-                    {
-                        warn!(
-                            model_uid=%plan.model_uid,
-                            replica_id=new_replica_id,
-                            reason=%reason,
-                            "replacement replica image rejected by pd_split allowlist; skipping"
-                        );
-                        break;
-                    }
-                }
-
                 new_assignments.push(nebula_common::PlacementAssignment {
                     replica_id: new_replica_id,
                     node_id,
@@ -603,10 +650,14 @@ async fn add_replacement_replicas_from_plan(
                     port,
                     gpu_index,
                     gpu_indices: gpu_indices_field,
-                    extra_args: extra_args.clone(),
-                    engine_type: engine_type.clone(),
+                    extra_args: stale
+                        .and_then(|s| s.extra_args.clone())
+                        .or_else(|| extra_args.clone()),
+                    engine_type: stale
+                        .and_then(|s| s.engine_type.clone())
+                        .or_else(|| engine_type.clone()),
                     docker_image: rep_image,
-                    pool_id: None,
+                    pool_id: stale.and_then(|s| s.pool_id.clone()),
                     role,
                     kv_sharing,
                 });
@@ -928,5 +979,41 @@ mod assignment_tests {
         let (role_oob, kv_oob) = replacement_role_and_kv(&empty_plan, Some(&dep), 5, &surviving);
         assert_eq!(role_oob, ReplicaRole::Prefill);
         assert_eq!(kv_oob, Some(kv));
+    }
+
+    #[test]
+    fn pd_split_stale_template_rejects_dead_or_non_cuda_node() {
+        use crate::planner::node_eligible_for_placement;
+        use nebula_common::{GpuStatus, NodeStatus};
+
+        let now = 1_000_000_u64;
+        let base_node = NodeStatus {
+            node_id: "n0".into(),
+            last_heartbeat_ms: now,
+            gpus: vec![GpuStatus {
+                index: 0,
+                name: Some("RTX 5090".into()),
+                memory_total_mb: 24_000,
+                memory_used_mb: 1_000,
+                temperature_c: None,
+                utilization_gpu: None,
+                driver_version: None,
+                cuda_version: None,
+            }],
+            platform: Some("cuda_x86".into()),
+            api_addr: None,
+        };
+
+        assert!(node_eligible_for_placement(&base_node, now, true));
+
+        let mut stale_node = base_node.clone();
+        stale_node.last_heartbeat_ms = now.saturating_sub(120_000);
+        assert!(!node_eligible_for_placement(&stale_node, now, false));
+        assert!(!node_eligible_for_placement(&stale_node, now, true));
+
+        let mut ascend_node = base_node;
+        ascend_node.platform = Some("ascend_910b".into());
+        assert!(node_eligible_for_placement(&ascend_node, now, false));
+        assert!(!node_eligible_for_placement(&ascend_node, now, true));
     }
 }

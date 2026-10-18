@@ -451,20 +451,19 @@ pub async fn list_diagnostic_events(
             if !is_vllm {
                 continue;
             }
-            let prefix_caching_expected = dep
-                .config_overrides
-                .as_ref()
-                .and_then(|c| c.enable_prefix_caching)
-                .or_else(|| {
-                    spec.and_then(|s| s.config.as_ref())
-                        .and_then(|c| c.enable_prefix_caching)
-                })
-                .unwrap_or(true);
+            let prefix_caching_expected = nebula_common::effective_replica_config(
+                dep,
+                spec.and_then(|s| s.config.as_ref()),
+                st.replica_id as usize,
+            )
+            .and_then(|c| c.enable_prefix_caching)
+            .unwrap_or(true);
+            let active_traffic = st.pending_requests > 0 || st.prefix_cache_queries_total.is_some();
             if let Some(ev) = nebula_common::diagnose_hybrid_prefix_cache(
                 &st.model_uid,
                 st.replica_id,
                 prefix_caching_expected,
-                st.pending_requests > 0,
+                active_traffic,
                 st.prefix_cache_hit_rate,
                 st.prefix_cache_queries_total,
                 st.last_updated_ms,

@@ -176,6 +176,9 @@ fn contains_marker(haystack: &[u8], needle: &[u8]) -> bool {
 pub struct ToolCallScanner {
     /// Incomplete trailing line carried across chunks.
     buf: Vec<u8>,
+    /// True if `tool_calls` was already spotted in the prefix of an oversized
+    /// incomplete SSE line before its leading bytes were drained.
+    seen_in_current_line: bool,
 }
 
 /// Cap on a single carried line. A JSON event larger than this is not something
@@ -191,13 +194,19 @@ impl ToolCallScanner {
         let mut consumed = 0;
         while let Some(nl) = self.buf[consumed..].iter().position(|b| *b == b'\n') {
             let line = &self.buf[consumed..consumed + nl];
-            if contains_marker(line, TOOL_CALLS_MARKER) && response_has_tool_calls(line) {
+            if self.seen_in_current_line
+                || (contains_marker(line, TOOL_CALLS_MARKER) && response_has_tool_calls(line))
+            {
                 hit = true;
             }
+            self.seen_in_current_line = false;
             consumed += nl + 1;
         }
         self.buf.drain(..consumed);
         if self.buf.len() > TOOL_CALLS_SCAN_LINE_CAP {
+            if contains_marker(&self.buf, TOOL_CALLS_MARKER) {
+                self.seen_in_current_line = true;
+            }
             let keep = self.buf.len() - TOOL_CALLS_SCAN_CARRY;
             self.buf.drain(..keep);
         }
@@ -216,17 +225,6 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_millis() as u64
-}
-
-/// Extract the prompt text for prefix hashing: `/v1/completions`-style
-/// `prompt` (string, or first element of a string array).
-pub fn extract_prompt_string(body: &[u8]) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    match v.get("prompt")? {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Array(a) => a.first().and_then(|x| x.as_str()).map(str::to_string),
-        _ => None,
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -581,10 +579,6 @@ impl Router {
     /// so when the same tenant's session returns within the lease window
     /// (`NEBULA_TOOL_PAUSE_TTL_MS`, default 60s), it gets one priority queue
     /// admission and strong replica anchoring before the lease is consumed.
-    pub fn mark_tool_pause(&self, session_id: &str, model_uid: &str, replica_id: u32) {
-        self.mark_tool_pause_for_tenant_at(None, session_id, model_uid, replica_id, now_ms());
-    }
-
     pub fn mark_tool_pause_for_tenant(
         &self,
         tenant_id: Option<&str>,
@@ -593,10 +587,6 @@ impl Router {
         replica_id: u32,
     ) {
         self.mark_tool_pause_for_tenant_at(tenant_id, session_id, model_uid, replica_id, now_ms());
-    }
-
-    pub fn mark_tool_pause_at(&self, session_id: &str, model_uid: &str, replica_id: u32, now: u64) {
-        self.mark_tool_pause_for_tenant_at(None, session_id, model_uid, replica_id, now);
     }
 
     pub fn mark_tool_pause_for_tenant_at(
@@ -644,11 +634,7 @@ impl Router {
         self.tool_pause_marked_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// True when `(None, session_id)` currently holds a non-expired Tool-Pause lease.
-    pub fn has_active_tool_pause(&self, session_id: &str) -> bool {
-        self.has_active_tool_pause_for_tenant_at(None, session_id, now_ms())
-    }
-
+    #[cfg(test)]
     pub fn has_active_tool_pause_for_tenant(
         &self,
         tenant_id: Option<&str>,
@@ -657,10 +643,7 @@ impl Router {
         self.has_active_tool_pause_for_tenant_at(tenant_id, session_id, now_ms())
     }
 
-    pub fn has_active_tool_pause_at(&self, session_id: &str, now: u64) -> bool {
-        self.has_active_tool_pause_for_tenant_at(None, session_id, now)
-    }
-
+    #[cfg(test)]
     pub fn has_active_tool_pause_for_tenant_at(
         &self,
         tenant_id: Option<&str>,
@@ -685,6 +668,7 @@ impl Router {
     /// server-recorded `Tool-Pause` lease (`finish_reason == "tool_calls"`).
     /// Client-supplied request bodies (`role == "tool"`) are never trusted on
     /// their own to prevent privilege spoofing and cross-tenant session hijacking.
+    #[cfg(test)]
     pub fn is_tool_continuation(&self, session_id: Option<&str>) -> bool {
         self.is_tool_continuation_for_tenant(None, session_id)
     }
@@ -830,17 +814,6 @@ impl Router {
         self.prefix_index.entries_by_model()
     }
 
-    /// Tokenize `prompt` (via the model's tokenizer, when configured) and
-    /// chain its vLLM-compatible block hashes.
-    pub fn prompt_hashes(&self, model_uid: &str, prompt: &str) -> Option<Vec<[u8; 32]>> {
-        let name = self
-            .model_uids_to_names
-            .get(model_uid)
-            .map(|e| e.value().clone());
-        self.prefix_hasher
-            .prompt_hashes(model_uid, name.as_deref(), prompt)
-    }
-
     /// Route hints for a request body: prefix hashes (prefix_affinity index /
     /// pd_split warm decisions) plus the pd_split controller warm signal.
     /// Tokenizes the body at most once so chat template rendering and BPE
@@ -915,14 +888,6 @@ impl Router {
         }
     }
 
-    pub fn body_prompt_hashes(&self, model_uid: &str, body: &[u8]) -> Option<Vec<[u8; 32]>> {
-        if self.strategy_name() != "prefix_affinity" && !self.model_has_role_pools(model_uid) {
-            return None;
-        }
-        let ids = self.body_token_ids(model_uid, body)?;
-        Some(self.prefix_hasher.hashes_from_ids(&ids))
-    }
-
     pub fn record_endpoint_success(&self, model_uid: &str, replica_id: u32) {
         self.endpoint_circuit
             .remove(&(model_uid.to_string(), replica_id));
@@ -960,16 +925,6 @@ impl Router {
             return open;
         }
         false
-    }
-
-    pub fn clear_session_affinity(&self, session_id: &str) {
-        self.clear_session_affinity_for_tenant(None, session_id);
-    }
-
-    pub fn clear_session_affinity_for_tenant(&self, tenant_id: Option<&str>, session_id: &str) {
-        let key = session_key(tenant_id, session_id);
-        self.session_affinity.remove(&key);
-        self.tool_pause_leases.remove(&key);
     }
 
     /// Register a bidirectional model_uid ↔ model_name mapping.
@@ -1192,37 +1147,41 @@ impl Router {
             let _ = self
                 .tool_pause_leases
                 .remove_if(&key, |_, (_, _, exp, _)| *exp <= now);
-            let tool_pause_consumed = self
+            let consumed_lease = self
                 .tool_pause_leases
-                .remove_if(&key, |_, (_, _, exp, _)| *exp > now)
-                .is_some();
-            if let Some(aff) = self.session_affinity.get(&key) {
-                let (aff_model_uid, aff_replica_id) = aff.value();
-                if aff_model_uid == model_uid {
-                    let excluded = exclude
-                        .map(|(m, r)| m == aff_model_uid.as_str() && r == *aff_replica_id)
-                        .unwrap_or(false);
-                    if excluded {
-                        // Retry path explicitly excludes this sticky endpoint.
-                    } else if let Some(ep) = self
-                        .endpoints
-                        .get(&(aff_model_uid.clone(), *aff_replica_id))
-                        .map(|v| v.value().clone())
+                .remove_if(&key, |_, (m, _, exp, _)| *exp > now && m == model_uid)
+                .map(|(_, (m, r, _, _))| (m, r));
+            let tool_pause_consumed = consumed_lease.is_some();
+            let target_affinity = consumed_lease.or_else(|| {
+                self.session_affinity
+                    .get(&key)
+                    .map(|aff| aff.value().clone())
+                    .filter(|(m, _)| m == model_uid)
+            });
+            if let Some((aff_model_uid, aff_replica_id)) = target_affinity {
+                let excluded = exclude
+                    .map(|(m, r)| m == aff_model_uid.as_str() && r == aff_replica_id)
+                    .unwrap_or(false);
+                if excluded {
+                    // Retry path explicitly excludes this sticky endpoint.
+                } else if let Some(ep) = self
+                    .endpoints
+                    .get(&(aff_model_uid, aff_replica_id))
+                    .map(|v| v.value().clone())
+                {
+                    let plan_ok = plan_version.map(|v| ep.plan_version == v).unwrap_or(true);
+                    if ep.status == EndpointStatus::Ready
+                        && plan_ok
+                        && !self.is_endpoint_circuit_open(&ep.model_uid, ep.replica_id)
+                        && ep.role != ReplicaRole::Prefill
                     {
-                        let plan_ok = plan_version.map(|v| ep.plan_version == v).unwrap_or(true);
-                        if ep.status == EndpointStatus::Ready
-                            && plan_ok
-                            && !self.is_endpoint_circuit_open(&ep.model_uid, ep.replica_id)
-                            && ep.role != ReplicaRole::Prefill
-                        {
-                            if tool_pause_consumed {
-                                self.tool_continuation_hit_total
-                                    .fetch_add(1, Ordering::Relaxed);
-                            }
-                            self.session_affinity_hit_total
+                        if tool_pause_consumed {
+                            self.tool_continuation_hit_total
                                 .fetch_add(1, Ordering::Relaxed);
-                            return Ok(ep);
                         }
+                        self.session_affinity_hit_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Ok(ep);
                     }
                 }
             }
@@ -1279,13 +1238,19 @@ impl Router {
         let mut candidates_data: Vec<(EndpointInfo, Option<EndpointStats>)> =
             filtered.into_iter().zip(stats_snapshot).collect();
 
-        // Stats-missing degradation: when any fresh stats exist, deprioritize stale/missing stats
-        // by dropping missing-stats candidates from this routing decision.
+        // Stats-missing degradation: when fresh stats exist within a role pool,
+        // deprioritize stale/missing stats in that role pool without dropping
+        // a different pd_split role pool whose stats have not been scraped yet.
         if candidates_data.iter().any(|(_, s)| s.is_some()) {
             let before_len = candidates_data.len();
             let with_stats: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
                 .iter()
-                .filter(|(_, s)| s.is_some())
+                .filter(|(ep, s)| {
+                    s.is_some()
+                        || !candidates_data
+                            .iter()
+                            .any(|(other, os)| other.role == ep.role && os.is_some())
+                })
                 .map(|(ep, s)| (ep.clone(), s.clone()))
                 .collect();
             if !with_stats.is_empty() {
@@ -1398,35 +1363,35 @@ impl Router {
                     "pd_split role pool empty; falling back to all candidates"
                 );
             } else if want == ReplicaRole::Prefill && is_short_prompt {
-                // Only bypass to Decode replicas with fresh stats (`s.is_some()`):
-                // never treat missing stats as `pending_requests = 0`.
-                let decode_with_stats: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
-                    .iter()
-                    .filter(|(ep, s)| ep.role == ReplicaRole::Decode && s.is_some())
-                    .cloned()
-                    .collect();
+                // Only bypass to Decode replicas with fresh stats (`s.is_some()`)
+                // whose pending_requests == 0 or <= min_prefill_pending:
+                // never treat missing stats as `pending_requests = 0` or include
+                // saturated Decode replicas in the bypass candidate set.
                 let min_prefill_pending = pool
                     .iter()
                     .filter_map(|(_, s)| s.as_ref().map(|st| st.pending_requests))
                     .min()
                     .unwrap_or(0);
-                let min_decode_pending = decode_with_stats
+                let bypass_decode: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
                     .iter()
-                    .filter_map(|(_, s)| s.as_ref().map(|st| st.pending_requests))
-                    .min();
-                if let Some(min_decode_pending) = min_decode_pending {
-                    if min_decode_pending == 0 || min_decode_pending <= min_prefill_pending {
-                        self.pd_short_bypass_total.fetch_add(1, Ordering::Relaxed);
-                        tracing::debug!(
-                            model_uid = %model_uid,
-                            bypass_tokens,
-                            min_decode_pending,
-                            "pd_split short prompt bypassing prefill pool to unsaturated decode pool"
-                        );
-                        candidates_data = decode_with_stats;
-                    } else {
-                        candidates_data = pool;
-                    }
+                    .filter(|(ep, s)| {
+                        ep.role == ReplicaRole::Decode
+                            && s.as_ref().is_some_and(|st| {
+                                st.pending_requests == 0
+                                    || st.pending_requests <= min_prefill_pending
+                            })
+                    })
+                    .cloned()
+                    .collect();
+                if !bypass_decode.is_empty() {
+                    self.pd_short_bypass_total.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        model_uid = %model_uid,
+                        bypass_tokens,
+                        bypass_candidates = bypass_decode.len(),
+                        "pd_split short prompt bypassing prefill pool to unsaturated decode pool"
+                    );
+                    candidates_data = bypass_decode;
                 } else {
                     candidates_data = pool;
                 }
@@ -1498,7 +1463,11 @@ impl Router {
                 )
             }
         });
-        let prefix_owner = scoped_prefix_owner.or(any_prefix_owner);
+        let prefix_owner = if is_pd_split {
+            scoped_prefix_owner
+        } else {
+            scoped_prefix_owner.or(any_prefix_owner)
+        };
 
         let candidates: Vec<Candidate> = candidates_data
             .iter()
@@ -2715,5 +2684,62 @@ mod tool_call_scanner_tests {
     fn finish_reason_tool_calls_is_detected() {
         let mut s = ToolCallScanner::default();
         assert!(s.feed(b"data: {\"choices\":[{\"finish_reason\":\"tool_calls\"}]}\n"));
+    }
+
+    #[test]
+    fn detects_tool_calls_when_sse_line_exceeds_8kib_with_long_arguments_suffix() {
+        let mut s = ToolCallScanner::default();
+        let prefix = br#"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","function":{"arguments":""#;
+        let long_args = vec![b'a'; 12 * 1024];
+        let suffix = br#""}}]}}]}
+"#;
+        assert!(!s.feed(prefix));
+        assert!(!s.feed(&long_args));
+        assert!(s.feed(suffix));
+    }
+
+    #[test]
+    fn tool_pause_lease_anchors_even_if_session_affinity_evicted_and_isolates_model() {
+        let router = Router::new();
+        let make_ep = |model_uid: &str, replica_id: u32, port: u16| EndpointInfo {
+            model_uid: model_uid.into(),
+            replica_id,
+            plan_version: 1,
+            node_id: format!("n{replica_id}"),
+            endpoint_kind: nebula_common::EndpointKind::NativeHttp,
+            api_flavor: "openai".into(),
+            status: EndpointStatus::Ready,
+            last_heartbeat_ms: 0,
+            status_detail: None,
+            grpc_target: None,
+            base_url: Some(format!("http://127.0.0.1:{port}")),
+            engine_type: Some("vllm".into()),
+            role: ReplicaRole::Mixed,
+        };
+        router.upsert_endpoint(make_ep("m1", 0, 8000));
+        router.upsert_endpoint(make_ep("m1", 1, 8001));
+        router.upsert_endpoint(make_ep("m2", 0, 8002));
+
+        router.mark_tool_pause_for_tenant(Some("tenant_a"), "sess-1", "m1", 1);
+        // Simulate session_affinity eviction while tool_pause_leases still holds the lease.
+        router.session_affinity.clear();
+
+        let ctx = ExecutionContext {
+            session_id: Some("sess-1".into()),
+            tenant_id: Some("tenant_a".into()),
+            ..Default::default()
+        };
+
+        // Routing to a DIFFERENT model ("m2") with the same session must NOT consume m1's lease.
+        let ep_m2 = router.route(&ctx, "m2", None, false).unwrap();
+        assert_eq!(ep_m2.model_uid, "m2");
+        assert_eq!(router.tool_continuation_hit_total(), 0);
+        assert!(router.has_active_tool_pause_for_tenant(Some("tenant_a"), "sess-1"));
+
+        // Routing to "m1" consumes the lease and anchors to replica 1 even though session_affinity was empty.
+        let ep_m1 = router.route(&ctx, "m1", None, false).unwrap();
+        assert_eq!(ep_m1.replica_id, 1);
+        assert_eq!(router.tool_continuation_hit_total(), 1);
+        assert!(!router.has_active_tool_pause_for_tenant(Some("tenant_a"), "sess-1"));
     }
 }
