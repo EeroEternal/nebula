@@ -8,6 +8,7 @@ use nebula_common::{
     ReplicaRole,
 };
 
+pub mod first_byte;
 pub mod kv_events;
 pub mod kv_hash;
 pub mod prompt_hash;

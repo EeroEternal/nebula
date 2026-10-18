@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import json
 import sys
+import os
 import time
 
+# MOCK_STALL_FIRST=1 makes this instance stall before any frame on every request, so a
+# second instance on another port can play the healthy replica.
+STALL_FIRST_ALWAYS = os.environ.get("MOCK_STALL_FIRST") == "1"
+
 STALL_SENTINEL = "__stall__"
+# Stalls *before* the first frame: exercises the pre-first-byte retry (issue #42).
+STALL_FIRST_SENTINEL = "__stall_first__"
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -54,8 +61,10 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         model = req.get("model", "mock-model")
         if path == "/v1/chat/completions":
             if req.get("stream"):
-                stall = STALL_SENTINEL in json.dumps(req.get("messages") or req.get("prompt") or "")
-                self._stream_chat(model, stall=stall)
+                payload = json.dumps(req.get("messages") or req.get("prompt") or "")
+                stall = STALL_SENTINEL in payload
+                stall_first = STALL_FIRST_ALWAYS or STALL_FIRST_SENTINEL in payload
+                self._stream_chat(model, stall=stall, stall_first=stall_first)
                 return
             self._send_json(
                 200,
@@ -92,11 +101,16 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
-    def _stream_chat(self, model: str, stall: bool = False) -> None:
+    def _stream_chat(self, model: str, stall: bool = False, stall_first: bool = False) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
+        if stall_first:
+            # Headers only, then silence: a replica that accepted the request and never
+            # produced a byte. The proxy must retry elsewhere, not commit a status.
+            time.sleep(300)
+            return
         frames = 2 if stall else 200
         for i in range(frames):
             chunk = {
