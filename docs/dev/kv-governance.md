@@ -12,7 +12,7 @@
 | 阶段 | 对 KV Cache 的抽象 | 核心机制 | 局限性 |
 |------|-------------------|----------|--------|
 | **Gen 1：无状态负载均衡（Stateless LB）** | **不可见（黑盒）** | `RoundRobin` / `LeastPending` 盲目均摊 | 每个副本重复 Prefill、重复存储相同前缀，集群有效缓存容量除以 $N$ |
-| **Gen 2：信号驱动选路（Signal-Driven Routing，已落地）** | **Router 侧的只读路由信号（`warm/cold` + 块匹配深度）** | ZMQ `BlockStored` 事件 + [`PrefixIndex`](../../crates/nebula-router/src/kv_events.rs#L193) + [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L723) `/lookup` | 控制面（L2/L3/L4）对缓存容量分层、租户隔离、主动预热、生命周期与成本节省缺乏主动治理能力 |
+| **Gen 2：信号驱动选路（Signal-Driven Routing，已落地）** | **Router 侧的只读路由信号（`warm/cold` + 块匹配深度）** | ZMQ `BlockStored` 事件 + [`PrefixIndex`](../../crates/nebula-router/src/kv_events.rs#L193) + [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L707) `/lookup` | 控制面（L2/L3/L4）对缓存容量分层、租户隔离、主动预热、生命周期与成本节省缺乏主动治理能力 |
 | **Gen 3：一等公民分层资源（Tiered Resource Governance，本文目标）** | **横跨 L2/L3/L4 的可声明、可隔离、可预热、可记账资源** | **声明（Declare）**L0/L1/L2 容量 → **隔离（Isolate）**租户命名空间 → **预热/钉死（Warm/Pin）**核心前缀 → **记账（Account）**节省算力与成本 | 在严守 Zone C / S3 边界（KV 字节流永不经手 Nebula）的前提下，闭环企业级缓存数据管理 |
 
 > **核心定位演进命题**：
@@ -70,7 +70,7 @@
 
 拆解 Tensormesh Platform 可以得出两条极其重要的工程判断：
 1. **底层数据面原语 90% 已在开源 LMCache 中就绪**：包括 `LMCACHE_LOCAL_CPU`（L1）、`LMCACHE_LOCAL_DISK`（L2）、`lmcache_server`（远端共享层）以及 `lmcache_controller`（端口 `9000`）原生的 `/lookup`、`/pin`、`/clear`、`/move`、`/compress` 接口。Nebula **完全不需要重复造存储轮子（S3）**。
-2. **Tensormesh 真正收费的“企业治理与运维层”，恰好有 70% 落在 Nebula 已建成的 L2/L3/L4 控制面骨架上**：Nebula 已经有模型部署规格（[`ModelDeployment`](../../crates/nebula-common/src/model_deployment.rs#L71)）、L3 容量与选型（[`capacity.rs`](../../crates/nebula-common/src/capacity.rs#L40) / [`selection.rs`](../../crates/nebula-common/src/selection.rs)）、多租户准入队列（[`queue.rs`](../../crates/nebula-common/src/queue.rs#L110)）、兼容矩阵（[`compat.rs`](../../crates/nebula-common/src/compat.rs#L221)）以及 BFF 审计计费。**只要把 KV Cache 作为一等公民资源接入这四层，Nebula 就能在不依赖 K8s、零商业锁定的前提下，提供完整的企业级 Cache 治理体验。**
+2. **Tensormesh 真正收费的“企业治理与运维层”，恰好有 70% 落在 Nebula 已建成的 L2/L3/L4 控制面骨架上**：Nebula 已经有模型部署规格（[`ModelDeployment`](../../crates/nebula-common/src/model_deployment.rs#L71)）、L3 容量与选型（[`capacity.rs`](../../crates/nebula-common/src/capacity.rs#L40) / [`selection.rs`](../../crates/nebula-common/src/selection.rs)）、多租户准入队列（[`queue.rs`](../../crates/nebula-common/src/queue.rs#L112)）、兼容矩阵（[`compat.rs`](../../crates/nebula-common/src/compat.rs#L221)）以及 BFF 审计计费。**只要把 KV Cache 作为一等公民资源接入这四层，Nebula 就能在不依赖 K8s、零商业锁定的前提下，提供完整的企业级 Cache 治理体验。**
 
 ---
 
@@ -169,14 +169,14 @@ flowchart TB
      - 当处于 `TenantIsolated` 模式时，Gateway 向转发给 vLLM 的 OpenAI 请求注入确定性 `cache_salt = hmac_sha256(cluster_secret, tenant_id)`，同时 Router 在计算首块链式哈希（[`compute_block_hashes`](../../crates/nebula-router/src/kv_hash.rs#L158) 的 `parent_hash` / `extra_keys`）时混入相同的 `cache_salt`。
      - **效果**：不同租户即便发送完全相同的 Prompt，在引擎 HBM、`nebula-indexd` 和 `lmcache_server` 中生成的 8 字节块 Key 也完全正交，**以零运行时通信开销彻底杜绝跨租户缓存命中与侧信道探测**。
   2. **基于优先级的缓存防污染策略**：
-     - 结合 [`EngineQueue`](../../crates/nebula-common/src/queue.rs#L110) 的优先级语义，对标记为 `batch / background` 的低优请求，支持在网关侧自动附加跳过远端缓存写入提示或路由至指定副本，保护核心在线池的 L1/L2 命中率。
+     - 结合 [`EngineQueue`](../../crates/nebula-common/src/queue.rs#L112) 的优先级语义，对标记为 `batch / background` 的低优请求，支持在网关侧自动附加跳过远端缓存写入提示或路由至指定副本，保护核心在线池的 L1/L2 命中率。
 
 ---
 
 ### 4.3 预热与控制（Warm & Pin）：对接 `lmcache_controller` 原生生命周期 API
 
 #### 现状与痛点
-开源 `lmcache_controller`（端口 `9000`）已经原生实现了完整的 KV 块目录管理与控制命令（`/lookup`、`/clear`、`/pin`、`/compress`、`/move`），但目前 Nebula 仅在 [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L723) 中使用了只读的 `POST /lookup`。每当企业更新公共 System Prompt、挂载大型工具集定义（Tools JSON Schema）或准备迎接早高峰流量时，缺乏主动预热与防淘汰锁存手段。
+开源 `lmcache_controller`（端口 `9000`）已经原生实现了完整的 KV 块目录管理与控制命令（`/lookup`、`/clear`、`/pin`、`/compress`、`/move`），但目前 Nebula 仅在 [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L707) 中使用了只读的 `POST /lookup`。每当企业更新公共 System Prompt、挂载大型工具集定义（Tools JSON Schema）或准备迎接早高峰流量时，缺乏主动预热与防淘汰锁存手段。
 
 #### 改造方案与代码触点
 - **触点**：
