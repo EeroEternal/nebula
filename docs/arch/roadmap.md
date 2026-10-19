@@ -22,7 +22,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **Product P6** | P6 | 多租户 / 配额 / 成本 | ✅ Batch 1 / ✅ 隔离压测 | Tenant + Gateway 准入 + 用量成本；真机双租户 RPS/ACL 隔离见 `scripts/phase0_tenant_isolation.sh`；成本联动 → Phase 3 |
 | **N3** | D4/D5 | 按需能力 | ⏸ | 跨节点 TP / EngineShim → Phase 2（有需求再开） |
 | **N4 其余** | UX | 产品化 | ⏸ | 硬件镜像、Console 大功能；选型向导属 Phase 1 |
-| **K8s** | K0–K3 | K8s / HAMi 执行面 | ⏸ | 与 Phase 正交；有集群虚拟化客户再开；见 [`../dev/k8s.md`](../dev/k8s.md) |
+| **K8s** | K0–K3 | K8s 执行面 | ⏸ | 与 Phase 正交；有集群虚拟化客户再开；见 [`../dev/k8s.md`](../dev/k8s.md) |
 | **Integration** | I0–I4 | Control API / 对外暴露 | ✅ | 见 [`../dev/integration-plan.md`](../dev/integration-plan.md) |
 
 原则：不阻塞日常推理；不破坏 L0 主轴；智能/重治理不进推理热路径。
@@ -41,7 +41,7 @@ M1 / N1 HA 主体 / N2 / O1–O8 / **产品对齐 P0–P6 Batch 1** 已随 **v1.
 | **Phase 2** | L2 | HardwarePool、池约束、PD/TP（按需）、故障隔离 | ⏸ 设计 ✅ / 代码有需求再开 | [`pool.md`](./pool.md)；N3 D4/D5；与 K8s 执行面正交 |
 | **Phase 3** | L4 + L3 闭环 | SLO→建议→半自动；容量规划；成本与选择联动；企业 SSO/RBAC | ⏸ 建议✅ / 容量骨架✅ / Selection 联动暂缓 | SLO 可解释建议；`GET /api/v2/capacity` 只读缺口；半自动落地与成本反哺未做 |
 
-旁路（不插入 Phase 主轴）：**K8s/HAMi K0–K1** — 有客户再开；边界见 [`AGENTS.md`](../../AGENTS.md)、[`../dev/k8s.md`](../dev/k8s.md)。
+旁路（不插入 Phase 主轴）：**K8s K0–K1** — 有客户再开；边界见 [`AGENTS.md`](../../AGENTS.md)、[`../dev/k8s.md`](../dev/k8s.md)。
 ### Product P6 Batch 1 勾选
 
 | 项 | 状态 |

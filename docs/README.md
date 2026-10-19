@@ -61,7 +61,7 @@
 | [`dev/integration.md`](dev/integration.md) | **上层平台集成**：Gateway 推理 / Admin 编排 / 鉴权 / trace / ID 对齐 |
 | [`dev/integration-plan.md`](dev/integration-plan.md) | Nebula 对外暴露与 Control API 优化计划（Tier A–D，I0–I3） |
 | [`dev/openapi-control.yaml`](dev/openapi-control.yaml) | Gateway Control API OpenAPI 现状（I0） |
-| [`dev/k8s.md`](dev/k8s.md) | K8s / HAMi 运行时边界与分阶段方案 |
+| [`dev/k8s.md`](dev/k8s.md) | K8s 运行时边界与分阶段方案 |
 | [`dev/stats.md`](dev/stats.md) | 引擎状态数据格式 |
 | [`dev/unigateway.md`](dev/unigateway.md) | 接口层规范（UG 协议适配 + C5 tooling 门控） |
 | [`dev/ha/report.md`](dev/ha/report.md) | 高可用验收报告 |

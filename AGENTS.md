@@ -25,7 +25,7 @@ Hard limit **80 lines / 1200 tokens**. Near the limit: **zero-sum** (add one, re
 | Release / tagging | skill [`release`](.agents/skills/release/SKILL.md) |
 | Code review / PR audit | skill [`review`](.agents/skills/review/SKILL.md) |
 | etcd key / prefix / lease / owner | [`docs/dev/etcd.md`](docs/dev/etcd.md), [`docs/dev/ownership.md`](docs/dev/ownership.md) |
-| K8s / HAMi runtime | [`docs/dev/k8s.md`](docs/dev/k8s.md) |
+| K8s runtime | [`docs/dev/k8s.md`](docs/dev/k8s.md) |
 | KV affinity / `pd_split` / KV governance | [`docs/dev/direction.md`](docs/dev/direction.md), [`docs/arch/pool.md`](docs/arch/pool.md), [`docs/dev/kv-governance.md`](docs/dev/kv-governance.md) |
 | Docs under `docs/` | [`docs-layout.md`](docs/ai/agents/docs-layout.md) |
 | `tokio::spawn` / scripts / exit codes | [`engineering.md`](docs/ai/agents/engineering.md) |
