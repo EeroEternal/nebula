@@ -1,119 +1,94 @@
 # 项目范围与设计评估
 
-> 日期：2026-10-12。评估基线：`b3414f5`，workspace v1.10.0。
-> 性质：只读顾问评估，记录本次发现与建议，不是上线认证，也不替代当前能力说明或排期。
-> 定位与排期分别以 [`vision.md`](../arch/vision.md)、[`roadmap.md`](../arch/roadmap.md) 为准；UI 规范入口为 [`docs/design.md`](../design.md)。
+> 日期：2026-10-19。评估基线：`fa154c0`（自 `b3414f5` / `ea24c3a` 合入 PR `#35`–`#57` 后；含 #56 移除文档中的 HAMi 计划、#57 删除遗留 `admin/` 控制台），workspace v1.10.0。
+> 性质：只读架构与代码设计评估，记录基线进展、当前发现与改进建议，不替代正式能力说明或排期。
+> 代码引用约定：**只给文件与符号名，不带行号** —— 行号随版本漂移，本仓已多次因锚点失真返工（见 skill `verify-design-doc`）。
+> 定位与排期分别以 [`vision.md`](../arch/vision.md)、[`roadmap.md`](../arch/roadmap.md) 为准；流式与缓存现状见 [`streaming-cache.md`](streaming-cache.md)；UI 规范入口为 [`docs/design.md`](../design.md)。
 
 ## 总体判断
 
-**架构主轴值得保留，但功能扩张快于产品边界和设计契约的收敛。**
-下一阶段应少增加功能，优先把已有能力变成可信、可验收、可交付的产品。
+**架构主轴（Zone C 状态与阶段感知编排、etcd 唯一控制面权威、流式首包承诺）清晰扎实，且近期合入的 PR `#35`–`#55` 实质性收敛了流式可靠性、运维自诊断与 `pd_split` 实测边界。**
 
-设计评审结论：**REWORK，需要完善，不建议推倒重写。**
-本次评估未修改源码或文档；后续仅将报告存档并加入文档索引。
+下一阶段的重点不再是堆叠新概念，而是修复 Batch 6（KV 缓存治理）接口与引擎实例标识的接线偏差、消除 Gateway 热路径上的逐请求 etcd 读取，并拉平多协议入口与独立/嵌入式路由模式的行为一致性。
 
-## 一、建议收紧项目范围
+---
 
-建议统一定位为：
+## 一、`b3414f5..fa154c0` 已收敛的关键问题
 
-> 面向私有化机房、不强制依赖 Kubernetes 的多引擎推理编排与企业治理平台。
+对照上一轮评估基线（`b3414f5` / `ea24c3a`），以下问题已在代码中闭环：
 
-主线保留：
+1. **流式首包延迟承诺（Pre-first-byte Commitment）与错误帧规范（`#35` / `#40` / `#41` / `#44` / `#45`）**
+   - 新增 [`first_byte.rs`](../../crates/nebula-router/src/first_byte.rs)（[await_first_chunk](../../crates/nebula-router/src/first_byte.rs)、[first_chunk_of](../../crates/nebula-router/src/first_byte.rs)），将首包超时 `first_byte_timeout`（60s）及总预算 `first_byte_total_budget`（90s）与流式空闲超时 `stream_idle_timeout`（120s）解耦。
+   - 独立 Router（[handlers.rs](../../crates/nebula-router/src/handlers.rs)）与嵌入式 Gateway（[proxy_common.rs](../../crates/nebula-gateway/src/proxy_common.rs)）均在拿到上游首个非空 body chunk 后才向客户端落定 `200 OK`，使首包前卡死可跨副本重试（`first_byte_retry_total`）；首包后中途断开则发送显式 OpenAI SSE `error` 帧且不发 `[DONE]`（`upstream_stream_error_total`）。
+2. **嵌入式路由的 KV 事件运行时接线补齐**
+   - Gateway 在 `NEBULA_ROUTER_MODE=embedded` 下已调用 [nebula_router::kv_events::start_kv_runtime](../../crates/nebula-gateway/src/main.rs)，消除了此前嵌入式模式下 `prefix_index` 恒为空的差距。
+3. **`pd_split` 启动门禁、信号缺失自诊断与实测边界纠偏（`#49`–`#52`）**
+   - 针对 LMCache 0.5.5 引擎早于 `lmcache_controller` 启动会导致注册成功但永不上报 KV key 的 sticky 缺陷，在 [wait_for_lmcache_controller](../../crates/nebula-common/src/model_deployment.rs) 中增加了启动前端口就绪门禁，并在 Router 中增加了 [stage_stats_missing_total](../../crates/nebula-router/src/metrics.rs) 计数器。
+   - 在满足双前提（controller 先就绪 + `/stats/` 抓取生效）后重测单机 8×RTX 5090（7B / TP=1 / 1:1 池 / 96×1500 tok），诚实记录了 `pd_split` 相比 `replicated` + `prefix_affinity` 吞吐低 17%（10.75 vs 12.89 rps）、TTFT p99 更慢（343 vs 219 ms）的实测结论，将 `pd_split` 适用条件收窄至「取回显著比重算便宜或需拆开扩缩容/故障域」，见 [streaming-cache.md](streaming-cache.md) 与 [benefit-verification.md](benefit-verification.md)。
+4. **控制台 Endpoint 状态真实化**
+   - [endpoints.tsx](../../frontend/src/components/views/endpoints.tsx) 已改为每 10 秒轮询前缀亲和指标、区分请求失败与未启用，并根据实时 Endpoint 列表计算协议数与网格健康度（[endpoints.tsx](../../frontend/src/components/views/endpoints.tsx)）。
 
-- 模型部署、放置、多副本、排空与恢复。
-- vLLM / SGLang 接入与兼容性管理。
-- 统一推理入口、缓存感知路由。
-- 租户准入、审计、SLO 和成本归因。
+---
 
-K8s 执行面、PowerLLM 兼容、PD 分离应作为**可选能力**，不增加默认部署负担。
-继续避免训练平台、引擎内核和自研 KV 传输。
+## 二、当前基线（`fa154c0`）需要优先处理的问题
 
-“不依赖 K8s”是产品优势，但不应单独视为长期壁垒。
-真正的差异化应是**低交付成本、可靠治理和可证明的编排收益**。
+### 1. Batch 6.3 `LmcacheController` 与引擎副本的 `instance_id` 不匹配，且 BFF 忽略 `model_uid`（P0 / major）
 
-## 二、需要优先处理的问题
+- **现状：**
+  - [nebula-node/src/engine/vllm.rs](../../crates/nebula-node/src/engine/vllm.rs) 与 [nebula-k8s-controller/src/main.rs](../../crates/nebula-k8s-controller/src/main.rs) 在拉起引擎时，向 LMCache 注入的 `LMCACHE_LMCACHE_INSTANCE_ID` 格式均为 `format!("{}-{}", model_uid, replica_id)`（如 `qwen25-7b-0`）。
+  - 但 [LmcacheController::from_env](../../crates/nebula-control/src/lmcache.rs) 将 `instance_id` 固定为进程级环境变量 `NEBULA_LMCACHE_INSTANCE_ID`（默认 `"lmcache_default_instance"`）。
+  - 同时，BFF 的 [cache_lookup](../../crates/nebula-bff/src/handlers_v2.rs)、[cache_pin](../../crates/nebula-bff/src/handlers_v2.rs)、[cache_clear](../../crates/nebula-bff/src/handlers_v2.rs) 均将路径参数写为 `Path(_model_uid): Path<String>` 并直接忽略。
+- **影响：**
+  - LMCache `/lookup` 虽会扫描 `layout_info` 中所有实例，但 **`POST /pin` 与 `POST /clear` 依赖 `instance_id` 定位目标 worker**。BFF 传入 `"lmcache_default_instance"` 时无法命中注册为 `{model_uid}-{replica_id}` 的真实引擎副本；多模型共用同一个 `lmcache_controller` 时也缺乏按 `model_uid` 的隔离。
+- **建议：**
+  - [LmcacheController::pin](../../crates/nebula-control/src/lmcache.rs) 与 [clear](../../crates/nebula-control/src/lmcache.rs) 应支持按目标 `instance_id`（或 `model_uid` 关联的活跃 `{model_uid}-{replica_id}` 列表）下发；`/lookup` 在解析 `layout_info` 时也应按 `{model_uid}-` 前缀过滤。
 
-### 1. 多实例治理的保证范围不清晰（P0 / major）
+### 2. `NEBULA_LMCACHE_CONTROLLER_URL` 端口语义冲突，且 `pd_split` 下 `saved_prefill_tokens_total` 恒为 0（P1 / major）
 
-租户配额计数保存在 Gateway 进程内，每个 Gateway 初始化自己的准入状态。
-多个 Gateway 不共享这些计数，因此不能直接承诺“集群级严格配额”。
-队列目前是信号量排队加租户等待份额限制，并不是设计文档所说的“按租户轮询出队”。
-跨网关全局队列已被列为后续非目标，这不是首版缺少该功能的错误，而是必须明确的交付边界。
+- **现状：**
+  - **端口语义冲突：** [vllm.rs](../../crates/nebula-node/src/engine/vllm.rs) 与 [k8s-controller/src/main.rs](../../crates/nebula-k8s-controller/src/main.rs) 将 `NEBULA_LMCACHE_CONTROLLER_URL` 作为 `LMCACHE_CONTROLLER_PULL_URL`（ZMQ PULL 端口，通常为 `8300`）传给引擎；而 [LmcacheController::from_env](../../crates/nebula-control/src/lmcache.rs) 在未设置 `NEBULA_LMCACHE_CONTROLLER_BASE_URL` 时回退读取同一个 `NEBULA_LMCACHE_CONTROLLER_URL` 并拼接 `http://` 作为 HTTP API 地址（通常为 `9000`）。
+  - **Token 记账与匹配深度丢失：** [Router::controller_warm](../../crates/nebula-router/src/lib.rs) 调用 `/lookup` 时已通过 [max_matched_tokens(&v)](../../crates/nebula-router/src/lib.rs) 算出命中 token 数 `u64`，但返回类型退化为 `Option<bool>`；而 [route_internal](../../crates/nebula-router/src/lib.rs) 仅从 ZMQ `prefix_index`（`scoped_prefix_matches`）累加 [record_saved_prefill_tokens](../../crates/nebula-router/src/lib.rs)。由于 `LMCacheConnectorV1` 下 `prefix_index` 为空，`pd_split` 模式的 `nebula_router_saved_prefill_tokens_total` 恒为 `0`。此外，`controller_warm` 在 controller 不可达时无熔断冷却，每次长请求都会在热路径等待 200ms 超时。
+- **建议：**
+  - 拆分 ZMQ 端口与 HTTP API 的环境变量命名（如 `NEBULA_LMCACHE_ZMQ_PULL_URL` vs `NEBULA_LMCACHE_HTTP_URL`）。
+  - 将 [controller_warm](../../crates/nebula-router/src/lib.rs) 返回值改为 `Option<u64>`（命中 token 数），既用于在路由到 Decode 副本时计入 `saved_prefill_tokens_total`，也可支持按命中深度比例判定是否直通 Decode；同时为 `/lookup` 增加连续失败后的短期熔断。
 
-依据：[admission.rs:25](../../crates/nebula-common/src/admission.rs#L25)、[Gateway 初始化:217](../../crates/nebula-gateway/src/main.rs#L217)、[queue.rs:201](../../crates/nebula-common/src/queue.rs#L201)、[队列设计:30](queue-admission.md#L30)、[队列非目标:63](queue-admission.md#L63)。
+### 3. Batch 6.1 单池模式（`replicated`）声明了 `KvSharingSpec` 但未对引擎生效（P1 / major）
 
-**建议：** 明确区分进程级保护与集群级治理，并用双 Gateway、热点租户和长流式请求测试验收。
-不要为了全局配额把逐请求协调塞进 etcd 热路径。
+- **现状：**
+  - [capacity.rs](../../crates/nebula-common/src/capacity.rs) 会对所有携带 `kv_sharing.local_cpu_size_gb` 的部署计算宿主机 DRAM 预留与 `kv_l1_oversubscribed`。
+  - 但 [kv_transfer_config](../../crates/nebula-common/src/model_deployment.rs) 与 [kv_sharing_env](../../crates/nebula-common/src/model_deployment.rs) 对 `ReplicaRole::Mixed`（即 `replicated` 模式副本）直接返回 `None` 与空 `Vec`。
+- **建议：**
+  - 要么为 `ReplicaRole::Mixed` 补齐 `kv_both` 角色的 LMCache 本地 L1/L2 Offload 注入，要么在部署校验层显式拒绝 `replicated + kv_sharing` 组合，避免「容量告警计入了 L1 预算、但引擎实际未启用 L1/L2 卸载」的不一致。
 
-### 2. 嵌入式路由存在能力接线差距（P0 / major）
+### 4. Gateway 数据面热路径仍存在逐请求读 etcd 与 `Drop` 中 `tokio::spawn`（P1 / major）
 
-Gateway 的嵌入式模式启动了 Endpoint、Placement、Model、Stats 同步，
-但没有看到 KV 事件接收或索引快照接入；独立 Router 则有这些启动逻辑。
-因此，“单跳优化”和“前缀亲和”目前不能仅凭共用路由库就认定功能等价。
-此项来自静态调用核对，本次未运行嵌入式模式的 GPU 对照测试。
+- **现状：**
+  - [prepare_upstream](../../crates/nebula-gateway/src/proxy_common.rs) 在每次推理请求上顺序执行 [load_tenant](../../crates/nebula-gateway/src/proxy_common.rs)（直读 etcd `/tenants/{id}`）、[check_tooling_gate](../../crates/nebula-gateway/src/proxy_common.rs)（直读 `/deployments/`、`/model_requests/`）与 [check_score_gate](../../crates/nebula-gateway/src/proxy_common.rs)。这违背了 [`AGENTS.md`](../../AGENTS.md) Rule #8（*Gateway/Router hot path reads `/endpoints/` only*）。
+  - [ConcurrencyGuard::drop](../../crates/nebula-common/src/admission.rs) 在每个请求结束时通过 `tokio::spawn` 异步获取 `Mutex` 锁以递减并发计数。
+  - 多 Gateway 实例间的租户并发/速率计数（[main.rs](../../crates/nebula-gateway/src/main.rs)）与引擎排队器（[main.rs](../../crates/nebula-gateway/src/main.rs)）仍为进程内状态，文档与交付契约需保持「单 Gateway 进程级保护」口径。
+- **建议：**
+  - 在 Gateway 侧用后台 Watch 循环维护 `/tenants/`、`/deployments/` 等低频元数据的内存快照，使 `prepare_upstream` 热路径彻底零网络 I/O。
+  - 将 `TenantAdmission` 的并发计数改为 `DashMap<String, Arc<AtomicU32>>`（或 `RwLock<HashMap<String, Arc<AtomicU32>>>`），在 `ConcurrencyGuard::drop` 中直接 `fetch_sub(1, Ordering::Relaxed)`，消除逐请求 `tokio::spawn`。
 
-依据：[Gateway 初始化:86](../../crates/nebula-gateway/src/main.rs#L86)、[独立 Router 事件接入:104](../../crates/nebula-router/src/main.rs#L104)、[嵌入式前缀查询:439](../../crates/nebula-gateway/src/proxy_common.rs#L439)。
+### 5. 多协议入口（`/v1/responses`、`/v1/messages`）、独立 Router `Tool-Pause` 与 K8s 控制器的一致性缺口（P2 / moderate）
 
-**建议：** 共用路由运行时初始化，并建立嵌入式/独立模式的行为一致性测试。
+- **现状：**
+  - **首包重试覆盖范围（已核实，原判断有误）：** `/v1/responses` 与 `/v1/messages` 都经 [`post_router_chat`](../../crates/nebula-gateway/src/proxy_common.rs) 在 embedded 模式下转入 [`forward_embedded`](../../crates/nebula-gateway/src/proxy_common.rs)，并重放预取的第一个 chunk（[`proxy_chat_as_responses`](../../crates/nebula-gateway/src/handlers.rs)、[`proxy_chat_as_anthropic`](../../crates/nebula-gateway/src/handlers.rs)），因此**同样受首包前跨副本重试保护**；远端 router 模式则由 router 自身重试。此前记为"未覆盖"并引用 `handlers_responses.rs` / `handlers_anthropic.rs` / `send_to_upstream` 的说法有误，已更正。
+  - **独立 Router 模式下 `Tool-Pause` 优先队列失效：** [acquire_queue_permit](../../crates/nebula-gateway/src/proxy_common.rs) 仅通过 `st.router.as_ref()` 检查 `is_tool_continuation_for_tenant`，当 `NEBULA_ROUTER_MODE=remote` 时恒为 `false`。
+  - **`nebula-k8s-controller` 绕过 `/placements/` 且存在同步阻塞调用：** [k8s-controller/src/main.rs](../../crates/nebula-k8s-controller/src/main.rs) 直接监听 `/deployments/` 而非消费 Scheduler 产出的 `/placements/`，将 [ep.plan_version](../../crates/nebula-k8s-controller/src/main.rs) 写成了 `dep.version`，并在异步任务中使用同步阻塞的 `std::process::Command::new("kubectl")`（[main.rs](../../crates/nebula-k8s-controller/src/main.rs)）。
+- **建议：**
+  - 让 `/v1/responses` 与 `/v1/messages` 复用 `forward_embedded` 的首包承诺与跨副本重试逻辑。
+  - 在 Gateway 侧根据请求体是否包含 `role="tool"` 消息 + `x-session-id` 判定 Tool-Continuation，或由独立 Router 通过响应头回传 `Tool-Pause` 标记。
+  - 将 `nebula-k8s-controller` 演进为消费 `/placements/` 的纯执行器，并将 `kubectl` 调用替换为 `tokio::process::Command` 或 `kube::Api` 异步接口。
 
-### 3. PD 设计需要先澄清语义（P0 / major）
+---
 
-现设计按缓存或会话命中，把整个请求分给 prefill 或 decode 副本；
-decode 缺失缓存时自行 prefill。
-这更接近**共享 KV 的角色化路由**，尚不能等同于“同一个请求先预填充，再交给解码实例”的严格 PD 分离。
-该设计仍明确标注为代码未实现，不能作为已交付能力宣传。
+## 三、建议优先级汇总
 
-依据：[角色与缓存兜底:100](../arch/pool.md#L100)、[路由语义:152](../arch/pool.md#L152)、[实现状态:95](../arch/pool.md#L95)、[昇腾待验证:95](engines.md#L95)。
-
-**建议：** 实现前先画清单请求时序、KV 就绪条件、取消传播和失败回退。
-CUDA 共享 KV 的已有实测结果值得保留，但不能替代完整 PD 收益验证；昇腾仍需真机验证。
-
-### 4. 控制台应先保证信息真实（P0 / major）
-
-Endpoint 页面固定显示协议数量为 `2`、网格健康为正常，没有根据实际状态计算。
-前缀亲和数据也只在首次加载或令牌变化时请求，没有持续刷新。
-
-依据：[亲和数据请求:24](../../frontend/src/components/views/endpoints.tsx#L24)、[固定状态卡片:50](../../frontend/src/components/views/endpoints.tsx#L50)。
-
-**建议：** 页面必须区分健康、降级、未知、数据过期和请求失败。
-运维控制台的可信度，比玻璃效果或动画重要。
-本次评价基于页面代码，不是浏览器视觉或交互验收。
-
-### 5. 文档与视觉规范需要收敛（P1 / major）
-
-评估基线中已确认的冲突：
-
-- Workspace 为 **1.10.0**，README 写 **1.8.0**，产品定位文档写 **1.4.0**。
-- etcd 文档仍将 HardwarePool 标为未实现，但已有 `/pools/` CRUD。
-- 根 `DESIGN.md` 指定 OKLch、电青色和发光边框；`docs/design.md` 强调克制、安静选中；实际 CSS 使用 HSL 蓝色系。
-
-依据：[Cargo.toml:18](../../Cargo.toml#L18)、[README.md:3](../../README.md#L3)、[产品定位:5](../manual/positioning.md#L5)、[etcd 拟议池:59](etcd.md#L59)、[Pool CRUD:70](../../crates/nebula-control/src/pool.rs#L70)、[根视觉规范:19](../../DESIGN.md#L19)、[UI 规范入口:3](../design.md#L3)、[CSS tokens:5](../../frontend/src/index.css#L5)。
-
-**建议：** 保留一个权威设计入口，旧文档明确归档或跳转；
-建立“已实现／已验证／可交付／实验性”能力矩阵，避免历史文档继续充当当前能力说明。
-
-## 三、推进建议
-
-以下是建议顺序，不是新增排期；正式排期仍只维护在 roadmap：
-
-1. **可信性收敛：** 配额语义、队列公平性、模式一致性、控制台真实状态。
-2. **交付收敛：** 默认部署清单、版本固定、升级回滚、备份恢复与生产 HA 验收。
-3. **收益验证：** 前缀亲和与共享 KV 的多副本 A/B，再决定是否推进严格 PD。
-
-核心指标建议使用：**满足 SLO 的有效吞吐、客户端 P99、拒绝率、部署时间和恢复时间**。
-不要仅用缓存命中率或引擎侧 TTFT 证明用户收益。
-已有队列实测也表明，保护引擎并不等于降低客户端延迟，见[队列实测结论](queue-admission.md#L97)。
-
-## 四、验证情况与边界
-
-本次评估实际运行 `./scripts/ci.sh`，退出码为 `0`：
-
-- Rust 测试：**166 通过，0 失败，0 忽略**。
-- `cargo fmt --check`、clippy、UI 栈与导航检查通过。
-- OpenAPI 检查通过；该检查仅确认 18 个必需路径存在，不代表完整接口行为已验收。
-- 前端类型检查、lint 和构建通过。
-- 存在 Node `module.register()` 弃用警告与前端压缩后大于 500 kB 的分包警告，未导致门禁失败。
-
-本次未开启 `RUN_SMOKE=1`，未重跑 GPU、LMCache 真机门禁、生产 HA 或浏览器交互测试。
-已有真机报告用于理解设计背景，不作为本次重新验证的结果。
-评估结束时 Git 工作区干净；本次存档只增加本报告并更新文档索引，不修改代码。
+| 优先级 | 事项 | 涉及模块 | 预期收益 |
+| :--- | :--- | :--- | :--- |
+| **P0** | 修复 BFF `/cache/{pin,clear,lookup}` 的 `instance_id` 映射与 `model_uid` 作用域 | [`nebula-control/src/lmcache.rs`](../../crates/nebula-control/src/lmcache.rs)、[`nebula-bff/src/handlers_v2.rs`](../../crates/nebula-bff/src/handlers_v2.rs) | 让 Batch 6.3 的 Pin/Clear API 真正命中注册为 `{model_uid}-{replica_id}` 的引擎副本 |
+| **P1** | 拆分 `NEBULA_LMCACHE_CONTROLLER_URL` 的 ZMQ 与 HTTP 环境变量；`controller_warm` 返回 `Option<u64>` 并计入 `saved_prefill_tokens_total` | [`nebula-common`](../../crates/nebula-common/src/model_deployment.rs)、[`nebula-router/src/lib.rs`](../../crates/nebula-router/src/lib.rs) | 消除端口配置歧义，打通 `pd_split` 下的 Batch 6.4 成本归因与命中深度判断 |
+| **P1** | 明确 `replicated` 模式下 `KvSharingSpec` 的行为（支持 `Mixed` 卸载或校验拒绝） | [`nebula-common/src/model_deployment.rs`](../../crates/nebula-common/src/model_deployment.rs)、[`capacity.rs`](../../crates/nebula-common/src/capacity.rs) | 消除容量告警与引擎实际启动参数的不一致 |
+| **P1** | Gateway 热路径 `/tenants/` 与 Gate 查询改为本地 Watch 缓存；`ConcurrencyGuard` 改用 `AtomicU32` | [`nebula-gateway/src/proxy_common.rs`](../../crates/nebula-gateway/src/proxy_common.rs)、[`admission.rs`](../../crates/nebula-common/src/admission.rs) | 严格对齐 Rule #8，消除高并发下逐请求 etcd RTT 与 `tokio::spawn` 开销 |
+| **P2** | 复核 `nebula-k8s-controller` 的状态查询是否阻塞 reconcile、`/endpoints/` 的 `plan_version` 是否与 `/placements/` 同步 | [`nebula-k8s-controller`](../../crates/nebula-k8s-controller/src/main.rs) | 消除控制器运行时阻塞与版本错位（**结论待复核后再定级**） |
