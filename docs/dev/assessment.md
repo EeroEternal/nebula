@@ -72,7 +72,7 @@
 
 ### 6. 文档行号锚点已漂移（P3 / minor）
 
-- `docs/` 中仍有 30 处 `*.rs#L<n>` 锚点（`kv-governance.md` 12、`heterogeneous-compute.md` 11、`direction.md` 3、`roadmap.md` 3、`landscape.md` 1）。其中 6 处 `controller_warm` 指向 `lib.rs#L707`，该函数现已不在此行。按本文约定改为"文件 + 符号名"。
+- `docs/` 中仍有 41 处 `*.rs#L<n>` 锚点，分布在 30 行（`kv-governance.md` 19、`heterogeneous-compute.md` 13、`roadmap.md` 4、`direction.md` 4、`landscape.md` 1）。其中 6 处 `controller_warm` 指向 `lib.rs#L707`，该函数现已不在此行。按本文约定改为"文件 + 符号名"。
 
 ---
 
