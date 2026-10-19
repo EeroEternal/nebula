@@ -67,7 +67,7 @@ pub use model_cache::{
 pub use model_deployment::{
     approved_pd_images_from_env, controller_addr, effective_replica_config,
     effective_replica_image, hardware_family_of_platform, kv_sharing_env, kv_transfer_config,
-    lmcache_controller_env, merge_model_config, validate_pd_split_image,
+    lmcache_controller_env, lmcache_instance_id, merge_model_config, validate_pd_split_image,
     validate_pd_split_with_context, validate_replica_specs, wait_for_lmcache_controller,
     DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment, ReplicaPlacementSpec,
     ReplicaRole,

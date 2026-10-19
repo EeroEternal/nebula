@@ -292,7 +292,8 @@ impl Engine for VllmEngine {
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(8001);
-                let instance_id = format!("{}-{}", ctx.model_uid, ctx.replica_id);
+                let instance_id =
+                    nebula_common::lmcache_instance_id(&ctx.model_uid, ctx.replica_id);
                 kv_envs.extend(nebula_common::lmcache_controller_env(
                     &ctrl,
                     &ctrl_reply,
