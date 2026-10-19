@@ -27,7 +27,6 @@ const CONTROLLER_TIMEOUT_MS: u64 = 5_000;
 #[derive(Clone)]
 pub struct LmcacheController {
     base: String,
-    instance_id: String,
     http: reqwest::Client,
 }
 
@@ -38,28 +37,15 @@ impl LmcacheController {
             .ok()
             .map(|v| v.trim().trim_end_matches('/').to_string())
             .filter(|v| !v.is_empty())
-            .or_else(|| {
-                let raw = std::env::var("NEBULA_LMCACHE_CONTROLLER_URL").ok()?;
-                let raw = raw.trim();
-                if raw.is_empty() {
-                    return None;
+            .map(|v| {
+                if v.starts_with("http://") || v.starts_with("https://") {
+                    v
+                } else {
+                    format!("http://{v}")
                 }
-                Some(
-                    if raw.starts_with("http://") || raw.starts_with("https://") {
-                        raw.trim_end_matches('/').to_string()
-                    } else {
-                        format!("http://{}", raw.trim_end_matches('/'))
-                    },
-                )
             })?;
-        let instance_id = std::env::var("NEBULA_LMCACHE_INSTANCE_ID")
-            .unwrap_or_else(|_| "lmcache_default_instance".to_string());
         let http = nebula_common::control_plane_http_client().ok()?;
-        Some(Self {
-            base,
-            instance_id,
-            http,
-        })
+        Some(Self { base, http })
     }
 
     pub fn base(&self) -> &str {
@@ -93,48 +79,121 @@ impl LmcacheController {
         })
     }
 
-    /// Tokens of this prefix the shared store already holds (0 = cold).
-    pub async fn lookup(&self, tokens: &[u32]) -> Result<u64, ServiceError> {
+    /// Tokens of this prefix the shared store already holds for `model_uid` (0 = cold).
+    ///
+    /// The controller answers for every registered instance, so with several models on one
+    /// controller the count must be filtered by the `{model_uid}-` instance prefix -
+    /// otherwise model A reports model B's cache as its own.
+    pub async fn lookup(&self, model_uid: &str, tokens: &[u32]) -> Result<u64, ServiceError> {
         let v = self
             .post(
                 "/lookup",
-                serde_json::json!({ "tokens": tokens, "instance_id": self.instance_id }),
+                serde_json::json!({ "tokens": tokens, "instance_id": model_uid }),
             )
             .await?;
-        Ok(max_matched_tokens(&v))
+        Ok(max_matched_tokens_for_model(&v, model_uid))
     }
 
-    /// Pin `tokens` in `location` so eviction cannot drop them.
-    pub async fn pin(&self, location: &str, tokens: &[u32]) -> Result<u64, ServiceError> {
-        let v = self
-            .post(
-                "/pin",
-                serde_json::json!({
-                    "instance_id": self.instance_id,
-                    "location": location,
-                    "tokens": tokens,
-                }),
-            )
-            .await?;
-        Ok(v.get("num_tokens").and_then(|n| n.as_u64()).unwrap_or(0))
+    /// Pin `tokens` in `location` on every instance in `instances`.
+    ///
+    /// Returns `(pinned_tokens, failures)` where a failure is `(instance_id, reason)` -
+    /// pinning is best-effort per replica, and a partially pinned prefix must be visible to
+    /// the operator rather than silently reported as complete.
+    pub async fn pin(
+        &self,
+        instances: &[String],
+        location: &str,
+        tokens: &[u32],
+    ) -> Result<(u64, Vec<(String, String)>), ServiceError> {
+        let mut pinned = 0u64;
+        let mut failures = Vec::new();
+        for instance in instances {
+            match self
+                .post(
+                    "/pin",
+                    serde_json::json!({
+                        "instance_id": instance,
+                        "location": location,
+                        "tokens": tokens,
+                    }),
+                )
+                .await
+            {
+                Ok(v) => pinned += v.get("num_tokens").and_then(|n| n.as_u64()).unwrap_or(0),
+                Err(e) => failures.push((instance.clone(), e.to_string())),
+            }
+        }
+        if instances.is_empty() {
+            return Err(ServiceError::BadRequest(
+                "no LMCache instance registered for this model".into(),
+            ));
+        }
+        Ok((pinned, failures))
     }
 
-    /// Clear this instance's cache in `location`.
-    pub async fn clear(&self, location: &str) -> Result<u64, ServiceError> {
-        let v = self
-            .post(
-                "/clear",
-                serde_json::json!({ "instance_id": self.instance_id, "location": location }),
-            )
-            .await?;
-        Ok(v.get("num_tokens").and_then(|n| n.as_u64()).unwrap_or(0))
+    /// Clear the cache in `location` on every instance in `instances`.
+    pub async fn clear(
+        &self,
+        instances: &[String],
+        location: &str,
+    ) -> Result<(u64, Vec<(String, String)>), ServiceError> {
+        let mut cleared = 0u64;
+        let mut failures = Vec::new();
+        for instance in instances {
+            match self
+                .post(
+                    "/clear",
+                    serde_json::json!({ "instance_id": instance, "location": location }),
+                )
+                .await
+            {
+                Ok(v) => cleared += v.get("num_tokens").and_then(|n| n.as_u64()).unwrap_or(0),
+                Err(e) => failures.push((instance.clone(), e.to_string())),
+            }
+        }
+        if instances.is_empty() {
+            return Err(ServiceError::BadRequest(
+                "no LMCache instance registered for this model".into(),
+            ));
+        }
+        Ok((cleared, failures))
     }
+}
+
+/// Deepest `["<Backend>", n]` entry belonging to `model_uid`'s instances.
+///
+/// Instances are named `{model_uid}-{replica_id}`, so the filter is a prefix match; an
+/// unfiltered max would report another model's cache as this model's hit.
+pub fn max_matched_tokens_for_model(v: &serde_json::Value, model_uid: &str) -> u64 {
+    let prefix = format!("{model_uid}-");
+    fn scan(value: &serde_json::Value, prefix: &str) -> Option<u64> {
+        match value {
+            serde_json::Value::Array(a) => a.get(1).and_then(|n| n.as_u64()),
+            serde_json::Value::Object(inner) => {
+                // The prefix names *instances*; wrappers like `layout_info` must still be
+                // traversed, so the filter only applies on the level whose values are
+                // token lists.
+                let instance_level = inner.values().any(|v| v.is_array());
+                inner
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "event_id")
+                    .filter(|(k, val)| {
+                        !(instance_level && val.is_array()) || k.as_str().starts_with(prefix)
+                    })
+                    .filter_map(|(_, val)| scan(val, prefix))
+                    .max()
+            }
+            _ => None,
+        }
+    }
+    scan(v, &prefix).unwrap_or(0)
 }
 
 /// Deepest `["<Backend>", n]` entry in a `/lookup` response (`layout_info` nesting).
 ///
 /// Same shape the router parses for its warm signal, so the console and the data plane
 /// never disagree about "how much of this prefix is cached".
+#[cfg(test)]
 fn max_matched_tokens(v: &serde_json::Value) -> u64 {
     fn scan(value: &serde_json::Value) -> Option<u64> {
         match value {
@@ -179,6 +238,29 @@ mod tests {
 
         // `event_id` must not be mistaken for a token list.
         assert_eq!(max_matched_tokens(&serde_json::json!({"event_id": "x"})), 0);
+    }
+
+    #[test]
+    fn lookup_is_filtered_by_model_instance_prefix() {
+        // Two models share one controller; only `qwen-*` instances belong to this model.
+        let v = serde_json::json!({
+            "event_id": "Lookup3",
+            "layout_info": {
+                "qwen-0": ["LocalCPUBackend", 256],
+                "qwen-1": ["LocalCPUBackend", 512],
+                "llama-0": ["LocalCPUBackend", 4096]
+            }
+        });
+        assert_eq!(
+            max_matched_tokens_for_model(&v, "qwen"),
+            512,
+            "must not report another model's cache as this model's hit"
+        );
+        assert_eq!(max_matched_tokens_for_model(&v, "llama"), 4096);
+        assert_eq!(max_matched_tokens_for_model(&v, "mistral"), 0);
+        // Prefix must be a real instance boundary: `qwen2` is not `qwen`.
+        let v2 = serde_json::json!({ "layout_info": { "qwen2-0": ["LocalCPUBackend", 128] } });
+        assert_eq!(max_matched_tokens_for_model(&v2, "qwen"), 0);
     }
 
     #[test]

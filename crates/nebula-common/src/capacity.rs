@@ -146,7 +146,12 @@ pub fn build_capacity_snapshot(
         // reservation used to be an undeclared 5 GB per replica, so N replicas could
         // silently overcommit a node's memory. Now the size is declared and checked
         // against what the node reports.
-        if let Some(kv) = dep.kv_sharing.as_ref() {
+        // `kv_sharing_env(Mixed)` returns nothing, so a `replicated` deployment never
+        // applies its declared tier: counting its DRAM would raise
+        // `kv_l1_oversubscribed` for a reservation that does not exist.
+        let tier_applies_to_pd_split = matches!(dep.topology, Some(DeploymentTopology::PdSplit))
+            || eps.iter().any(|e| e.role != ReplicaRole::Mixed);
+        if let Some(kv) = dep.kv_sharing.as_ref().filter(|_| tier_applies_to_pd_split) {
             let per_replica_gb = u64::from(kv.local_cpu_size_gb.unwrap_or(5));
             let replicas = eps.len() as u64;
             if replicas > 0 {
@@ -315,6 +320,41 @@ mod tests {
             .hints
             .iter()
             .any(|h| h.starts_with("avg_kv_usage=")));
+    }
+
+    #[test]
+    fn replicated_tier_declaration_does_not_raise_dram_alarm() {
+        use crate::node_status::NodeStatus;
+        // `replicated` keeps all replicas Mixed, and `kv_sharing_env(Mixed)` is empty, so the
+        // declared L1 tier is never applied - an alarm here would be for a reservation that
+        // does not exist.
+        let mut d = dep("m1", 2);
+        d.kv_sharing = Some(crate::model_deployment::KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(64),
+            ..Default::default()
+        });
+        let node = NodeStatus {
+            node_id: "n1".into(),
+            last_heartbeat_ms: 1,
+            host_memory_total_mb: Some(65536),
+            host_memory_available_mb: Some(1024),
+            ..Default::default()
+        };
+        let eps = vec![
+            ep("m1", 0, EndpointStatus::Ready),
+            ep("m1", 1, EndpointStatus::Ready),
+        ];
+        let snap = build_capacity_snapshot(&[d], &eps, &[], &[node], 2, 2, 10);
+        assert!(
+            !snap.models[0]
+                .hints
+                .iter()
+                .any(|h| h.starts_with("kv_l1_oversubscribed")),
+            "hints: {:?}",
+            snap.models[0].hints
+        );
     }
 
     #[test]

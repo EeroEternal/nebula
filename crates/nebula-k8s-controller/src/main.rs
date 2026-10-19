@@ -815,7 +815,7 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(8001);
-            let instance_id = format!("{model_uid}-{replica_id}");
+            let instance_id = nebula_common::lmcache_instance_id(model_uid, replica_id);
             kv_envs.extend(nebula_common::lmcache_controller_env(
                 &ctrl,
                 &ctrl_reply,

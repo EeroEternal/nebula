@@ -130,6 +130,33 @@ fn cache_controller() -> Result<nebula_control::LmcacheController, ServiceError>
     })
 }
 
+/// Instances this model's replicas registered with (`{model_uid}-{replica_id}`).
+///
+/// `pin`/`clear` are addressed per instance, and the id must be the exact string the engine
+/// registered with - [`nebula_common::lmcache_instance_id`] is the one definition both sides use.
+async fn lmcache_instances_for(
+    store: &dyn nebula_meta::MetaStore,
+    model_uid: &str,
+) -> Result<Vec<String>, ServiceError> {
+    let raw = store
+        .list_prefix(&format!("/endpoints/{model_uid}/"))
+        .await
+        .map_err(ServiceError::Etcd)?;
+    let mut out = Vec::new();
+    for (_, v, _) in raw {
+        let Ok(ep) = serde_json::from_slice::<nebula_common::EndpointInfo>(&v) else {
+            continue;
+        };
+        if ep.status != nebula_common::EndpointStatus::Ready {
+            continue;
+        }
+        out.push(nebula_common::lmcache_instance_id(model_uid, ep.replica_id));
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct CacheLookupRequest {
     /// Prompt tokens to probe. Required: the control plane does not tokenize.
@@ -167,7 +194,7 @@ pub struct CacheWarmupRequest {
 pub async fn cache_lookup(
     State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
-    Path(_model_uid): Path<String>,
+    Path(model_uid): Path<String>,
     Json(req): Json<CacheLookupRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
     if let Some(resp) = require_role(&ctx, Role::Viewer) {
@@ -179,20 +206,20 @@ pub async fn cache_lookup(
         ));
     }
     let client = cache_controller()?;
-    let matched = client.lookup(&req.tokens).await?;
-    let _ = st;
+    let matched = client.lookup(&model_uid, &req.tokens).await?;
+    let instances = lmcache_instances_for(&*st.store, &model_uid).await?;
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "matched_tokens": matched })),
+        Json(serde_json::json!({ "matched_tokens": matched, "instances": instances })),
     )
         .into_response())
 }
 
 /// `POST /api/v2/models/{uid}/cache/pin` — lock a hot prefix so eviction cannot drop it.
 pub async fn cache_pin(
-    State(_st): State<AppState>,
+    State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
-    Path(_model_uid): Path<String>,
+    Path(model_uid): Path<String>,
     Json(req): Json<CachePinRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
     if let Some(resp) = require_role(&ctx, Role::Operator) {
@@ -206,20 +233,26 @@ pub async fn cache_pin(
     let location = req
         .location
         .unwrap_or_else(|| nebula_control::DEFAULT_KV_LOCATION.to_string());
+    let instances = lmcache_instances_for(&*st.store, &model_uid).await?;
     let client = cache_controller()?;
-    let num_tokens = client.pin(&location, &req.tokens).await?;
+    let (num_tokens, failures) = client.pin(&instances, &location, &req.tokens).await?;
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "pinned_tokens": num_tokens, "location": location })),
+        Json(serde_json::json!({
+            "pinned_tokens": num_tokens,
+            "location": location,
+            "instances": instances,
+            "failures": failures,
+        })),
     )
         .into_response())
 }
 
 /// `POST /api/v2/models/{uid}/cache/clear` — wipe this model's cache in a tier.
 pub async fn cache_clear(
-    State(_st): State<AppState>,
+    State(st): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
-    Path(_model_uid): Path<String>,
+    Path(model_uid): Path<String>,
     Json(req): Json<CacheClearRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
     if let Some(resp) = require_role(&ctx, Role::Operator) {
@@ -228,11 +261,17 @@ pub async fn cache_clear(
     let location = req
         .location
         .unwrap_or_else(|| nebula_control::DEFAULT_KV_LOCATION.to_string());
+    let instances = lmcache_instances_for(&*st.store, &model_uid).await?;
     let client = cache_controller()?;
-    let num_tokens = client.clear(&location).await?;
+    let (num_tokens, failures) = client.clear(&instances, &location).await?;
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({ "cleared_tokens": num_tokens, "location": location })),
+        Json(serde_json::json!({
+            "cleared_tokens": num_tokens,
+            "location": location,
+            "instances": instances,
+            "failures": failures,
+        })),
     )
         .into_response())
 }

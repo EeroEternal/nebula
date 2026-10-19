@@ -228,6 +228,15 @@ pub fn kv_sharing_env(role: ReplicaRole, kv: &KvSharingSpec) -> Vec<(&'static st
     env
 }
 
+/// The LMCache instance id a replica registers with (`{model_uid}-{replica_id}`).
+///
+/// Both execution planes inject this into `LMCACHE_LMCACHE_INSTANCE_ID`, and the control
+/// plane must address the *same* string when it calls `POST /pin` / `POST /clear` - one
+/// helper so the two sides cannot drift (a mismatch made every pin/clear miss its worker).
+pub fn lmcache_instance_id(model_uid: &str, replica_id: u32) -> String {
+    format!("{model_uid}-{replica_id}")
+}
+
 /// LMCache controller registration env for a pd_split replica.
 ///
 /// The controller (`lmcache_controller`, ports 9000/9001) answers the

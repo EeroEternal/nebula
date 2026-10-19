@@ -452,7 +452,7 @@ retry_statuses = [404, 500, 502, 503, 504]   # 故意不含 429，见「关键�
 
 ### 缓存生命周期 API（Batch 6.3）
 
-给运维/Agent 用的 KV 缓存操作面，全部走 BFF（需 `NEBULA_LMCACHE_CONTROLLER_URL` 或 `NEBULA_LMCACHE_CONTROLLER_BASE_URL`，未配置时返回 400 并说明）：
+给运维/Agent 用的 KV 缓存操作面，全部走 BFF。需要 **`NEBULA_LMCACHE_CONTROLLER_BASE_URL`**（controller 的 HTTP API，通常 `http://<host>:9000`；未配置时返回 400 并说明）。注意它与执行面用的 `NEBULA_LMCACHE_CONTROLLER_URL` **不是同一个东西** —— 后者是引擎注册用的 ZMQ monitor 端点（`LMCACHE_CONTROLLER_PULL_URL`），拿它当 HTTP 地址会把 API 调用打到 ZMQ 端口：
 
 | 端点 | 权限 | 作用 |
 |------|------|------|
@@ -463,6 +463,8 @@ retry_statuses = [404, 500, 502, 503, 504]   # 故意不含 429，见「关键�
 
 - `tokens` 必须由调用方提供：控制面没有分词器；`warmup` 之所以收 prompt，是因为**只有引擎能产出 KV**，controller 只能 pin 已存在的。
 - `location` 默认 `LocalCPUBackend`（L1 DRAM 层）。
+- `pin` / `clear` 按 **`{model_uid}-{replica_id}`** 逐个实例下发（与引擎注册时 `LMCACHE_LMCACHE_INSTANCE_ID` 同一个 helper `lmcache_instance_id` 生成，两边不会漂）；返回体带 `instances` 与逐实例 `failures`，部分失败不会被报成成功。
+- `lookup` 的命中数按 `{model_uid}-` 前缀过滤，多模型共用一个 controller 时不会把别的模型的缓存算成本模型的命中。
 - 没有 worker 注册时 `pin`/`clear` 会返回上游 500（`The number of tokens … should be the same across all workers.`），说明 shape 正确但没有可操作对象 —— 先确认引擎已注册（`query_worker_info`）。
 
 ### 什么时候不要用
