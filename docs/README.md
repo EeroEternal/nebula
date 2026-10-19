@@ -72,7 +72,7 @@
 | [`dev/direction.md`](dev/direction.md) | **发展方向与编排边界备忘**：State- & Stage-Aware 定位、MapReduce 五原则、Zone A–C / S1–S3 边界与 2026 趋势映射 |
 | [`dev/streaming-cache.md`](dev/streaming-cache.md) | **流式可靠性与 KV 缓存治理现状**：失败契约、运维三件事、pd_split 收益边界、Batch 6 已落地/未落地 |
 | [`dev/kv-governance.md`](dev/kv-governance.md) | **企业级 KV Cache 资源化治理（Batch 6）**：把 KV Cache 作为 L2/L3/L4 一等公民资源（声明·隔离·预热·记账）及 Tensormesh 对照 |
-| [`dev/assessment.md`](dev/assessment.md) | **范围与设计评估**（2026-10-12）：治理边界、路由一致性、PD 语义与交付建议 |
+| [`dev/assessment.md`](dev/assessment.md) | **范围与设计评估**（2026-10-19，`e579185`）：流式与缓存收敛复盘、Batch 6 接线、热路径与多模式一致性建议 |
 | [`dev/benefit-verification.md`](dev/benefit-verification.md) | **收益验证报告（客户端口径）**：前缀亲和在冷启动与暖态过载下的 Goodput / P99 / 拒绝率实测 |
 | [`dev/queue-admission.md`](dev/queue-admission.md) | **P0-#2 设计**：引擎级有界公平队列准入（不做 AIMD） |
 | [`dev/prefix-affinity.md`](dev/prefix-affinity.md) | **P1 多副本与前缀亲和**：ZMQ KV events、`sha256_cbor` 链式哈希、`chat_template` 对齐与 `nebula-indexd` 全局索引 |
