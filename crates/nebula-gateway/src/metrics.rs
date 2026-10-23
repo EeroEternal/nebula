@@ -540,6 +540,18 @@ pub fn render_router_metrics(router: &nebula_router::Router) -> String {
          nebula_router_tool_continuation_hit_total {}",
         router.tool_continuation_hit_total()
     );
+    let (pin_ok, pin_failed, pin_skipped, pin_tokens) = router.tool_pause_pin_stats();
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_tool_pause_pin_total Tool-Pause L1 pins issued to lmcache_controller /pin (result=ok|failed|skipped).\n\
+         # TYPE nebula_router_tool_pause_pin_total counter\n\
+         nebula_router_tool_pause_pin_total{{result=\"ok\"}} {pin_ok}\n\
+         nebula_router_tool_pause_pin_total{{result=\"failed\"}} {pin_failed}\n\
+         nebula_router_tool_pause_pin_total{{result=\"skipped\"}} {pin_skipped}\n\
+         # HELP nebula_router_tool_pause_pinned_tokens_total L1 tokens actually pinned by Tool-Pause leases.\n\
+         # TYPE nebula_router_tool_pause_pinned_tokens_total counter\n\
+         nebula_router_tool_pause_pinned_tokens_total {pin_tokens}"
+    );
     body
 }
 /// Per-model engine-queue gauges when queue admission is enabled.

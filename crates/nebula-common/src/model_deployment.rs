@@ -60,7 +60,32 @@ pub struct KvSharingSpec {
     /// L2 tier size in GB (LMCache requires a size alongside the path).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_disk_size_gb: Option<u32>,
+
+    /// Lease TTL in seconds for `lmcache_controller` `POST /pin` (Tool-Pause spine pins).
+    ///
+    /// `None` keeps LMCache's own default ([`DEFAULT_PIN_TIMEOUT_SEC`], 300 s). LMCache has
+    /// **no unpin API**: a pin is released only by this timeout (checked every
+    /// `pin_check_interval_sec`, 30 s) or by an engine restart, so the TTL *is* the pin
+    /// policy. Declaring it keeps the lease explicit instead of inherited, and raising it is
+    /// the only way to protect a pause longer than the default (measured: a pin survives
+    /// L1 LRU pressure until the lease expires; `docs/dev/kv-governance.md` §4.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_timeout_sec: Option<u32>,
 }
+
+/// LMCache's default `pin_timeout_sec`. The PinMonitor force-unpins past it.
+pub const DEFAULT_PIN_TIMEOUT_SEC: u32 = 300;
+/// Accepted `pin_timeout_sec` range: below the 30 s PinMonitor check interval a pin would
+/// be released faster than it can be observed, above 1800 s it outlives any agent pause.
+pub const PIN_TIMEOUT_SEC_RANGE: std::ops::RangeInclusive<u32> = 30..=1800;
+
+/// LMCache chunk size that KV objects are keyed and pinned by (0.5.5 default; the upgrade
+/// gate asserts it stays 256). A prefix shorter than one chunk has no addressable KV
+/// object, so it can never be pinned.
+pub const LMCACHE_CHUNK_TOKENS: usize = 256;
+
+/// L1 tier `location` name used by `POST /pin` and `POST /clear`.
+pub const LMCACHE_DEFAULT_KV_LOCATION: &str = "LocalCPUBackend";
 
 fn default_kv_serde() -> String {
     "naive".to_string()
@@ -205,6 +230,10 @@ pub fn kv_sharing_env(role: ReplicaRole, kv: &KvSharingSpec) -> Vec<(&'static st
         ("LMCACHE_REMOTE_URL", kv.remote_url.clone()),
         ("LMCACHE_REMOTE_SERDE", kv.serde.clone()),
     ];
+    // Pin lease TTL for Tool-Pause spine pins (no unpin API exists; the TTL is the policy).
+    if let Some(sec) = kv.pin_timeout_sec {
+        env.push(("LMCACHE_PIN_TIMEOUT_SEC", sec.to_string()));
+    }
     // L2 (local NVMe): off unless a path is declared.
     if let Some(path) = kv
         .local_disk_path
@@ -608,6 +637,15 @@ pub fn validate_pd_split_with_context(
                         return Err("kv_sharing.local_cpu_size_gb must be > 0".into());
                     }
                 }
+                if let Some(sec) = kv.pin_timeout_sec {
+                    if !PIN_TIMEOUT_SEC_RANGE.contains(&sec) {
+                        return Err(format!(
+                            "kv_sharing.pin_timeout_sec must be within {}..={} (LMCache PinMonitor checks every 30s; >1800s outlives any agent pause); got {sec}",
+                            PIN_TIMEOUT_SEC_RANGE.start(),
+                            PIN_TIMEOUT_SEC_RANGE.end()
+                        ));
+                    }
+                }
                 if let Some(path) = kv.local_disk_path.as_deref() {
                     if path.trim().is_empty() {
                         return Err("kv_sharing.local_disk_path is empty".into());
@@ -780,6 +818,28 @@ mod tests {
 
         // Mixed → no injection (replicated deployments unchanged)
         assert!(kv_sharing_env(ReplicaRole::Mixed, &kv).is_empty());
+    }
+
+    #[test]
+    fn kv_sharing_env_declares_pin_lease_only_when_set() {
+        let mut kv = KvSharingSpec {
+            remote_url: "lm://h:6800".into(),
+            ..Default::default()
+        };
+        let env = kv_sharing_env(ReplicaRole::Decode, &kv);
+        assert!(
+            !env.iter().any(|(k, _)| *k == "LMCACHE_PIN_TIMEOUT_SEC"),
+            "undeclared pin TTL must keep the engine default"
+        );
+        kv.pin_timeout_sec = Some(600);
+        let env = kv_sharing_env(ReplicaRole::Prefill, &kv);
+        let ttl = env
+            .iter()
+            .find(|(k, _)| *k == "LMCACHE_PIN_TIMEOUT_SEC")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ttl, Some("600"));
+        // The env name is `LMCACHE_` + config key upper-cased (lmcache/v1/config_base.py).
+        assert_eq!(DEFAULT_PIN_TIMEOUT_SEC, 300);
     }
 
     #[test]
@@ -1110,6 +1170,7 @@ mod tests {
             local_cpu_size_gb: Some(24),
             local_disk_path: Some("/nvme/kv".into()),
             local_disk_size_gb: Some(512),
+            pin_timeout_sec: None,
         };
         let env = kv_sharing_env(ReplicaRole::Decode, &kv);
         let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
@@ -1155,6 +1216,7 @@ mod tests {
             local_cpu_size_gb: Some(8),
             local_disk_path: Some("/nvme/kv".into()),
             local_disk_size_gb: Some(64),
+            pin_timeout_sec: None,
         });
         assert!(validate_pd_split(&ok, Some("vllm")).is_ok());
     }

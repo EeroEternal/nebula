@@ -319,6 +319,10 @@ curl -s http://127.0.0.1:8081/v1/score \
 | `NEBULA_PD_BYPASS_TOKENS` | Router | `pd_split` 短请求直通 Decode 池的 prompt token 阈值（需 Decode 副本有新鲜 `/stats/` 且 `pending_requests == 0` 或 `<= min_prefill_pending`） | `256`（设为 `0` 关闭） |
 | `NEBULA_PD_PREFILL_SPILLOVER_PENDING` | Router | `pd_split` 冷请求在 Prefill 池积压达阈值（`min_prefill_pending >= 阈值`）且某 Decode 副本有新鲜 `/stats/` 且 `pending_requests < min_prefill_pending` 时溢出直跑 Decode 的阈值 | `0`（默认关闭；显式设 `>0` 开启） |
 | `NEBULA_TOOL_PAUSE_TTL_MS` | Router | Agentic tool-call 暂停窗口内租户级 `(tenant_id, x-session-id)` 单次续接租约 TTL（毫秒） | `60000` |
+| `NEBULA_TOOL_PAUSE_PIN_TOKENS` | Router | 观测到 `tool_calls` 后 pin 的会话骨骼前缀 token 数（截到 256 整数倍；`0` 关闭，`<256` 无法 pin）。预算 ≈ `0.11 MB L1 / token`（真机实测） | `4096`（≈0.45 GB L1/会话） |
+| `NEBULA_TOOL_PAUSE_PIN` | Router | 设为 `0`/`false` 关闭 Tool-Pause 自动 pin，但保留 controller 配置 | 不设（有 controller 即启用） |
+| `NEBULA_LMCACHE_CONTROLLER_BASE_URL` | Router / BFF | `lmcache_controller` 基地址（`http://host:9000`）；Router 未设时会从 `NEBULA_PD_SPLIT_LOOKUP_URL` 去掉 `/lookup` 推导 | 未设 = 不 pin |
+| `pin_timeout_sec`（`KvSharingSpec` 字段，非环境变量） | 执行面（引擎 env `LMCACHE_PIN_TIMEOUT_SEC`） | pin 租约 TTL：LMCache **没有 unpin**，只能靠它过期（30–1800 s 校验）。小于停顿就保护不住，过大则 L1 被占满 | 未声明 = LMCache 默认 `300` |
 
 **`pd_split` 的启动顺序**：`lmcache_controller` / `lmcache_server` 必须先于引擎就绪 —— 设了 `NEBULA_LMCACHE_CONTROLLER_URL` 时，`nebula-node`（引擎启动前）与 `k8s-controller`（建 Pod 前）会**等 controller 的 TCP 端口可连**，超时（`NEBULA_LMCACHE_CONTROLLER_WAIT_MS`，默认 node 60s / controller 30s）则本次不启动、下一轮重试。引擎先起时 worker 能注册但**不会上报 KV 键**，`/lookup` 恒返回空、`pd_lookup_warm_total` 恒 0，`pd_split` 静默退化为单 Prefill 副本，**且只能靠重启引擎恢复**。路由器在连续 50 次全冷后打一条警告并计入 `stage_stats_missing_total{decision="warm_signal_cold"}`。
 
@@ -333,6 +337,7 @@ curl -s http://127.0.0.1:8081/v1/score \
 - `nebula_router_pd_decode_local_hit_total`：`pd_split` 命中 Decode 池本地显存（Tier-1 跳过 Prefill 与远端 KV 拉取）计数；
 - `nebula_router_pd_short_bypass_total`：`pd_split` 短请求直通空闲 Decode 副本计数；
 - `nebula_router_saved_prefill_tokens_total{model_uid}`：**缓存命中的收益口径**（Batch 6.4）—— 被服务副本实际已持有的 prefill token 数（块数 × 16）。冷请求与非所选副本的命中都不计入，可当作节省量的保守下界。
+- `nebula_router_tool_pause_pin_total{result="ok|failed|skipped"}` + `nebula_router_tool_pause_pinned_tokens_total`：Tool-Pause 骨骼前缀 pin 的成功/失败/跳过计数与实际钉住的 L1 token 数（Batch 5.4）。`skipped` 持续增长通常是 `NEBULA_ROUTER_TOKENIZER_DIR` 没配（拿不到 token ids）或骨架不足 256 token；`failed` 看 controller 日志，`num_tokens=0` 表示锚定副本上本来就没这块 KV（集群级 `/lookup` 是 max，per-replica pin 返回 0 正常）。
 - `nebula_router_stage_prefill_spillover_total`：`pd_split` Prefill 池饱和时溢出至空闲 Decode 副本计数。
 - `nebula_router_stage_stats_missing_total{decision="short_bypass"|"prefill_spillover"|"warm_signal_cold"}`：**因缺少新鲜 `/stats/` 而无法评估**的阶段决策计数。非零意味着 `/stats/` 管道没通（`nebula-node` / `k8s-controller` 的 scrape 没跑或副本不上报），此时短请求旁路与 Prefill 溢流**静默失效**，`pd_split` 会退化成"全部走 Prefill"——排查顺序见下方「数值先看它」。
 

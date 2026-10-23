@@ -65,6 +65,16 @@ pub const DEFAULT_TOOL_PAUSE_TTL_MS: u64 = 60_000;
 pub const TOOL_PAUSE_MAX_ENTRIES: usize = 4_096;
 pub const SESSION_AFFINITY_MAX_ENTRIES: usize = 4_096;
 
+/// Default number of prompt tokens remembered per Tool-Pause session and pinned on
+/// `tool_calls`. The pin protects the *spine* (system prompt + tool schemas), not the
+/// churning tail: measured on the rig at ~0.11 MB of L1 per pinned token, so 4k tokens
+/// is ~0.45 GB of a 5 GB L1 — the budget is what bounds this, not the wire format.
+pub const DEFAULT_TOOL_PAUSE_PIN_TOKENS: usize = 4_096;
+/// Bounded stash of session spine token ids (ids, not hashes: `/pin` takes tokens).
+pub const TOOL_PAUSE_PIN_MAX_ENTRIES: usize = 1_024;
+/// `lmcache_controller` request timeout for a pin. Pins are best-effort background work.
+const TOOL_PAUSE_PIN_TIMEOUT_MS: u64 = 5_000;
+
 /// Tenant-scoped session key `(tenant_id, session_id)` so one tenant cannot
 /// collide with, hijack, or borrow another tenant's continuation lease or
 /// replica affinity.
@@ -76,6 +86,50 @@ fn session_key(tenant_id: Option<&str>, session_id: &str) -> SessionKey {
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     (tenant, session_id.trim().to_string())
+}
+
+/// Chunk-aligned pin prefix length.
+///
+/// LMCache keys, pins and reports KV in `chunk_size` (256) token objects, so a shorter
+/// prefix has nothing to address: `pin` of a 200-token list pins zero chunks. Measured on
+/// the rig: a 1493-token list pins 1280 (`docs/dev/kv-governance.md` §4.3).
+fn pin_prefix_len(available: usize, cap: usize) -> usize {
+    let n = available.min(cap);
+    n / nebula_common::LMCACHE_CHUNK_TOKENS * nebula_common::LMCACHE_CHUNK_TOKENS
+}
+
+/// `lmcache_controller` base URL for `POST /pin`, or `None` to disable Tool-Pause pinning.
+///
+/// Resolution order keeps one knob per deployment shape: an explicit
+/// `NEBULA_LMCACHE_CONTROLLER_BASE_URL` (the same variable the BFF uses), else the pd_split
+/// `/lookup` URL the router already has with its path stripped. `NEBULA_TOOL_PAUSE_PIN=0`
+/// turns it off without unsetting either.
+fn tool_pause_pin_base_from_env() -> Option<String> {
+    let disabled = std::env::var("NEBULA_TOOL_PAUSE_PIN")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false);
+    if disabled {
+        return None;
+    }
+    let normalize = |raw: &str| {
+        let base = raw.trim().trim_end_matches('/');
+        let base = base.strip_suffix("/lookup").unwrap_or(base);
+        let base = base.trim_end_matches('/');
+        (!base.is_empty()).then(|| base.to_string())
+    };
+    std::env::var("NEBULA_LMCACHE_CONTROLLER_BASE_URL")
+        .ok()
+        .and_then(|v| normalize(&v))
+        .or_else(|| {
+            std::env::var("NEBULA_PD_SPLIT_LOOKUP_URL")
+                .ok()
+                .and_then(|v| normalize(&v))
+        })
 }
 
 fn warm_cache_key(model_uid: &str, token_ids: &[u32]) -> (String, [u8; 32]) {
@@ -271,6 +325,18 @@ pub struct Router {
     tool_pause_ttl_ms: u64,
     tool_pause_marked_total: AtomicU64,
     tool_continuation_hit_total: AtomicU64,
+    /// Batch 5.4: bounded `(tenant, session) -> (first N prompt token ids, expires_at_ms)`.
+    /// Captured on the request path (the only place the body still exists) so a later
+    /// *server-observed* `tool_calls` can pin exactly the L1 chunks the resumed turn will
+    /// re-prefill. Consumed on use; expiry is a leak guard, not the policy.
+    session_prefix_ids: DashMap<SessionKey, (Vec<u32>, u64)>,
+    tool_pause_pin_tokens_cap: usize,
+    /// `lmcache_controller` base URL for `POST /pin`; `None` disables Tool-Pause pinning.
+    tool_pause_pin_base: Option<String>,
+    tool_pause_pin_ok_total: AtomicU64,
+    tool_pause_pin_failed_total: AtomicU64,
+    tool_pause_pin_skipped_total: AtomicU64,
+    tool_pause_pinned_tokens_total: AtomicU64,
     strategy: Box<dyn RoutingStrategy>,
     /// model_name → model_uid (e.g. "Qwen/Qwen2.5-0.5B-Instruct" → "qwen2_5_0_5b")
     model_names: DashMap<String, String>,
@@ -384,6 +450,17 @@ impl Router {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(DEFAULT_TOOL_PAUSE_TTL_MS);
+        let tool_pause_pin_tokens_cap = std::env::var("NEBULA_TOOL_PAUSE_PIN_TOKENS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_TOOL_PAUSE_PIN_TOKENS);
+        let tool_pause_pin_base = tool_pause_pin_base_from_env();
+        if tool_pause_pin_base.is_some() {
+            tracing::info!(
+                cap_tokens = tool_pause_pin_tokens_cap,
+                "Tool-Pause KV pinning enabled (lmcache_controller /pin lease)"
+            );
+        }
         Arc::new(Self {
             endpoints: DashMap::new(),
             stats: DashMap::new(),
@@ -392,6 +469,13 @@ impl Router {
             tool_pause_ttl_ms,
             tool_pause_marked_total: AtomicU64::new(0),
             tool_continuation_hit_total: AtomicU64::new(0),
+            session_prefix_ids: DashMap::new(),
+            tool_pause_pin_tokens_cap,
+            tool_pause_pin_base,
+            tool_pause_pin_ok_total: AtomicU64::new(0),
+            tool_pause_pin_failed_total: AtomicU64::new(0),
+            tool_pause_pin_skipped_total: AtomicU64::new(0),
+            tool_pause_pinned_tokens_total: AtomicU64::new(0),
             strategy,
             model_names: DashMap::new(),
             model_uids_to_names: DashMap::new(),
@@ -448,6 +532,7 @@ impl Router {
         }
         self.session_affinity.clear();
         self.tool_pause_leases.clear();
+        self.session_prefix_ids.clear();
     }
 
     pub fn upsert_endpoint(&self, info: EndpointInfo) {
@@ -651,13 +736,189 @@ impl Router {
     /// (`NEBULA_TOOL_PAUSE_TTL_MS`, default 60s), it gets one priority queue
     /// admission and strong replica anchoring before the lease is consumed.
     pub fn mark_tool_pause_for_tenant(
-        &self,
+        self: &Arc<Self>,
         tenant_id: Option<&str>,
         session_id: &str,
         model_uid: &str,
         replica_id: u32,
     ) {
         self.mark_tool_pause_for_tenant_at(tenant_id, session_id, model_uid, replica_id, now_ms());
+        self.spawn_tool_pause_pin(tenant_id, session_id, model_uid, replica_id);
+    }
+
+    /// Remember the first `NEBULA_TOOL_PAUSE_PIN_TOKENS` prompt ids for this session.
+    ///
+    /// Called from [`Self::body_route_hints`] — the request path is the only place the
+    /// prompt is tokenized and the body still exists; by the time `tool_calls` is observed
+    /// the body is gone, and `/pin` takes token ids, not hashes.
+    ///
+    /// Chunk-aligned and bounded: a prefix shorter than one 256-token chunk has no
+    /// addressable KV object, and the map is capped because it holds raw ids.
+    pub fn remember_session_prefix(
+        &self,
+        tenant_id: Option<&str>,
+        session_id: Option<&str>,
+        ids: &[u32],
+    ) {
+        let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if self.tool_pause_pin_base.is_none() || self.tool_pause_pin_tokens_cap == 0 {
+            return;
+        }
+        let n = pin_prefix_len(ids.len(), self.tool_pause_pin_tokens_cap);
+        if n < nebula_common::LMCACHE_CHUNK_TOKENS {
+            return;
+        }
+        let now = now_ms();
+        let key = session_key(tenant_id, sid);
+        if self.session_prefix_ids.len() >= TOOL_PAUSE_PIN_MAX_ENTRIES
+            && !self.session_prefix_ids.contains_key(&key)
+        {
+            self.session_prefix_ids.retain(|_, (_, exp)| *exp > now);
+            while self.session_prefix_ids.len() >= TOOL_PAUSE_PIN_MAX_ENTRIES {
+                let oldest = self
+                    .session_prefix_ids
+                    .iter()
+                    .min_by_key(|e| e.value().1)
+                    .map(|e| e.key().clone());
+                let Some(oldest) = oldest else { break };
+                self.session_prefix_ids.remove(&oldest);
+            }
+        }
+        self.session_prefix_ids.insert(
+            key,
+            (
+                ids[..n].to_vec(),
+                now.saturating_add(self.tool_pause_ttl_ms),
+            ),
+        );
+    }
+
+    /// Claim this session's remembered spine prefix for a pin (consumes the entry).
+    fn take_pin_tokens(
+        &self,
+        tenant_id: Option<&str>,
+        session_id: &str,
+        model_uid: &str,
+        replica_id: u32,
+    ) -> Option<(String, Vec<u32>)> {
+        let key = session_key(tenant_id, session_id.trim());
+        let (_, (ids, expires_at_ms)) = self.session_prefix_ids.remove(&key)?;
+        // A resumed turn after a long idle must not pin a prefix captured hours ago.
+        if expires_at_ms <= now_ms() {
+            return None;
+        }
+        let n = pin_prefix_len(ids.len(), self.tool_pause_pin_tokens_cap);
+        if n < nebula_common::LMCACHE_CHUNK_TOKENS {
+            return None;
+        }
+        // `/pin` is addressed per replica: the instance id is the string the engine
+        // registered with, never the cluster-wide `NEBULA_PD_SPLIT_INSTANCE_ID` fallback.
+        Some((
+            nebula_common::lmcache_instance_id(model_uid, replica_id),
+            ids[..n].to_vec(),
+        ))
+    }
+
+    /// Pin the resumed session's spine prefix in L1 on the replica that answered.
+    ///
+    /// Triggered only by the *server-observed* `tool_calls` signal (never a client hint),
+    /// and only meaningful for LMCache-backed deployments. LMCache has no unpin endpoint:
+    /// `POST /pin` is a lease released by `pin_timeout_sec` (or engine restart), which is
+    /// exactly the pause window. There is deliberately **no** renewal/unpin path —
+    /// re-pinning after a pause cannot recover KV that already expired during it, and the
+    /// lease would leak L1 otherwise (measured: a pin survives L1 LRU pressure until the
+    /// lease expires, an unpinned prefix is evicted; `docs/dev/kv-governance.md` §4.3).
+    ///
+    /// Spawned off the response path: a controller round-trip must never add latency, and
+    /// every outcome (ok / failed / skipped) is counted so silent degradation is visible.
+    fn spawn_tool_pause_pin(
+        self: &Arc<Self>,
+        tenant_id: Option<&str>,
+        session_id: &str,
+        model_uid: &str,
+        replica_id: u32,
+    ) {
+        let Some(base) = self.tool_pause_pin_base.clone() else {
+            self.tool_pause_pin_skipped_total
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let Some((instance, tokens)) =
+            self.take_pin_tokens(tenant_id, session_id, model_uid, replica_id)
+        else {
+            // No tokenized prefix for this session (tokenizer dir missing, or < 1 chunk).
+            self.tool_pause_pin_skipped_total
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            // Sync caller (CLI/tests): nothing to spawn on. Counted, not swallowed.
+            self.tool_pause_pin_skipped_total
+                .fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let router = Arc::clone(self);
+        let url = format!("{base}/pin");
+        handle.spawn(async move {
+            let body = serde_json::json!({
+                "instance_id": instance,
+                "location": nebula_common::LMCACHE_DEFAULT_KV_LOCATION,
+                "tokens": tokens,
+            });
+            let response = router
+                .http_client
+                .post(&url)
+                .json(&body)
+                .timeout(std::time::Duration::from_millis(TOOL_PAUSE_PIN_TIMEOUT_MS))
+                .send()
+                .await;
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let pinned = resp
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .and_then(|v| v.get("num_tokens").and_then(|n| n.as_u64()))
+                        .unwrap_or(0);
+                    router
+                        .tool_pause_pin_ok_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    router
+                        .tool_pause_pinned_tokens_total
+                        .fetch_add(pinned, Ordering::Relaxed);
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let detail = resp.text().await.unwrap_or_default();
+                    router
+                        .tool_pause_pin_failed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        status = %status,
+                        detail = %detail.chars().take(200).collect::<String>(),
+                        "tool-pause KV pin rejected by lmcache_controller"
+                    );
+                }
+                Err(e) => {
+                    router
+                        .tool_pause_pin_failed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(error = %e, "tool-pause KV pin failed");
+                }
+            }
+        });
+    }
+
+    /// `(ok, failed, skipped, pinned_tokens)` for Tool-Pause spine pinning.
+    pub fn tool_pause_pin_stats(&self) -> (u64, u64, u64, u64) {
+        (
+            self.tool_pause_pin_ok_total.load(Ordering::Relaxed),
+            self.tool_pause_pin_failed_total.load(Ordering::Relaxed),
+            self.tool_pause_pin_skipped_total.load(Ordering::Relaxed),
+            self.tool_pause_pinned_tokens_total.load(Ordering::Relaxed),
+        )
     }
 
     pub fn mark_tool_pause_for_tenant_at(
@@ -909,10 +1170,16 @@ impl Router {
     /// pd_split warm decisions) plus the pd_split controller warm signal.
     /// Tokenizes the body at most once so chat template rendering and BPE
     /// encoding are never duplicated on the request path.
+    ///
+    /// When a `session_id` is present this also stashes the bounded, chunk-aligned spine
+    /// prefix for Tool-Pause pinning — this is the only point where the prompt is tokenized
+    /// and the body still exists (see [`Self::remember_session_prefix`]).
     pub async fn body_route_hints(
         &self,
         model_uid: &str,
         body: &[u8],
+        tenant_id: Option<&str>,
+        session_id: Option<&str>,
     ) -> (Option<Vec<[u8; 32]>>, bool) {
         let has_roles = self.model_has_role_pools(model_uid);
         if self.strategy_name() != "prefix_affinity" && !has_roles {
@@ -921,6 +1188,7 @@ impl Router {
         let Some(ids) = self.body_token_ids(model_uid, body) else {
             return (None, false);
         };
+        self.remember_session_prefix(tenant_id, session_id, &ids);
         let hashes = Some(self.prefix_hasher.hashes_from_ids(&ids));
         let warm = if has_roles {
             self.controller_warm(model_uid, &ids).await
@@ -3060,6 +3328,69 @@ mod tool_call_scanner_tests {
         assert!(!s.feed(prefix));
         assert!(!s.feed(&long_args));
         assert!(s.feed(suffix));
+    }
+
+    #[test]
+    fn tool_pause_pin_prefix_is_chunk_aligned_and_per_replica() {
+        // LMCache keys/pins KV in 256-token chunks: a shorter prefix has nothing to pin.
+        assert_eq!(pin_prefix_len(0, 4096), 0);
+        assert_eq!(pin_prefix_len(255, 4096), 0);
+        assert_eq!(pin_prefix_len(256, 4096), 256);
+        assert_eq!(pin_prefix_len(1_000, 4096), 768);
+        assert_eq!(pin_prefix_len(10_000, 4096), 4096);
+        assert_eq!(pin_prefix_len(1_000, 700), 512);
+
+        let router = Router::with_strategy(Box::new(LeastPending));
+        let live = now_ms() + 60_000;
+        // The stash is normally written by `body_route_hints` behind the env gate;
+        // seed it directly so the claim path is tested without touching process env.
+        router
+            .session_prefix_ids
+            .insert(session_key(None, "s1"), (vec![7u32; 1_000], live));
+        let (instance, tokens) = router
+            .take_pin_tokens(None, "s1", "m1", 3)
+            .expect("claim chunk-aligned prefix");
+        // `/pin` is addressed per replica, never the cluster-wide lookup instance id.
+        assert_eq!(instance, "m1-3");
+        assert_eq!(tokens.len(), 768);
+        // Consumed once per pause: a stale stash must not pin a later, unrelated turn.
+        assert!(router.take_pin_tokens(None, "s1", "m1", 3).is_none());
+
+        // Sub-chunk prefixes are not addressable.
+        router
+            .session_prefix_ids
+            .insert(session_key(None, "s2"), (vec![1u32; 200], live));
+        assert!(router.take_pin_tokens(None, "s2", "m1", 3).is_none());
+
+        // A stale stash (past the Tool-Pause TTL) must not pin an hours-old prefix.
+        router.session_prefix_ids.insert(
+            session_key(None, "s4"),
+            (vec![3u32; 512], now_ms().saturating_sub(1)),
+        );
+        assert!(router.take_pin_tokens(None, "s4", "m1", 3).is_none());
+
+        // Tenant isolation: another tenant's session id cannot claim the prefix.
+        router
+            .session_prefix_ids
+            .insert(session_key(Some("t-a"), "s3"), (vec![2u32; 512], live));
+        assert!(router.take_pin_tokens(Some("t-b"), "s3", "m1", 3).is_none());
+        assert!(router.take_pin_tokens(Some("t-a"), "s3", "m1", 3).is_some());
+    }
+
+    #[test]
+    fn tool_pause_pin_is_skipped_without_a_controller() {
+        // No controller configured (this test never sets the env): the pin is counted as
+        // skipped instead of silently pretending the prefix is protected.
+        if tool_pause_pin_base_from_env().is_some() {
+            return; // dev shell has a controller configured; the skip path cannot occur.
+        }
+        let router = Router::new();
+        router.mark_tool_pause_for_tenant(Some("t1"), "pin-skip", "m1", 0);
+        let (ok, failed, skipped, tokens) = router.tool_pause_pin_stats();
+        assert_eq!((ok, failed, tokens), (0, 0, 0));
+        assert_eq!(skipped, 1);
+        // The queue/anchoring lease is unaffected by a skipped pin.
+        assert!(router.has_active_tool_pause_for_tenant(Some("t1"), "pin-skip"));
     }
 
     #[test]

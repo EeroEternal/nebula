@@ -90,6 +90,25 @@ def schema_ok():
     return "nebula keys accepted, chunk_size=256"
 check("nebula config schema", schema_ok)
 
+# Tool-Pause L1 pinning (Batch 5.4) depends on exactly this contract: the controller
+# exposes /pin, has no /unpin (the pin IS a lease), and pin_timeout_sec is a real config
+# key. If upstream adds an unpin path the lease design must be revisited instead of
+# silently leaking or double-releasing L1. Read the file rather than importing it:
+# __main__ pulls in uvicorn, which the venv under test may not ship.
+def pin_lease_contract():
+    import pathlib
+    api = pathlib.Path(lmcache.__file__).parent / "v1/api_server/__main__.py"
+    src = api.read_text()
+    assert '@app.post("/pin"' in src, "/pin route missing from lmcache_controller"
+    assert "/unpin" not in src, "controller gained /unpin: revisit the Tool-Pause pin lease"
+    p = "/tmp/gate-pin.yaml"
+    open(p, "w").write(CFG + "pin_timeout_sec: 600\npin_check_interval_sec: 30\n")
+    c = LMCacheEngineConfig.from_file(p)
+    assert c.pin_timeout_sec == 600, c.pin_timeout_sec
+    assert c.pin_check_interval_sec == 30, c.pin_check_interval_sec
+    return "controller /pin present, no /unpin, pin_timeout_sec parsed"
+check("pin lease contract", pin_lease_contract)
+
 import vllm.distributed.kv_events as ke
 check("vllm zmq kv-events publisher",
       lambda: ",".join(sorted(ke.EventPublisherFactory._registry.keys())))
