@@ -210,9 +210,11 @@ Agent 的工具停顿（2–30 s）是真正的 scheduling bubble：网关的 To
 
 实现约定（`crates/nebula-router`）：只在服务端观测到 `finish_reason=tool_calls` 时触发（绝不信任客户端 `role: "tool"`）；pin 的是**会话骨骼**——请求路径上已分词的 prompt 前 `NEBULA_TOOL_PAUSE_PIN_TOKENS`（默认 4096）个 token，截到 256 整数倍；实例 id 用 `{model_uid}-{replica_id}`（集群级 `/lookup` 是 max，per-instance pin 返回 0 属正常）；`tokio::spawn` + 5 s 超时，失败只计数。**不做**续期/解 pin：停顿后再续期无法救回停顿期间已过期的 KV，而续期会让 L1 被长期占满。
 
-预算（实测系数 **~0.11 MB L1 / pinned token**）：4 k 骨骼 ≈ 0.45 GB，5 GB L1 约够 11 个会话。因此 `max_local_cpu_size` 必须同时容纳工作集与 pin 预算；TTL 用 `KvSharingSpec.pin_timeout_sec`（30–1800 s，声明式下发 `LMCACHE_PIN_TIMEOUT_SEC`）显式化，而非继承引擎默认。
+预算（实测系数 **~0.11 MB L1 / pinned token**，即 112 KiB/token 的 0.6B fp16 模型）：4 k 骨骼 ≈ 0.45 GB，5 GB L1 约够 11 个会话。因此 `max_local_cpu_size` 必须同时容纳工作集与 pin 预算；TTL 用 `KvSharingSpec.pin_timeout_sec`（30–1800 s，声明式下发 `LMCACHE_PIN_TIMEOUT_SEC`）显式化，而非继承引擎默认。
 
-**未做**：把 pin 字节计入 `capacity.rs` 的 L1 准入估算（目前只声明 `local_cpu_size_gb`）；HBM 侧 APC 的定点保护（Zone B，引擎无 pin API）。
+**容量估算（Batch 6.5）**：pin 的 KV 与工作集**共用同一个 tier**，且 pin 不可驱逐——所以容量上不是「多占一点 host DRAM」，而是「工作集变小」。`KvSharingSpec.pin_budget_gb` 声明每个副本必须留出的可 pin 额度（必须 `< local_cpu_size_gb`，否则写入即拒），`build_capacity_snapshot` 把它从 tier 里减掉，并在额度 ≥ tier 的一半时输出 `kv_l1_pin_reserve_high`（带 75% 与剩余 GB 的具体数字）。per-session 字节数随模型变（`2 × layers × kv_heads × head_dim × dtype_bytes / TP`：0.6B fp16 ≈ 112 KiB/token，70B 级可达数百 KiB/token），所以额度是**逐部署声明**而不是全局常量。
+
+**未做**：运行时 pin 配额强制（Router 只要被要求就会 pin，`pin_budget_gb` 目前是估算与告警口径，不是限流器）；把引擎侧实际 pinned 字节回传（LMCache 只暴露 `pin_monitor_pinned_objects_count` 的**对象数**，没有 pinned bytes 指标，NodeStatus 无法上报真实占用）；HBM 侧 APC 的定点保护（Zone B，引擎无 pin API）。
 
 ---
 

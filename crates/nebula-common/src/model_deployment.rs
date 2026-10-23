@@ -71,6 +71,19 @@ pub struct KvSharingSpec {
     /// L1 LRU pressure until the lease expires; `docs/dev/kv-governance.md` §4.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin_timeout_sec: Option<u32>,
+
+    /// Host DRAM that must stay **pinnable for Tool-Pause spines, inside** the declared L1
+    /// tier (not additional memory).
+    ///
+    /// Pinned objects cannot be evicted, so they are taken out of the tier's working set:
+    /// the effective cache is `local_cpu_size_gb - pin_budget_gb`. One pinned session costs
+    /// `pin_tokens x KV bytes/token`, and KV bytes/token is model-specific
+    /// (`2 x layers x kv_heads x head_dim x dtype_bytes / TP`; 112 KiB/token for a 0.6B fp16
+    /// model, several hundred KiB for a 70B one), which is why this is declared per
+    /// deployment instead of derived from a global constant. Unset = no reserve declared,
+    /// and the capacity snapshot stays silent about pin pressure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin_budget_gb: Option<u32>,
 }
 
 /// LMCache's default `pin_timeout_sec`. The PinMonitor force-unpins past it.
@@ -646,6 +659,19 @@ pub fn validate_pd_split_with_context(
                         ));
                     }
                 }
+                // Pins are inside the tier and unevictable, so a reserve >= the tier leaves
+                // no working set at all (guaranteed thrash, not just a tight cache).
+                if let Some(pin_gb) = kv.pin_budget_gb {
+                    let tier_gb = kv.local_cpu_size_gb.unwrap_or(5);
+                    if pin_gb == 0 {
+                        return Err("kv_sharing.pin_budget_gb must be > 0 (unset it to disable the reserve)".into());
+                    }
+                    if pin_gb >= tier_gb {
+                        return Err(format!(
+                            "kv_sharing.pin_budget_gb ({pin_gb} GB) must be smaller than the L1 tier ({tier_gb} GB): pins are unevictable, so the remainder is the whole cache working set"
+                        ));
+                    }
+                }
                 if let Some(path) = kv.local_disk_path.as_deref() {
                     if path.trim().is_empty() {
                         return Err("kv_sharing.local_disk_path is empty".into());
@@ -1171,6 +1197,7 @@ mod tests {
             local_disk_path: Some("/nvme/kv".into()),
             local_disk_size_gb: Some(512),
             pin_timeout_sec: None,
+            pin_budget_gb: None,
         };
         let env = kv_sharing_env(ReplicaRole::Decode, &kv);
         let get = |k: &str| env.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone());
@@ -1182,6 +1209,58 @@ mod tests {
             get("LMCACHE_RETRIEVE_LOCATIONS").as_deref(),
             Some("RemoteBackend")
         );
+    }
+
+    /// Pins live inside the tier and cannot be evicted, so a reserve that swallows the
+    /// tier is not a tight cache - it is a guaranteed-thrash configuration. Reject it at
+    /// write time instead of discovering it as an unexplained hit-rate collapse.
+    #[test]
+    fn pin_budget_must_fit_inside_the_declared_tier() {
+        let mut d = pd_dep();
+        d.kv_sharing = Some(KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(8),
+            pin_budget_gb: Some(0),
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&d, Some("vllm"))
+            .unwrap_err()
+            .contains("pin_budget_gb"));
+
+        let mut full = pd_dep();
+        full.kv_sharing = Some(KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(8),
+            pin_budget_gb: Some(8),
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&full, Some("vllm"))
+            .unwrap_err()
+            .contains("must be smaller than the L1 tier"));
+
+        // Undeclared tier keeps the historical 5 GB, so the reserve is bounded by that.
+        let mut implicit = pd_dep();
+        implicit.kv_sharing = Some(KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            pin_budget_gb: Some(5),
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&implicit, Some("vllm"))
+            .unwrap_err()
+            .contains("must be smaller than the L1 tier"));
+
+        let mut ok = pd_dep();
+        ok.kv_sharing = Some(KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(8),
+            pin_budget_gb: Some(2),
+            ..Default::default()
+        });
+        assert!(validate_pd_split(&ok, Some("vllm")).is_ok());
     }
 
     #[test]
@@ -1217,6 +1296,7 @@ mod tests {
             local_disk_path: Some("/nvme/kv".into()),
             local_disk_size_gb: Some(64),
             pin_timeout_sec: None,
+            pin_budget_gb: None,
         });
         assert!(validate_pd_split(&ok, Some("vllm")).is_ok());
     }
