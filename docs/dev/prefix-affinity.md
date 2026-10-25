@@ -91,6 +91,11 @@
 
 - Router 用 minijinja 渲染模型的 `chat_template`（`tokenizer_config.json`，transformers 兼容子集：`tojson`/`loop.first`/空白控制），`add_special_tokens=false` 分词——与引擎 `apply_chat_template(tokenize=True)` **token 级对齐**（真机验证：6 个共享 system prompt 的 chat 请求全部集中到持有副本，no_signal 仅首请求 +1）。
 - shortcut：`chat_template_kwargs` 逐请求覆盖与奇异模板扩展 v1 不渲染——不匹配即 miss（可见回落），需要时再升级。
+- **带 tools 的模板（2026-10-25 修正，真机 E2E）**：上面的"token 级对齐"当时只在**无 tools** 的 chat 上验过。带 tools 时会走 `{{ tool | tojson }}`（jinja2 语义：`json.dumps` 默认分隔符 + HTML 转义）和 `message.content.startswith('<tool_response>')` 这类 Python 字符串方法，而 minijinja 默认两者都没有 → `chat_ids` 直接返回 `None`，**所有带工具定义的 agent 前缀既不参与亲和也拿不到 Tool-Pause pin**（静默 `no_signal`）。现已在 `prompt_hash.rs` 内置：
+  - `tojson` 过滤器 = jinja2 语义（`, ` / `: ` 分隔，`<>&'` 转义成 `\u003c` 等，非 ASCII 走 `\uXXXX`）；
+  - `py_str_method` 的 Python 字符串方法子集（`startswith` / `endswith` / `strip` / `split` / `replace` / `find` / `join` 等，遇到未建模的方法会**报错点名**而不是静默 miss）；
+  - 键序：Python dict 保插入序，所以本 crate 的 `serde_json` / `minijinja` 均开 `preserve_order`（否则工具 schema 的 key 会被排序，渲染串与引擎不同）。
+  - 真机核验：同一 body（1047 tok 不带 tools 的旧口径 / 1182 tok 带 tools）在 router 侧分词得 **1182**，与引擎日志 `Total tokens 1182` 完全一致（此前为 `None`）。
 - Chat 负载 A/B（暖引擎、4 前缀、N=256、C=16）：affinity vs least_pending = 36.9 vs 36.6 rps、TTFT mean 211 vs 231 ms（−8.6%）、**p99 342 vs 850 ms（−60%）**——小缓存稳态下收益集中在尾部；大缓存压力场景见 §5.6（+74% rps）。
 ### 5.8 全局索引服务 `nebula-indexd`（Batch 2，✅ 2026-10-11）
 
