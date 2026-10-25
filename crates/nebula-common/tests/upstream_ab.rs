@@ -70,10 +70,25 @@ async fn ab_probe() {
     let requests = env_usize("AB_REQUESTS", 300);
     let concurrency = env_usize("AB_CONCURRENCY", 16);
 
+    // Against a mock the model name is irrelevant; against a real engine it is not, and a
+    // fixed `max_tokens` + `ignore_eos` is what makes the two runs comparable: every
+    // request then streams exactly the same number of tokens.
+    let model = std::env::var("AB_MODEL").unwrap_or_else(|_| "mock".to_string());
+    let max_tokens = env_usize("AB_MAX_TOKENS", 0);
+    let prompt = std::env::var("AB_PROMPT")
+        .unwrap_or_else(|_| "Write one short paragraph about load balancing.".to_string());
+    let mut payload = serde_json::json!({
+        "model": model,
+        "stream": true,
+        "temperature": 0.0,
+        "messages": [{"role": "user", "content": prompt}],
+    });
+    if max_tokens > 0 {
+        payload["max_tokens"] = serde_json::json!(max_tokens);
+        payload["ignore_eos"] = serde_json::json!(true);
+    }
     let transport = transport(&name);
-    let body = Bytes::from_static(
-        br#"{"model":"mock","stream":true,"messages":[{"role":"user","content":"ping"}]}"#,
-    );
+    let body = Bytes::from(serde_json::to_vec(&payload).expect("body"));
     let make_request = || {
         let mut request =
             UpstreamRequest::new(http::Method::POST, format!("{base}/v1/chat/completions"));
