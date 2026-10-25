@@ -34,8 +34,9 @@ chrono.workspace = true
 xtrace-client.workspace = true
 
 # Pinned to a commit, never to a branch: a moving branch would change the numbers an A/B
-# measured. `h1`-only is the Phase-1 configuration (cleartext HTTP/1.1 to vLLM/SGLang).
-xlite-transport = { git = "https://github.com/EeroEternal/xlite", rev = "bb2ba1eac9a3b863b6e4c0531f5b5d0f3a5d2660", optional = true, default-features = false, features = ["h1", "tls-rustls"] }
+# measured. `h1`-only is the Phase-1 configuration (cleartext HTTP/1.1 to vLLM/SGLang);
+# it resolves without `rustls` at all, so a plaintext-only deployment carries no TLS stack.
+xlite-transport = { git = "https://github.com/EeroEternal/xlite", rev = "67abc190c89ed6f9b01907d32d1bdde5d6fa9172", optional = true, default-features = false, features = ["h1"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

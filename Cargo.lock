@@ -4658,19 +4658,16 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 [[package]]
 name = "xlite-transport"
 version = "0.1.0"
-source = "git+https://github.com/EeroEternal/xlite?rev=bb2ba1eac9a3b863b6e4c0531f5b5d0f3a5d2660#bb2ba1eac9a3b863b6e4c0531f5b5d0f3a5d2660"
+source = "git+https://github.com/EeroEternal/xlite?rev=67abc190c89ed6f9b01907d32d1bdde5d6fa9172#67abc190c89ed6f9b01907d32d1bdde5d6fa9172"
 dependencies = [
  "arc-swap",
  "bytes",
  "futures-util",
  "http",
  "httparse",
- "rustls",
- "rustls-pki-types",
  "socket2 0.6.5",
  "thiserror 2.0.18",
  "tokio",
- "tokio-rustls",
  "tracing",
 ]
 
