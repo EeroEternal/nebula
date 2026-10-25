@@ -11,7 +11,6 @@ use axum::{
     Router,
 };
 use clap::Parser;
-use nebula_common::proxy_http_client;
 
 use crate::args::Args;
 use crate::handlers::{healthz, proxy_chat_completions};
@@ -74,10 +73,11 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let http = proxy_http_client().unwrap_or_else(|e| {
-        tracing::error!(error=%e, "failed to build reqwest client");
+    let upstream = nebula_common::upstream_transport_from_env().unwrap_or_else(|e| {
+        tracing::error!(error=%e, "failed to build the upstream transport");
         std::process::exit(1);
     });
+    tracing::info!(transport = upstream.name(), "upstream transport");
 
     let metrics = Arc::new(metrics::Metrics::default());
     let dual_write = nebula_common::DualWriteEmitter::from_env(
@@ -108,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
     let st = AppState {
         model_uid: args.model_uid,
         router,
-        http,
+        upstream,
         metrics,
         dual_write,
         max_request_body_bytes,

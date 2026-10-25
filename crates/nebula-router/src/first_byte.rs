@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::{stream, Stream, StreamExt};
+use nebula_common::{UpstreamError, UpstreamResponse};
 
 /// Read the first chunk of `stream` within `budget`.
 ///
@@ -24,9 +25,9 @@ use futures_util::{stream, Stream, StreamExt};
 pub async fn await_first_chunk<S>(
     mut stream: S,
     budget: Duration,
-) -> Option<(Bytes, impl Stream<Item = reqwest::Result<Bytes>>)>
+) -> Option<(Bytes, impl Stream<Item = Result<Bytes, UpstreamError>>)>
 where
-    S: Stream<Item = reqwest::Result<Bytes>> + Unpin,
+    S: Stream<Item = Result<Bytes, UpstreamError>> + Unpin,
 {
     let head = match tokio::time::timeout(budget, stream.next()).await {
         Ok(Some(Ok(chunk))) if !chunk.is_empty() => chunk,
@@ -43,10 +44,7 @@ where
 ///
 /// `None` means nothing arrived in `budget` — no status has been committed, so retrying
 /// another replica is safe.
-pub async fn first_chunk_of(
-    resp: &mut reqwest::Response,
-    budget: Duration,
-) -> Option<bytes::Bytes> {
+pub async fn first_chunk_of(resp: &mut UpstreamResponse, budget: Duration) -> Option<Bytes> {
     match tokio::time::timeout(budget, resp.chunk()).await {
         Ok(Ok(Some(chunk))) if !chunk.is_empty() => Some(chunk),
         _ => None,
@@ -58,7 +56,7 @@ mod tests {
     use super::*;
     use futures_util::stream;
 
-    fn ok(bytes: &'static [u8]) -> reqwest::Result<Bytes> {
+    fn ok(bytes: &'static [u8]) -> Result<Bytes, UpstreamError> {
         Ok(Bytes::from_static(bytes))
     }
 
@@ -83,7 +81,7 @@ mod tests {
 
     #[tokio::test]
     async fn silent_stream_times_out_as_retryable() {
-        let silent = stream::pending::<reqwest::Result<Bytes>>();
+        let silent = stream::pending::<Result<Bytes, UpstreamError>>();
         let started = tokio::time::Instant::now();
         assert!(await_first_chunk(silent, Duration::from_millis(50))
             .await
@@ -97,7 +95,7 @@ mod tests {
     #[tokio::test]
     async fn empty_body_and_immediate_eof_are_retryable() {
         // EOF before any byte: engine closed without answering.
-        let eof = stream::iter(Vec::<reqwest::Result<Bytes>>::new());
+        let eof = stream::iter(Vec::<Result<Bytes, UpstreamError>>::new());
         assert!(await_first_chunk(eof, Duration::from_secs(1))
             .await
             .is_none());

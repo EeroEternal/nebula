@@ -11,19 +11,9 @@ use futures_util::StreamExt;
 use reqwest::header::HeaderMap as ReqwestHeaderMap;
 use tokio_stream::wrappers::ReceiverStream;
 
-use nebula_common::ExecutionContext;
+use nebula_common::{ExecutionContext, UpstreamRequest, UpstreamResponse};
 
 use crate::state::AppState;
-
-fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        return "timeout";
-    }
-    if error.is_connect() {
-        return "connect";
-    }
-    "other"
-}
 
 pub async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, "ok")
@@ -74,10 +64,14 @@ fn copy_response_headers(src: &ReqwestHeaderMap, dst: &mut Response) {
 enum UpstreamBody {
     /// SSE whose first chunk has already been read (nothing sent to the client yet).
     Streamed {
-        rest: std::pin::Pin<Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>>,
+        rest: std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<Item = Result<Bytes, nebula_common::UpstreamError>> + Send,
+            >,
+        >,
     },
     /// Non-SSE response, untouched (the body is read by the caller).
-    Whole(reqwest::Response),
+    Whole(UpstreamResponse),
 }
 
 pub async fn proxy_chat_completions(
@@ -250,16 +244,17 @@ pub async fn proxy_chat_completions(
         );
 
         let url = format!("{base}{uri_path}{uri_query}");
-        let mut builder = st
-            .http
-            .request(method_reqwest.clone(), url)
-            .headers(req_headers);
-
+        let mut upstream_request = UpstreamRequest {
+            method: method_reqwest.clone(),
+            url,
+            headers: req_headers,
+            body: None,
+        };
         if let Some(b) = body_bytes.clone() {
-            builder = builder.body(b);
+            upstream_request.body = Some(b);
         }
 
-        match builder.send().await {
+        match st.upstream.execute(upstream_request).await {
             Ok(resp) => {
                 if resp.status().is_server_error() {
                     st.router
@@ -385,9 +380,34 @@ pub async fn proxy_chat_completions(
                 }
             }
             Err(e) => {
+                if e.is_caller_fault() {
+                    // A request we could not build fails identically on every replica:
+                    // do not count it as an upstream error, do not blame this replica,
+                    // do not retry.
+                    tracing::error!(
+                        error = %e,
+                        model_uid = %ep.model_uid,
+                        "upstream request rejected by our transport"
+                    );
+                    let e2e = request_start.elapsed().as_secs_f64();
+                    st.metrics.record_model_status(&model_uid, 500);
+                    st.metrics.observe_e2e_latency(&model_uid, e2e);
+                    st.dual_write.emit_request_outcome(
+                        "nebula_router",
+                        Some(&model_uid),
+                        500,
+                        Some(e2e),
+                        false,
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "upstream request invalid",
+                    )
+                        .into_response();
+                }
                 st.router
                     .record_endpoint_failure(&ep.model_uid, ep.replica_id);
-                let kind = classify_reqwest_error(&e);
+                let kind = e.label();
                 st.metrics.record_upstream_error(kind);
                 tracing::error!(error=%e, retry_kind=%kind, attempt, "router upstream request failed");
                 if attempt + 1 < max_attempts {
