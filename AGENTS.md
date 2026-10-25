@@ -11,7 +11,7 @@ Lightweight entry for AI coding agents. Details live in [`docs/ai/agents/`](docs
 | **Vendor/Env Bridges** | Toolchain / cloud VM | [`docs/dev/setup.md`](docs/dev/setup.md), [`docs/ai/cloud.md`](docs/ai/cloud.md) |
 | **Domain Specs** | UI / architecture / etcd | [`docs/design.md`](docs/design.md), [`docs/arch/architecture.md`](docs/arch/architecture.md), [`docs/dev/etcd.md`](docs/dev/etcd.md) |
 
-Hard limit **80 lines / 1200 tokens**. Near the limit: **zero-sum** (add one, remove one). Do not promote one-off mistakes; use skill [`promote-lesson`](.agents/skills/promote-lesson/SKILL.md) after ≥ 2 sessions.
+Hard limit **80 lines**, machine-checked by [`scripts/check_agents_budget.sh`](scripts/check_agents_budget.sh) in `./scripts/ci.sh`; the ~1.2k token ceiling is the reason for the cap, but only the line count is enforced. Near the limit: **zero-sum** (add one, remove one). Do not promote one-off mistakes; use skill [`promote-lesson`](.agents/skills/promote-lesson/SKILL.md) after ≥ 2 sessions.
 
 ## Agent Reading Map
 
@@ -25,6 +25,7 @@ Hard limit **80 lines / 1200 tokens**. Near the limit: **zero-sum** (add one, re
 | Release / tagging | skill [`release`](.agents/skills/release/SKILL.md) |
 | Code review / PR audit | skill [`review`](.agents/skills/review/SKILL.md) |
 | etcd key / prefix / lease / owner | [`docs/dev/etcd.md`](docs/dev/etcd.md), [`docs/dev/ownership.md`](docs/dev/ownership.md) |
+| HA / multi-instance / lease / quota / failover | [`docs/arch/ha.md`](docs/arch/ha.md), [`docs/dev/etcd.md`](docs/dev/etcd.md) |
 | K8s runtime | [`docs/dev/k8s.md`](docs/dev/k8s.md) |
 | KV affinity / `pd_split` / KV governance | [`docs/dev/direction.md`](docs/dev/direction.md), [`docs/arch/pool.md`](docs/arch/pool.md), [`docs/dev/kv-governance.md`](docs/dev/kv-governance.md) |
 | Docs under `docs/` | [`docs-layout.md`](docs/ai/agents/docs-layout.md) |
@@ -46,7 +47,8 @@ Hard limit **80 lines / 1200 tokens**. Near the limit: **zero-sum** (add one, re
 10. **Local CI only**: Never add or revive GitHub Actions test workflows. Push gate is `./scripts/ci.sh`.
 11. **Plugin/middleware** for custom data-plane logic (headers, auth decoration, masking). Never hardcode tenant branches into the core pipeline.
 12. **Docs layout**: `manual/` `versions/` `dev/` `arch/`; sole index `docs/README.md`; short names; `manual/` has no roadmap checkboxes.
-13. **Zone C & Constraints over Coupling**: Nebula is **state- & stage-aware orchestration above engine black-boxes (Zone C / S2)**, not stateless LB. Treat KV Cache as a **tiered L2/L3/L4 resource (declare / isolate / warm / account)**, not a read-only `warm/cold` signal. Never touch engine internals (Zone A/B / S1), never pass KV bytes through Nebula (S3), and never do per-request cross-node handoffs; align components via **deploy-time constraints, shared hash invariants (`NEBULA_KV_HASH_SEED`), and hint-only recomputable KV state**.
+13. **Zone C / S2**: Nebula orchestrates above engine black-boxes; never touch engine internals, pass KV bytes, or do per-request handoffs. Treat KV as a tiered resource (**declare / isolate / warm / account**), aligned only by deploy-time constraints, the shared `NEBULA_KV_HASH_SEED` invariant, and hint-only recomputable state.
+14. **HA first**: Design for active-active from the first version; local state must be rebuildable. Leases/quotas/sessions require shared ownership, TTL, epoch/fencing, and idempotent transitions. No single-Gateway/Owner assumption; production acceptance includes multi-instance fault injection. See [`docs/arch/ha.md`](docs/arch/ha.md).
 
 ## Skills Index
 
