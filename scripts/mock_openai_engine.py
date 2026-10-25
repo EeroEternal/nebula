@@ -12,9 +12,44 @@ import time
 STALL_FIRST_ALWAYS = os.environ.get("MOCK_STALL_FIRST") == "1"
 
 STALL_SENTINEL = "__stall__"
+
+# --- transport A/B knobs (scripts/ab_upstream_transport.sh) -------------------------
+# Chunked + keep-alive is the shape a real engine serves: it lets the proxy *reuse* the
+# connection, which is the thing a transport swap can actually change. The default stays
+# close-delimited because ci_smoke.sh asserts on that framing.
+CHUNKED = os.environ.get("MOCK_CHUNKED") == "1"
+FIRST_BYTE_MS = float(os.environ.get("MOCK_FIRST_BYTE_MS", "0"))
+CHUNK_MS = float(os.environ.get("MOCK_CHUNK_MS", "50"))
+TOKENS = int(os.environ.get("MOCK_TOKENS", "200"))
+
+import threading
+
+_STATS = {"requests": 0, "streams": 0, "aborts": 0, "bytes": 0}
+_STATS_LOCK = threading.Lock()
+
+
+def _bump(key: str, amount: int = 1) -> None:
+    with _STATS_LOCK:
+        _STATS[key] += amount
+
+
+def _snapshot() -> dict:
+    with _STATS_LOCK:
+        return dict(_STATS)
 # Stalls *before* the first frame: exercises the pre-first-byte retry (issue #42).
 STALL_FIRST_SENTINEL = "__stall_first__"
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class MockServer(ThreadingHTTPServer):
+    """`socketserver`'s default accept backlog is 5, which is far below any real engine
+    (vLLM/SGLang listen with >= 2048). Under a burst of concurrent dials — exactly what a
+    transport A/B produces — a backlog of 5 makes the kernel drop SYNs, the peers retry
+    after a ~1 s RTO, and the measurement then reports *the mock's* queue as transport
+    latency. Found by xlite while reviewing the first A/B round (issue #96)."""
+
+    request_queue_size = 128
+    daemon_threads = True
 
 
 class MockOpenAIHandler(BaseHTTPRequestHandler):
@@ -42,6 +77,9 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0] in ("/health", "/healthz"):
             self._send_text(200, b"ok")
             return
+        if self.path.split("?", 1)[0] == "/__mock_stats":
+            self._send_json(200, _snapshot())
+            return
         if self.path.split("?", 1)[0] == "/metrics":
             self._send_text(404, b"# mock metrics unavailable\n")
             return
@@ -49,6 +87,7 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self) -> None:
+        _bump("requests")
         path = self.path.split("?", 1)[0]
         length = int(self.headers.get("Content-Length", "0") or "0")
         raw = self.rfile.read(length) if length else b"{}"
@@ -101,17 +140,37 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def _write_frame(self, payload: bytes) -> bool:
+        """Write one SSE frame; False when the client went away (abort)."""
+        frame = b"data: " + payload + b"\n\n"
+        try:
+            if CHUNKED:
+                self.wfile.write(b"%x\r\n" % len(frame) + frame + b"\r\n")
+            else:
+                self.wfile.write(frame)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            return False
+        _bump("bytes", len(frame))
+        return True
+
     def _stream_chat(self, model: str, stall: bool = False, stall_first: bool = False) -> None:
+        _bump("streams")
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
+        if CHUNKED:
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "keep-alive")
         self.end_headers()
         if stall_first:
             # Headers only, then silence: a replica that accepted the request and never
             # produced a byte. The proxy must retry elsewhere, not commit a status.
             time.sleep(300)
             return
-        frames = 2 if stall else 200
+        if FIRST_BYTE_MS:
+            time.sleep(FIRST_BYTE_MS / 1000.0)
+        frames = 2 if stall else TOKENS
         for i in range(frames):
             chunk = {
                 "id": "chatcmpl-mock-stream",
@@ -120,13 +179,25 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
                 "model": model,
                 "choices": [{"index": 0, "delta": {"content": f"{i} "}, "finish_reason": None}],
             }
-            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
-            self.wfile.flush()
-            time.sleep(0.05)
+            if not self._write_frame(json.dumps(chunk).encode()):
+                _bump("aborts")
+                return
+            time.sleep(CHUNK_MS / 1000.0)
         if stall:
             # Sentinel for the stalled-stream gate: keep the socket open without ever
             # sending [DONE] so the proxy's idle deadline is what ends the response.
             time.sleep(300)
+            return
+        if CHUNKED:
+            try:
+                done = b"data: [DONE]\n\n"
+                self.wfile.write(b"%x\r\n" % len(done) + done + b"\r\n")
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                _bump("aborts")
+                return
+            # Keep-alive on purpose: the next request may reuse this socket.
             return
         self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
@@ -140,7 +211,7 @@ class MockOpenAIHandler(BaseHTTPRequestHandler):
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 18999
     host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
-    server = ThreadingHTTPServer((host, port), MockOpenAIHandler)
+    server = MockServer((host, port), MockOpenAIHandler)
     print(f"mock OpenAI engine listening on http://{host}:{port}", flush=True)
     server.serve_forever()
 
