@@ -19,8 +19,11 @@ use std::time::Duration;
 
 use crate::error::ServiceError;
 
-/// Default KV location for the pinned keys (the L1 host-DRAM tier).
-pub const DEFAULT_KV_LOCATION: &str = "LocalCPUBackend";
+/// Default KV location for pinned keys (the L1 host-DRAM tier).
+///
+/// One literal for the control plane and the router: `lmcache_instance_id` had already
+/// drifted once between the two sides and made every pin miss its worker.
+pub use nebula_common::LMCACHE_DEFAULT_KV_LOCATION as DEFAULT_KV_LOCATION;
 const CONTROLLER_TIMEOUT_MS: u64 = 5_000;
 
 /// Thin client for the controller's lifecycle endpoints.

@@ -153,8 +153,19 @@ pub fn build_capacity_snapshot(
             || eps.iter().any(|e| e.role != ReplicaRole::Mixed);
         if let Some(kv) = dep.kv_sharing.as_ref().filter(|_| tier_applies_to_pd_split) {
             let per_replica_gb = u64::from(kv.local_cpu_size_gb.unwrap_or(5));
+            // Tool-Pause pins are unevictable, so they are subtracted from the tier rather
+            // than added to it: the admission question is "is there still a cache left",
+            // not "is there more host memory reserved".
+            let pin_gb = u64::from(kv.pin_budget_gb.unwrap_or(0));
+            let working_set_gb = per_replica_gb.saturating_sub(pin_gb);
             let replicas = eps.len() as u64;
             if replicas > 0 {
+                if pin_gb > 0 && (pin_gb * 2 >= per_replica_gb || working_set_gb == 0) {
+                    hints.push(format!(
+                        "kv_l1_pin_reserve_high: {pin_gb} of the {per_replica_gb} GB L1 per replica is reserved for Tool-Pause pins ({}%), leaving {working_set_gb} GB for the cache working set (pinned KV cannot be evicted); lower kv_sharing.pin_budget_gb or raise kv_sharing.local_cpu_size_gb",
+                        pin_gb * 100 / per_replica_gb
+                    ));
+                }
                 let mut declared_per_node: std::collections::HashMap<&str, u64> =
                     std::collections::HashMap::new();
                 for ep in &eps {
@@ -404,6 +415,64 @@ mod tests {
             .hints
             .iter()
             .any(|h| h.starts_with("kv_l1_oversubscribed")));
+    }
+
+    #[test]
+    fn tool_pause_pin_budget_is_subtracted_from_the_l1_working_set() {
+        let mut d = dep("m1", 1);
+        d.topology = Some(DeploymentTopology::PdSplit);
+        d.kv_sharing = Some(crate::model_deployment::KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(8),
+            pin_budget_gb: Some(6),
+            ..Default::default()
+        });
+        let snap = build_capacity_snapshot(
+            &[d.clone()],
+            &[ep("m1", 0, EndpointStatus::Ready)],
+            &[],
+            &[],
+            1,
+            1,
+            10,
+        );
+        let hint = snap.models[0]
+            .hints
+            .iter()
+            .find(|h| h.starts_with("kv_l1_pin_reserve_high"))
+            .unwrap_or_else(|| panic!("hints: {:?}", snap.models[0].hints));
+        // 6 of 8 GB reserved = 75%, 2 GB left for the working set.
+        assert!(hint.contains("6 of the 8 GB"), "{hint}");
+        assert!(hint.contains("75%"), "{hint}");
+        assert!(hint.contains("leaving 2 GB"), "{hint}");
+
+        // A reserve that leaves most of the tier alone is not an alarm: pins are a normal
+        // part of pd_split, only a squeezed working set is worth surfacing.
+        d.kv_sharing = Some(crate::model_deployment::KvSharingSpec {
+            remote_url: "lm://store:6800".into(),
+            serde: "naive".into(),
+            local_cpu_size_gb: Some(8),
+            pin_budget_gb: Some(1),
+            ..Default::default()
+        });
+        let snap = build_capacity_snapshot(
+            &[d],
+            &[ep("m1", 0, EndpointStatus::Ready)],
+            &[],
+            &[],
+            1,
+            1,
+            10,
+        );
+        assert!(
+            !snap.models[0]
+                .hints
+                .iter()
+                .any(|h| h.starts_with("kv_l1_pin_reserve_high")),
+            "hints: {:?}",
+            snap.models[0].hints
+        );
     }
 
     #[test]

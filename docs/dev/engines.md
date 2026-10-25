@@ -92,6 +92,6 @@ Nebula 引擎无关。两条执行面都要能按 `ModelSpec.engine_type` 起 **
   - decoder(GPU1) `hit 512, Retrieved 512/512, 0.0273 GB, 139ms(0.197 GB/s)` ← 远端，只重算尾部；
   - **纯 TCP、零 NIXL、跨引擎**。此前的 hit=0 根因：短 prompt（26 tok）不满一个 chunk（chunk_size=256），decoder 标准路径不计命中——测试须用 ≥chunk 的 prompt。
 - **形态结论**：无 NIXL 时 LMCache 的正确 PD 形态是"**共享 KV 存储**"（prefill 池写 `lm://`、decode 池读），而非官方 proxy+kv_consumer 流程（那条路的直传通道在 0.5.5 只有 nixl）。这恰好更贴 nebula：路由与角色编排由 nebula 自己做（P1c 索引 + 角色化放置），不依赖上游 proxy。
-- **升级门禁**：`scripts/check_lmcache_compat.sh`（quick 无 GPU ~1min / `--full` 双 GPU 端到端；真机两模式均 8/8 通过）。改 `LMCACHE_PIN`/`VLLM_IMAGE` 前必须先跑它。
+- **升级门禁**：`scripts/check_lmcache_compat.sh`（quick 无 GPU ~1min / `--full` 双 GPU 端到端；真机两模式均 8/8 通过）。改 `LMCACHE_PIN`/`VLLM_IMAGE` 前必须先跑它。容器内到 pypi.org 很慢的机器（国内网络实测默认 bridge ~80 KB/s，`pip install lmcache` 会卡在 resolve）用 `PIP_INDEX_URL=https://mirrors.huaweicloud.com/repository/pypi/simple ALLOW_RUNTIME_PIP=1 ./scripts/check_lmcache_compat.sh`，镜像地址会透传进探测容器（2026-10-23 实测 8/8）。
 - **Nebula 编排参数（Batch 3 实现输入）**：prefill 副本 = `kv_role: kv_producer` + store 远端；decode 副本 = `kv_role: kv_both` + `retrieve_locations: [RemoteBackend]`；共享 `PYTHONHASHSEED`（chunk key 一致）；`lmcache_server` 为部署新增组件（TCP，硬件无关，昇腾可用）。
 - **Nebula 侧无需 Rust 重写**：LMCache 是引擎进程内的 KV 面，nebula 的边界仍是"控制面 + 路由"（启动参数/角色/放置 + P1c 索引），KV 字节永远不经过 nebula。重写 LMCache 于 Rust = 重写引擎侧组件，违反引擎零侵入原则，无路由收益。

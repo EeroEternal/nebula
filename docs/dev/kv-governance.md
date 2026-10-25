@@ -183,7 +183,7 @@ flowchart TB
 ### 4.3 预热与控制（Warm & Pin）：对接 `lmcache_controller` 原生生命周期 API
 
 #### 现状与痛点
-开源 `lmcache_controller`（端口 `9000`）已经原生实现了完整的 KV 块目录管理与控制命令（`/lookup`、`/clear`、`/pin`、`/compress`、`/move`），但目前 Nebula 仅在 [`Router::controller_warm`](../../crates/nebula-router/src/lib.rs#L707) 中使用了只读的 `POST /lookup`。每当企业更新公共 System Prompt、挂载大型工具集定义（Tools JSON Schema）或准备迎接早高峰流量时，缺乏主动预热与防淘汰锁存手段。
+开源 `lmcache_controller`（端口 `9000`）已经原生实现了完整的 KV 块目录管理与控制命令（`/lookup`、`/clear`、`/pin`、`/compress`、`/move`）。Nebula 侧原先只用了只读的 `POST /lookup`（[`Router::controller_warm`](../../crates/nebula-router/src/lib.rs)）；现在 `POST /pin` 已由 Router 在服务端观测到 `tool_calls` 时自动调用（见下节），`/lookup` / `/clear` / 手工 `/pin` 由控制面 API 暴露。每当企业更新公共 System Prompt、挂载大型工具集定义（Tools JSON Schema）或准备迎接早高峰流量时，仍缺定时预热与「算完再钉」的运维编排（`warmup` 只做前者的一半：它能产出 KV，但产出的 token 数不足以反推 pin 的 token ids）。
 
 #### 改造方案与代码触点
 - **触点**：
@@ -195,6 +195,26 @@ flowchart TB
   | `POST /api/v2/models/{uid}/cache/lookup` | 调 `PromptHasher` 分词后转调 `lmcache_controller` `POST /lookup` | 运维/开发者在控制台输入一段 Prompt，实时诊断其在集群中的分块命中率与所在节点 |
   | `POST /api/v2/models/{uid}/cache/warmup` | 向 Prefill/目标副本发送 `max_tokens=1` 预热请求，随后调用 controller `pin` 锁定对应块哈希 | **早高峰定时预热 / 核心 Agent 模板发布**：将数万 token 的固定角色设定与工具声明预先算好并钉在 L1/L2 中不被淘汰 |
   | `POST /api/v2/models/{uid}/cache/clear` | 调用 `lmcache_controller` `/clear`（可按 instance / 全模型粒度）并通知 `nebula-indexd` 广播 `!reset` | **合规擦除 / 故障排障**：敏感租户下线或模型权重热切换后，一键清除内存与远端池中的残留 KV |
+
+#### Tool-Pause 骨骼前缀 pin（Batch 5.4，真机已验 2026-10-23）
+
+Agent 的工具停顿（2–30 s）是真正的 scheduling bubble：网关的 Tool-Pause 租约只保住队列槽位与副本锚定，**保不住 KV**。真机核实后的机制与边界（`lmcache 0.5.6` + vLLM；pin 契约在 0.5.5 源码逐行一致）：
+
+| 事实 | 证据 |
+|---|---|
+| 请求路径的 lookup **会** pin，但请求结束即 `lookup_unpin(req_id)` | `vllm_v1_adapter.py:1147`；对照实验：停顿期间无任何 pin 生效 |
+| 外部 `/pin` 是**租约**，无 `/unpin` 端点，只由 `pin_timeout_sec`（默认 300 s，PinMonitor 每 30 s 检查）或引擎重启释放 | `api_server/__main__.py`（`/pin` 无 pin 开关）、`pin_monitor.py` |
+| pin **确实**挡得住 L1 LRU：5 GB L1 灌入 ~9.8 GB 压力后，被 pin 的 1280 tok 仍在（引擎侧 `LMCache hit tokens: 1280`），未 pin 的对照前缀已被驱逐（`layout_info: {}`） | 试验：70 个互异 ~1.5 k tok 请求 / 2.8 s |
+| pin 只覆盖**整 256-token chunk**：1493 tok 只 pin 到 1280，尾部 213 tok 不可寻址 | 同上 `num_tokens: 1280` |
+| pin 后 `/clear` 是否跳过 pinned **随版本变化**（0.5.5 跳过，0.5.6 force-remove 并解 pin）——钉死镜像的又一理由 | 两版 `local_cpu_backend.clear()` 对比 |
+
+实现约定（`crates/nebula-router`）：只在服务端观测到 `finish_reason=tool_calls` 时触发（绝不信任客户端 `role: "tool"`）；pin 的是**会话骨骼**——请求路径上已分词的 prompt 前 `NEBULA_TOOL_PAUSE_PIN_TOKENS`（默认 4096）个 token，截到 256 整数倍；实例 id 用 `{model_uid}-{replica_id}`（集群级 `/lookup` 是 max，per-instance pin 返回 0 属正常）；`tokio::spawn` + 5 s 超时，失败只计数。**不做**续期/解 pin：停顿后再续期无法救回停顿期间已过期的 KV，而续期会让 L1 被长期占满。
+
+预算（实测系数 **~0.11 MB L1 / pinned token**，即 112 KiB/token 的 0.6B fp16 模型）：4 k 骨骼 ≈ 0.45 GB，5 GB L1 约够 11 个会话。因此 `max_local_cpu_size` 必须同时容纳工作集与 pin 预算；TTL 用 `KvSharingSpec.pin_timeout_sec`（30–1800 s，声明式下发 `LMCACHE_PIN_TIMEOUT_SEC`）显式化，而非继承引擎默认。
+
+**容量估算（Batch 6.5）**：pin 的 KV 与工作集**共用同一个 tier**，且 pin 不可驱逐——所以容量上不是「多占一点 host DRAM」，而是「工作集变小」。`KvSharingSpec.pin_budget_gb` 声明每个副本必须留出的可 pin 额度（必须 `< local_cpu_size_gb`，否则写入即拒），`build_capacity_snapshot` 把它从 tier 里减掉，并在额度 ≥ tier 的一半时输出 `kv_l1_pin_reserve_high`（带 75% 与剩余 GB 的具体数字）。per-session 字节数随模型变（`2 × layers × kv_heads × head_dim × dtype_bytes / TP`：0.6B fp16 ≈ 112 KiB/token，70B 级可达数百 KiB/token），所以额度是**逐部署声明**而不是全局常量。
+
+**未做**：运行时 pin 配额强制（Router 只要被要求就会 pin，`pin_budget_gb` 目前是估算与告警口径，不是限流器）；把引擎侧实际 pinned 字节回传（LMCache 只暴露 `pin_monitor_pinned_objects_count` 的**对象数**，没有 pinned bytes 指标，NodeStatus 无法上报真实占用）；HBM 侧 APC 的定点保护（Zone B，引擎无 pin API）。
 
 ---
 

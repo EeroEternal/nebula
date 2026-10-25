@@ -18,6 +18,11 @@
 #   ALLOW_RUNTIME_PIP  set to 1 ONLY when probing an unbaked upstream base image;
 #                      default 0 verifies the immutable image artifact as-is (pool.md §pd_split)
 #   MODEL_PATH         host model dir for --full (default /home/bodesi/models/Qwen2.5-7B-Instruct)
+#   PIP_INDEX_URL      forwarded into the probe containers. Needed on CN networks: from the
+#                      default bridge pypi.org serves ~80 KB/s and `pip install lmcache`
+#                      stalls in the resolver (measured 2026-10-23), while
+#                      https://mirrors.huaweicloud.com/repository/pypi/simple runs ~870 KB/s.
+#                      PIP_EXTRA_INDEX_URL / PIP_TRUSTED_HOST are forwarded too.
 set -euo pipefail
 
 VLLM_IMAGE="${VLLM_IMAGE:-nebula/vllm:0.23.0-lmcache0.5.5}"
@@ -31,6 +36,14 @@ if [ "$ALLOW_RUNTIME_PIP" = "1" ]; then
   PIP_STEP="pip install -q lmcache==$LMCACHE_PIN"
 fi
 
+# Forward pip index overrides (without a value, `docker run -e VAR` copies the host value).
+PIP_ENV=""
+for _v in PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_DEFAULT_TIMEOUT; do
+  if [ -n "${!_v:-}" ]; then
+    PIP_ENV="$PIP_ENV -e $_v"
+  fi
+done
+
 PASS=0; FAIL=0
 ok()   { echo "  ✔ $1"; PASS=$((PASS+1)); }
 bad()  { echo "  ✘ $1"; FAIL=$((FAIL+1)); }
@@ -40,7 +53,7 @@ WORK="$(mktemp -d /tmp/lmcache-gate.XXXXXX)"
 trap 'rm -rf "$WORK"; docker rm -f lmcache-gate >/dev/null 2>&1 || true' EXIT
 
 echo "== lmcache compat gate ($MODE) =="
-echo "   image=$VLLM_IMAGE pin=lmcache-$LMCACHE_PIN allow_runtime_pip=$ALLOW_RUNTIME_PIP"
+echo "   image=$VLLM_IMAGE pin=lmcache-$LMCACHE_PIN allow_runtime_pip=$ALLOW_RUNTIME_PIP pip_index=${PIP_INDEX_URL:-pypi.org}"
 
 # ---- quick checks (no GPU) ---------------------------------------------------
 cat > "$WORK/quick.py" <<'PY'
@@ -90,6 +103,25 @@ def schema_ok():
     return "nebula keys accepted, chunk_size=256"
 check("nebula config schema", schema_ok)
 
+# Tool-Pause L1 pinning (Batch 5.4) depends on exactly this contract: the controller
+# exposes /pin, has no /unpin (the pin IS a lease), and pin_timeout_sec is a real config
+# key. If upstream adds an unpin path the lease design must be revisited instead of
+# silently leaking or double-releasing L1. Read the file rather than importing it:
+# __main__ pulls in uvicorn, which the venv under test may not ship.
+def pin_lease_contract():
+    import pathlib
+    api = pathlib.Path(lmcache.__file__).parent / "v1/api_server/__main__.py"
+    src = api.read_text()
+    assert '@app.post("/pin"' in src, "/pin route missing from lmcache_controller"
+    assert "/unpin" not in src, "controller gained /unpin: revisit the Tool-Pause pin lease"
+    p = "/tmp/gate-pin.yaml"
+    open(p, "w").write(CFG + "pin_timeout_sec: 600\npin_check_interval_sec: 30\n")
+    c = LMCacheEngineConfig.from_file(p)
+    assert c.pin_timeout_sec == 600, c.pin_timeout_sec
+    assert c.pin_check_interval_sec == 30, c.pin_check_interval_sec
+    return "controller /pin present, no /unpin, pin_timeout_sec parsed"
+check("pin lease contract", pin_lease_contract)
+
 import vllm.distributed.kv_events as ke
 check("vllm zmq kv-events publisher",
       lambda: ",".join(sorted(ke.EventPublisherFactory._registry.keys())))
@@ -101,7 +133,7 @@ PY
 
 echo "-- quick battery:"
 QUICK_RC=0
-docker run --rm --runtime=runc -v "$WORK:/work" --entrypoint bash "$VLLM_IMAGE" \
+docker run --rm --runtime=runc $PIP_ENV -v "$WORK:/work" --entrypoint bash "$VLLM_IMAGE" \
   -c "$PIP_STEP && python3 /work/quick.py $LMCACHE_PIN" \
   > "$WORK/quick.out" 2>&1 || QUICK_RC=$?
 if [ "$QUICK_RC" -ne 0 ]; then
@@ -119,8 +151,8 @@ fi
 # ---- lmcache_server boot check (no GPU) --------------------------------------
 echo "-- lmcache_server boot:"
 BOOT_RC=0
-BOOT_OUT=$(docker run --rm --runtime=runc --entrypoint bash "$VLLM_IMAGE" \
-  -c "$PIP_STEP && lmcache_server 127.0.0.1 6899 cpu > /tmp/srv.log 2>&1 & srv=\$!; sleep 4; grep -q 'Server started' /tmp/srv.log && echo BOOT-OK; kill \$srv 2>/dev/null || true" \
+BOOT_OUT=$(docker run --rm --runtime=runc $PIP_ENV --entrypoint bash "$VLLM_IMAGE" \
+  -c "$PIP_STEP; lmcache_server 127.0.0.1 6899 cpu > /tmp/srv.log 2>&1 & srv=\$!; sleep 4; grep -q 'Server started' /tmp/srv.log && echo BOOT-OK; kill \$srv 2>/dev/null || true" \
   2>/dev/null) || BOOT_RC=$?
 if [ "$BOOT_RC" -eq 0 ] && printf '%s\n' "$BOOT_OUT" | grep -q BOOT-OK; then
   ok "lmcache_server boots on plain TCP"
@@ -195,7 +227,7 @@ grep -aqE "Retrieved [1-9][0-9]* out of" /work/decode.log && echo TRANSFER-OK ||
 EOS
   sed -i "s|PIN|$LMCACHE_PIN|; s|MODEL|$MODEL_PATH|; s|ALLOW_PIP|$ALLOW_RUNTIME_PIP|" "$WORK/run.sh"
   docker rm -f lmcache-gate >/dev/null 2>&1 || true
-  docker run -d --name lmcache-gate --gpus all -v "$MODEL_PATH:$MODEL_PATH:ro" \
+  docker run -d --name lmcache-gate --gpus all $PIP_ENV -v "$MODEL_PATH:$MODEL_PATH:ro" \
     -v "$WORK:/work" --network host --entrypoint bash "$VLLM_IMAGE" /work/run.sh >/dev/null
   OUT=""
   TIMED_OUT=1

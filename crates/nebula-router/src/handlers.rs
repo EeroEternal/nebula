@@ -159,7 +159,16 @@ pub async fn proxy_chat_completions(
     // strategy is active; chat bodies are not hashed (template gap — falls
     // back visibly via the strategy fallback counters).
     let (prefix_hashes, pd_warm) = match body_bytes.as_deref() {
-        Some(b) => st.router.body_route_hints(&model_uid, b).await,
+        Some(b) => {
+            st.router
+                .body_route_hints(
+                    &model_uid,
+                    b,
+                    ctx.tenant_id.as_deref(),
+                    ctx.session_id.as_deref(),
+                )
+                .await
+        }
         None => (None, false),
     };
     let prefix_hashes = prefix_hashes.as_deref();

@@ -30,6 +30,199 @@ pub struct PromptHasher {
     block_size: usize,
 }
 
+/// jinja2's `tojson`, which is what every HuggingFace chat template means by `| tojson`.
+///
+/// jinja2 renders `json.dumps(value)` (default separators, `ensure_ascii=True`) and then
+/// escapes the HTML-sensitive characters. minijinja's own filter (feature `json`) emits
+/// compact, unescaped JSON, so the rendered prompt would differ from the engine's
+/// `apply_chat_template` byte for byte and none of the block hashes would ever match.
+/// Key order also has to survive: Python dicts keep insertion order, so `serde_json` is
+/// built with `preserve_order` in this crate and this function must not re-sort.
+fn py_json_dumps(value: &minijinja::Value) -> String {
+    let compact = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+    let mut out = String::with_capacity(compact.len() + 16);
+    let mut in_str = false;
+    let mut escaped = false;
+    for ch in compact.chars() {
+        if in_str {
+            if escaped {
+                escaped = false;
+                out.push(ch);
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    out.push(ch);
+                }
+                '"' => {
+                    in_str = false;
+                    out.push(ch);
+                }
+                '<' => out.push_str("\\u003c"),
+                '>' => out.push_str("\\u003e"),
+                '&' => out.push_str("\\u0026"),
+                '\'' => out.push_str("\\u0027"),
+                c if (c as u32) > 0x7f => push_py_unicode_escape(&mut out, c),
+                c => out.push(c),
+            }
+        } else {
+            match ch {
+                '"' => {
+                    in_str = true;
+                    out.push(ch);
+                }
+                ':' => out.push_str(": "),
+                ',' => out.push_str(", "),
+                c => out.push(c),
+            }
+        }
+    }
+    out
+}
+
+fn push_py_unicode_escape(out: &mut String, ch: char) {
+    let mut buf = [0u16; 2];
+    for unit in ch.encode_utf16(&mut buf) {
+        out.push_str(&format!("\\u{unit:04x}"));
+    }
+}
+
+/// Python `str` methods that real chat templates call.
+///
+/// Qwen3 / DeepSeek templates call `.startswith("<tool_response>")` to detect tool results,
+/// and minijinja exposes no string methods at all, so a tool-bearing body fails to render:
+/// `chat_ids` returns `None`, prefix affinity silently degrades to `no_signal`, and the
+/// Tool-Pause pin has no token prefix to pin. Deliberately a subset - extend it from a real
+/// template that fails, not speculatively.
+fn py_str_method(
+    value: &minijinja::Value,
+    method: &str,
+    args: &[minijinja::Value],
+) -> Option<Result<minijinja::Value, minijinja::Error>> {
+    let s = value.as_str()?;
+    let arg = |i: usize| args.get(i).and_then(|v| v.as_str()).map(str::to_string);
+    let text = |t: String| Some(Ok(minijinja::Value::from(t)));
+    let truth = |b: bool| Some(Ok(minijinja::Value::from(b)));
+    let strip = |left: bool, right: bool| -> String {
+        let chars = arg(0);
+        match (left, right, chars) {
+            (true, true, Some(chars)) => s.trim_matches(|c| chars.contains(c)).to_string(),
+            (true, false, Some(chars)) => s.trim_start_matches(|c| chars.contains(c)).to_string(),
+            (false, true, Some(chars)) => s.trim_end_matches(|c| chars.contains(c)).to_string(),
+            (true, true, None) => s.trim().to_string(),
+            (true, false, None) => s.trim_start().to_string(),
+            _ => s.trim_end().to_string(),
+        }
+    };
+    match method {
+        "startswith" | "endswith" => {
+            let starts = method == "startswith";
+            let test = |p: &str| {
+                if starts {
+                    s.starts_with(p)
+                } else {
+                    s.ends_with(p)
+                }
+            };
+            let v = args.first()?;
+            // A plain string first: iterating a string yields chars, not prefixes.
+            if let Some(p) = v.as_str() {
+                return truth(test(p));
+            }
+            let it = v.try_iter().ok()?;
+            truth(
+                it.filter_map(|x| x.as_str().map(str::to_string))
+                    .any(|p| test(&p)),
+            )
+        }
+        "strip" => text(strip(true, true)),
+        "lstrip" => text(strip(true, false)),
+        "rstrip" => text(strip(false, true)),
+        "lower" => text(s.to_lowercase()),
+        "upper" => text(s.to_uppercase()),
+        "capitalize" => {
+            let mut it = s.chars();
+            text(match it.next() {
+                Some(first) => format!("{}{}", first.to_uppercase(), it.as_str().to_lowercase()),
+                None => String::new(),
+            })
+        }
+        "replace" => {
+            let from = arg(0)?;
+            let to = arg(1).unwrap_or_default();
+            text(match args.get(2).and_then(|v| v.as_i64()) {
+                Some(limit) if limit >= 0 => s.replacen(&from, &to, limit as usize),
+                _ => s.replace(&from, &to),
+            })
+        }
+        "split" | "rsplit" => {
+            let parts: Vec<String> = match arg(0).filter(|p| !p.is_empty()) {
+                // Whitespace splitting (Python's `str.split()`); maxsplit is not used by
+                // any template we run, so it is ignored rather than approximated.
+                None => s.split_whitespace().map(str::to_string).collect(),
+                Some(sep) => s.split(sep.as_str()).map(str::to_string).collect(),
+            };
+            Some(Ok(minijinja::Value::from_serialize(parts)))
+        }
+        "find" | "rfind" => {
+            let sub = arg(0)?;
+            let byte = if method == "find" {
+                s.find(&sub)
+            } else {
+                s.rfind(&sub)
+            };
+            // Python reports a character index, -1 on miss.
+            let idx = byte
+                .map(|b| s[..b].chars().count() as i64)
+                .unwrap_or(-1);
+            Some(Ok(minijinja::Value::from(idx)))
+        }
+        "count" => {
+            let sub = arg(0)?;
+            let n = if sub.is_empty() {
+                0
+            } else {
+                s.matches(sub.as_str()).count()
+            };
+            Some(Ok(minijinja::Value::from(n as u64)))
+        }
+        "join" => {
+            let items: Vec<String> = args
+                .first()
+                .and_then(|v| v.try_iter().ok())
+                .map(|it| {
+                    it.filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            text(items.join(s))
+        }
+        _ => Some(Err(minijinja::Error::new(
+            minijinja::ErrorKind::UnknownMethod,
+            format!(
+                "chat template used unsupported string method '{method}' (extend py_str_method in prompt_hash.rs)"
+            ),
+        ))),
+    }
+}
+
+/// jinja2 environment as chat templates expect it: `tojson` plus Python string methods.
+fn chat_env(tpl: &str) -> Result<minijinja::Environment<'_>, minijinja::Error> {
+    let mut env = minijinja::Environment::new();
+    env.add_filter("tojson", |v: minijinja::Value| py_json_dumps(&v));
+    env.set_unknown_method_callback(|_, value, method, args| {
+        py_str_method(value, method, args).unwrap_or_else(|| {
+            Err(minijinja::Error::new(
+                minijinja::ErrorKind::UnknownMethod,
+                format!("unknown method: {method}"),
+            ))
+        })
+    });
+    env.add_template("chat", tpl)?;
+    Ok(env)
+}
+
 impl PromptHasher {
     pub fn from_env() -> Self {
         Self {
@@ -155,8 +348,7 @@ impl PromptHasher {
         let tk = self.tokenizer_for(model_uid, model_name)?;
         let tpl = self.chat_template_for(model_uid, model_name)?;
 
-        let mut env = minijinja::Environment::new();
-        env.add_template("chat", tpl.as_str()).ok()?;
+        let env = chat_env(tpl.as_str()).ok()?;
         // Context mirrors transformers apply_chat_template; chat_template_kwargs
         // per-request overrides are not supported v1 (shortcut).
         let ctx = minijinja::Value::from_serialize(serde_json::json!({
@@ -240,6 +432,65 @@ mod tests {
              <|im_start|>user\nhello<|im_end|>\n\
              <|im_start|>assistant\n"
         );
+    }
+
+    /// jinja2 renders `json.dumps` defaults (space after `,`/`:`) and escapes HTML-sensitive
+    /// characters; the engine's `apply_chat_template` does the same, so a mismatch here means
+    /// every tool-bearing prefix hashes differently from the KV the engine actually stored.
+    #[test]
+    fn tojson_matches_jinja2_htmlsafe_json_dumps() {
+        let v = minijinja::Value::from_serialize(serde_json::json!({
+            "type": "function",
+            "html": "<x>",
+            "quote": "it's",
+            "zh": "你好",
+            "n": 1,
+            "list": [true, null],
+        }));
+        assert_eq!(
+            py_json_dumps(&v),
+            r#"{"type": "function", "html": "\u003cx\u003e", "quote": "it\u0027s", "zh": "\u4f60\u597d", "n": 1, "list": [true, null]}"#
+        );
+    }
+
+    const QWEN3ISH: &str = r#"{%- if tools %}{{- 'TOOLS:' }}{%- for tool in tools %}{{- '\n' + (tool|tojson) }}{%- endfor %}{{- '\n' }}{%- endif %}{%- for m in messages %}{%- if m.content is string %}{{- '[' + m.role + ']' }}{%- if not (m.content.startswith('<tool_response>') and m.content.endswith('</tool_response>')) %}{{- m.content }}{%- endif %}{{- '\n' }}{%- endif %}{%- endfor %}"#;
+
+    /// The Qwen3 (and DeepSeek) templates combine `| tojson` with `.startswith/.endswith`;
+    /// minijinja has neither, which used to make every tool-bearing chat body unhashable.
+    #[test]
+    fn qwen3_style_template_renders_tools_and_skips_tool_responses() {
+        let env = chat_env(QWEN3ISH).unwrap();
+        let ctx = minijinja::Value::from_serialize(serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "tool", "content": "<tool_response>18C</tool_response>"},
+                {"role": "tool", "content": "plain tool text"},
+            ],
+            "tools": [{"type": "function", "function": {"name": "get_weather"}}],
+        }));
+        let out = env.get_template("chat").unwrap().render(ctx).unwrap();
+        assert_eq!(
+            out,
+            "TOOLS:\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\"}}\n\
+             [system]sys\n[tool]\n[tool]plain tool text\n"
+        );
+    }
+
+    /// An unmodelled method must fail loudly: the operator sees why a model's prefix signal
+    /// disappeared instead of a silent `no_signal` fallback.
+    #[test]
+    fn unsupported_string_method_names_itself() {
+        let env = chat_env("{{ m.content.frobnicate() }}").unwrap();
+        let ctx = minijinja::Value::from_serialize(serde_json::json!({
+            "m": {"content": "x"},
+        }));
+        let err = env
+            .get_template("chat")
+            .unwrap()
+            .render(ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("frobnicate"), "{err}");
     }
 
     #[test]

@@ -559,7 +559,14 @@ pub async fn forward_embedded(
 
     // P1c: prompt prefix hashes for the prefix_affinity strategy (embedded
     // router mode shares the same implementation as the standalone router).
-    let (prefix_hashes, pd_warm) = router.body_route_hints(&model_uid, body_bytes).await;
+    let (prefix_hashes, pd_warm) = router
+        .body_route_hints(
+            &model_uid,
+            body_bytes,
+            prepared.ctx.tenant_id.as_deref(),
+            prepared.ctx.session_id.as_deref(),
+        )
+        .await;
     let prefix_hashes = prefix_hashes.as_deref();
 
     let max_attempts = st.retry_max.saturating_add(1).max(1);

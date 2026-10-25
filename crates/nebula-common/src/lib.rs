@@ -70,7 +70,8 @@ pub use model_deployment::{
     lmcache_controller_env, lmcache_instance_id, merge_model_config, validate_pd_split_image,
     validate_pd_split_with_context, validate_replica_specs, wait_for_lmcache_controller,
     DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment, ReplicaPlacementSpec,
-    ReplicaRole,
+    ReplicaRole, DEFAULT_PIN_TIMEOUT_SEC, LMCACHE_CHUNK_TOKENS, LMCACHE_DEFAULT_KV_LOCATION,
+    PIN_TIMEOUT_SEC_RANGE,
 };
 pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};
