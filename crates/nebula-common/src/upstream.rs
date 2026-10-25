@@ -86,8 +86,8 @@ pub enum UpstreamError {
     BodyIncomplete,
     /// The peer reset the connection.
     ///
-    /// Same producer split as [`Self::BodyIncomplete`]: typed by `xlite-transport`,
-    /// [`Self::Other`] under `reqwest`.
+    /// Same producer split as [`Self::BodyIncomplete`]: typed by `xlite-transport`
+    /// (which also reports the peer's stream error code), [`Self::Other`] under `reqwest`.
     #[error("upstream connection reset")]
     Reset,
     /// The caller dropped the attempt (client abort).
@@ -284,6 +284,9 @@ pub struct UpstreamStats {
     pub failed_dial: Option<u64>,
     pub in_flight: Option<u64>,
     pub connections: Option<u64>,
+    /// Stale pooled connections that had to be dialled again (xlite transport only;
+    /// `reqwest`/hyper does the same thing invisibly, so it reports `None`).
+    pub redials: Option<u64>,
 }
 
 impl UpstreamStats {
@@ -326,6 +329,12 @@ impl UpstreamStats {
             "Pooled upstream connections held by the engine transport.",
             "gauge",
             self.connections,
+        );
+        emit(
+            "nebula_upstream_stale_redial_total",
+            "Requests whose pooled connection had died and were dialled again once.",
+            "counter",
+            self.redials,
         );
     }
 }
@@ -415,6 +424,7 @@ impl UpstreamTransport for ReqwestTransport {
             failed_dial: Some(self.failed_dial.load(Ordering::Relaxed)),
             in_flight: Some(self.in_flight.load(Ordering::Relaxed)),
             connections: None,
+            redials: None,
             transport: Self::NAME,
         }
     }
@@ -440,10 +450,14 @@ pub fn upstream_transport_from_env() -> Result<Arc<dyn UpstreamTransport>, Strin
                 .map_err(|e| format!("failed to build the reqwest upstream client: {e}"))?;
             Ok(Arc::new(ReqwestTransport::new(client)))
         }
+        #[cfg(feature = "xlite")]
+        "xlite" => Ok(std::sync::Arc::new(
+            crate::upstream_xlite::XliteTransport::from_env(),
+        )),
+        #[cfg(not(feature = "xlite"))]
         "xlite" => Err(
-            "NEBULA_UPSTREAM_TRANSPORT=xlite: the xlite-transport data plane is not compiled \
-             into this build (upstream of xlite#96); rebuild with the xlite feature once it \
-             lands instead of silently falling back to reqwest"
+            "NEBULA_UPSTREAM_TRANSPORT=xlite: this build has no xlite transport compiled in \
+             (`cargo build --features xlite`); refusing to silently fall back to reqwest"
                 .to_string(),
         ),
         other => Err(format!(

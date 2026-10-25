@@ -76,48 +76,55 @@ async fn serve(
     requests: Arc<AtomicU64>,
     peer_closed: Arc<AtomicBool>,
 ) {
-    if !read_one_request(&mut stream).await {
-        return;
-    }
-    requests.fetch_add(1, Ordering::Relaxed);
-    match behaviour {
-        Behaviour::Ok => {
-            let _ = stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello",
-                )
-                .await;
-            let _ = stream.shutdown().await;
-            return;
-        }
-        Behaviour::Truncate => {
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 100\r\n\r\n0123456789")
-                .await;
-            let _ = stream.shutdown().await;
-            peer_closed.store(true, Ordering::Relaxed);
-            return;
-        }
-        Behaviour::Silent => {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            return;
-        }
-        Behaviour::HoldUntilPeerClose => {
-            let _ = stream
-                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 100\r\n\r\n0123456789")
-                .await;
-        }
-    }
-    // Detect the client going away: a read that returns 0 (or errors) means the socket
-    // was closed from the caller side.
-    let mut discard = [0u8; 64];
     loop {
-        match stream.read(&mut discard).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
+        if !read_one_request(&mut stream).await {
+            return;
+        }
+        requests.fetch_add(1, Ordering::Relaxed);
+        match behaviour {
+            Behaviour::Ok => {
+                // Keep-alive on purpose: a reusable pooled socket is the normal case, and
+                // it keeps the "one execute = one request" assertion about attempts rather
+                // than about stale-socket redials.
+                if stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 5\r\n\r\nhello",
+                    )
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                continue;
+            }
+            Behaviour::Truncate => {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 100\r\n\r\n0123456789")
+                    .await;
+                let _ = stream.shutdown().await;
+                peer_closed.store(true, Ordering::Relaxed);
+                return;
+            }
+            Behaviour::Silent => {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                return;
+            }
+            Behaviour::HoldUntilPeerClose => {
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 100\r\n\r\n0123456789")
+                    .await;
+                let mut discard = [0u8; 64];
+                loop {
+                    match stream.read(&mut discard).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+                peer_closed.store(true, Ordering::Relaxed);
+                return;
+            }
         }
     }
-    peer_closed.store(true, Ordering::Relaxed);
 }
 
 async fn mock(behaviour: Behaviour) -> Mock {
@@ -148,12 +155,30 @@ async fn mock(behaviour: Behaviour) -> Mock {
     }
 }
 
-fn transport(timeout: Option<Duration>) -> ReqwestTransport {
+fn reqwest_transport(timeout: Option<Duration>) -> ReqwestTransport {
     let mut builder = reqwest::Client::builder();
     if let Some(t) = timeout {
         builder = builder.timeout(t);
     }
     ReqwestTransport::new(builder.build().expect("client"))
+}
+
+/// Every transport the seam is expected to support, so the same assertions run against
+/// all of them. With `--features xlite` the contract suite covers the xlite data plane
+/// too, which is the whole point of the seam: identical behaviour, swappable transport.
+fn transports(timeout: Option<Duration>) -> Vec<(&'static str, Arc<dyn UpstreamTransport>)> {
+    #[cfg_attr(not(feature = "xlite"), allow(unused_mut))]
+    let mut all: Vec<(&'static str, Arc<dyn UpstreamTransport>)> =
+        vec![("reqwest", Arc::new(reqwest_transport(timeout)))];
+    #[cfg(feature = "xlite")]
+    all.push((
+        "xlite",
+        Arc::new(nebula_common::XliteTransport::with_timeouts(
+            Duration::from_secs(3),
+            timeout,
+        )),
+    ));
+    all
 }
 
 fn post(url: &str) -> UpstreamRequest {
@@ -168,28 +193,33 @@ fn post(url: &str) -> UpstreamRequest {
 
 #[tokio::test]
 async fn one_execute_is_exactly_one_upstream_request() {
-    let mock = mock(Behaviour::Ok).await;
-    let transport = transport(None);
+    for (name, transport) in transports(None) {
+        let mock = mock(Behaviour::Ok).await;
+        let url = format!("{}/v1/chat/completions", mock.base_url);
 
-    let response = transport
-        .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
-        .await
-        .expect("attempt succeeds");
-    assert_eq!(response.status(), http::StatusCode::OK);
-    let body = response.bytes().await.expect("body");
-    assert_eq!(&body[..], b"hello");
+        let response = transport
+            .execute(post(&url))
+            .await
+            .unwrap_or_else(|e| panic!("[{name}] attempt must succeed: {e}"));
+        assert_eq!(response.status(), http::StatusCode::OK, "[{name}] status");
+        let body = response
+            .bytes()
+            .await
+            .unwrap_or_else(|e| panic!("[{name}] body: {e}"));
+        assert_eq!(&body[..], b"hello", "[{name}] body bytes");
 
-    // A second call is a second attempt: the transport never batches or retries, and
-    // the caller's attempt budget is the only retry knob in the stack.
-    transport
-        .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
-        .await
-        .expect("second attempt");
-    assert_eq!(
-        mock.requests.load(Ordering::Relaxed),
-        2,
-        "each execute() must produce exactly one upstream request"
-    );
+        // A second call is a second attempt: the transport never batches or retries, and
+        // the caller's attempt budget is the only retry knob in the stack.
+        transport
+            .execute(post(&url))
+            .await
+            .unwrap_or_else(|e| panic!("[{name}] second attempt: {e}"));
+        assert_eq!(
+            mock.requests.load(Ordering::Relaxed),
+            2,
+            "[{name}] each execute() must produce exactly one upstream request"
+        );
+    }
 }
 
 #[tokio::test]
@@ -243,65 +273,86 @@ async fn connect_failure_is_connect_and_never_redialled() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         listener.local_addr().expect("addr")
     };
-    let transport = transport(Some(Duration::from_secs(5)));
-    let error = transport
-        .execute(post(&format!("http://{addr}/v1/chat/completions")))
-        .await
-        .expect_err("connection refused");
-    assert_eq!(error.label(), "connect", "{error}");
-    assert!(matches!(
-        error,
-        UpstreamError::Connect(_) | UpstreamError::Dns(_)
-    ));
+    for (name, transport) in transports(Some(Duration::from_secs(5))) {
+        let error = transport
+            .execute(post(&format!("http://{addr}/v1/chat/completions")))
+            .await
+            .expect_err("connection refused");
+        assert_eq!(error.label(), "connect", "[{name}] {error}");
+        assert!(
+            matches!(error, UpstreamError::Connect(_) | UpstreamError::Dns(_)),
+            "[{name}] a refused connection is a pre-request failure: {error:?}"
+        );
+        assert!(
+            !error.is_caller_fault(),
+            "[{name}] a refused connection is the upstream's problem, not ours"
+        );
+    }
 }
 
 #[tokio::test]
 async fn header_deadline_is_a_timeout_not_a_transport_other() {
-    let mock = mock(Behaviour::Silent).await;
-    let transport = transport(Some(Duration::from_millis(300)));
-    let error = transport
-        .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
-        .await
-        .expect_err("no headers");
-    assert_eq!(error.label(), "timeout", "{error}");
-    assert_eq!(mock.requests.load(Ordering::Relaxed), 1);
+    for (name, transport) in transports(Some(Duration::from_millis(300))) {
+        let mock = mock(Behaviour::Silent).await;
+        let error = transport
+            .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
+            .await
+            .expect_err("no headers");
+        assert_eq!(error.label(), "timeout", "[{name}] {error}");
+        assert_eq!(
+            mock.requests.load(Ordering::Relaxed),
+            1,
+            "[{name}] a header deadline must not trigger a second request"
+        );
+    }
 }
 
 #[tokio::test]
 async fn truncated_body_is_an_error_not_a_clean_end() {
-    let mock = mock(Behaviour::Truncate).await;
-    let transport = transport(None);
-    let response = transport
-        .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
-        .await
-        .expect("headers arrive");
-    let collected = response.bytes().await;
-    assert!(
-        collected.is_err(),
-        "a body shorter than content-length must never look like a completed response"
-    );
+    for (name, transport) in transports(None) {
+        let mock = mock(Behaviour::Truncate).await;
+        let response = transport
+            .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
+            .await
+            .unwrap_or_else(|e| panic!("[{name}] headers arrive: {e}"));
+        let collected = response.bytes().await;
+        assert!(
+            collected.is_err(),
+            "[{name}] a body shorter than content-length must never look like a completed response"
+        );
+    }
 }
 
 #[tokio::test]
 async fn dropping_the_body_closes_the_upstream_connection() {
-    let mock = mock(Behaviour::HoldUntilPeerClose).await;
-    let transport = transport(None);
-    let mut response = transport
-        .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
-        .await
-        .expect("headers arrive");
-    // One chunk arrives, then the client aborts.
-    let head = response.chunk().await.expect("chunk").expect("some bytes");
-    assert_eq!(&head[..], b"0123456789");
-    drop(response);
+    for (name, transport) in transports(None) {
+        let mock = mock(Behaviour::HoldUntilPeerClose).await;
+        let mut response = transport
+            .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
+            .await
+            .unwrap_or_else(|e| panic!("[{name}] headers arrive: {e}"));
+        // One chunk arrives, then the client aborts.
+        let head = response
+            .chunk()
+            .await
+            .unwrap_or_else(|e| panic!("[{name}] chunk: {e}"))
+            .unwrap_or_else(|| panic!("[{name}] expected a first chunk"));
+        assert_eq!(&head[..], b"0123456789", "[{name}] first chunk");
+        drop(response);
 
-    for _ in 0..50 {
-        if mock.peer_closed.load(Ordering::Relaxed) {
-            return;
+        let mut closed = false;
+        for _ in 0..50 {
+            if mock.peer_closed.load(Ordering::Relaxed) {
+                closed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            closed,
+            "[{name}] dropping the response must close the upstream socket, not leak it"
+        );
     }
-    panic!("dropping the response must close the upstream socket, not leak it");
 }
 
 /// The classification is what the call sites branch on; no mock is needed because the
@@ -309,24 +360,27 @@ async fn dropping_the_body_closes_the_upstream_connection() {
 /// unparsable one is rejected by the client builder).
 #[tokio::test]
 async fn invalid_url_is_a_caller_fault_not_an_upstream_failure() {
-    let transport = transport(None);
-    let error = transport
-        .execute(UpstreamRequest::new(http::Method::POST, "not a url"))
-        .await
-        .expect_err("invalid url");
-    // Strict on purpose: this assertion exists to catch the regression where a builder
-    // error is classified as an upstream fault again (see `is_caller_fault`), so it must
-    // not accept `Connect`.
-    assert!(
-        matches!(error, UpstreamError::InvalidRequest(_)),
-        "an unbuildable request must be InvalidRequest, never an upstream failure: {error:?}"
-    );
-    assert!(error.is_caller_fault(), "{error:?}");
+    // No mock: the failure is decided before any socket exists.
+    for (name, transport) in transports(None) {
+        let error = transport
+            .execute(UpstreamRequest::new(http::Method::POST, "not a url"))
+            .await
+            .expect_err("invalid url");
+        // Strict on purpose: this assertion exists to catch the regression where a
+        // builder error is classified as an upstream fault again (see `is_caller_fault`),
+        // so it must not accept `Connect`.
+        assert!(
+            matches!(error, UpstreamError::InvalidRequest(_)),
+            "[{name}] an unbuildable request must be InvalidRequest, never an upstream failure: {error:?}"
+        );
+        assert!(error.is_caller_fault(), "[{name}] {error:?}");
+    }
 }
 
 #[tokio::test]
 async fn unmeasured_pool_fields_are_none_not_zero() {
-    let transport = transport(None);
+    // `reqwest` specifically: it exposes no pool surface, so the fields must stay `None`.
+    let transport = reqwest_transport(None);
     let stats = transport.stats();
     assert!(stats.dials.is_none(), "reqwest exposes no dial counter");
     assert!(stats.connections.is_none(), "reqwest exposes no pool size");
@@ -338,16 +392,60 @@ async fn unmeasured_pool_fields_are_none_not_zero() {
         "an unmeasured field must not be rendered as 0: {rendered}"
     );
     assert!(rendered.contains("nebula_upstream_in_flight"), "{rendered}");
+    assert!(
+        !rendered.contains("nebula_upstream_stale_redial_total"),
+        "reqwest redials invisibly (hyper), so it must not claim a redial counter: {rendered}"
+    );
+}
+
+/// The xlite transport *does* measure the pool, so the fields that reqwest leaves `None`
+/// must be real numbers here — that is what the A/B will read.
+#[cfg(feature = "xlite")]
+#[tokio::test]
+async fn xlite_reports_measured_pool_counters() {
+    let mock = mock(Behaviour::Ok).await;
+    let transport = nebula_common::XliteTransport::with_timeouts(Duration::from_secs(3), None);
+    transport
+        .execute(post(&format!("{}/v1/chat/completions", mock.base_url)))
+        .await
+        .expect("attempt succeeds");
+
+    let stats = transport.stats();
+    assert_eq!(stats.transport, "xlite");
+    assert!(stats.dials.is_some(), "xlite counts dials");
+    assert!(stats.connections.is_some(), "xlite reports pool size");
+    assert!(stats.failed_dial.is_some(), "xlite counts failed dials");
+    assert_eq!(
+        stats.redials,
+        Some(0),
+        "a healthy keep-alive connection must not redial"
+    );
+    let mut rendered = String::new();
+    stats.render_prometheus(&mut rendered);
+    assert!(
+        rendered.contains("nebula_upstream_stale_redial_total"),
+        "{rendered}"
+    );
 }
 
 #[tokio::test]
-async fn unknown_transport_choice_fails_loudly() {
-    // The A/B must not silently run the same transport twice.
+async fn transport_selection_matches_what_this_build_contains() {
+    // The A/B must not silently run the same transport twice: asking for `xlite` in a
+    // build without it is an error, not a quiet fallback to reqwest.
     std::env::set_var("NEBULA_UPSTREAM_TRANSPORT", "xlite");
     let result = nebula_common::upstream_transport_from_env();
     std::env::remove_var("NEBULA_UPSTREAM_TRANSPORT");
-    let Err(error) = result else {
-        panic!("xlite is not built into this crate, so selection must fail");
-    };
-    assert!(error.contains("xlite"), "{error}");
+
+    #[cfg(feature = "xlite")]
+    {
+        let transport = result.expect("the xlite transport is compiled in");
+        assert_eq!(transport.name(), "xlite");
+    }
+    #[cfg(not(feature = "xlite"))]
+    {
+        let Err(error) = result else {
+            panic!("xlite is not built into this crate, so selection must fail");
+        };
+        assert!(error.contains("xlite"), "{error}");
+    }
 }

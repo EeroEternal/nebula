@@ -104,6 +104,8 @@ pub mod dual_write;
 pub mod http;
 pub mod telemetry;
 pub mod upstream;
+#[cfg(feature = "xlite")]
+pub mod upstream_xlite;
 pub use args::{parse_etcd_endpoints, CommonArgs};
 pub use dual_write::DualWriteEmitter;
 pub use http::{
@@ -116,3 +118,5 @@ pub use upstream::{
     reqwest_error_kind, upstream_transport_from_env, ReqwestTransport, UpstreamBody, UpstreamError,
     UpstreamRequest, UpstreamResponse, UpstreamStats, UpstreamTransport,
 };
+#[cfg(feature = "xlite")]
+pub use upstream_xlite::XliteTransport;

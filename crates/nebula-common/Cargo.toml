@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Engine data-plane transport from xlite (xlite#96). Off by default: the default build
+# resolves no git dependency, and `NEBULA_UPSTREAM_TRANSPORT=xlite` fails at startup
+# without it instead of silently falling back to reqwest.
+xlite = ["dep:xlite-transport"]
+
 [dependencies]
 serde.workspace = true
 bytes.workspace = true
@@ -26,6 +32,10 @@ clap.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 chrono.workspace = true
 xtrace-client.workspace = true
+
+# Pinned to a commit, never to a branch: a moving branch would change the numbers an A/B
+# measured. `h1`-only is the Phase-1 configuration (cleartext HTTP/1.1 to vLLM/SGLang).
+xlite-transport = { git = "https://github.com/EeroEternal/xlite", rev = "bb2ba1eac9a3b863b6e4c0531f5b5d0f3a5d2660", optional = true, default-features = false, features = ["h1", "tls-rustls"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
