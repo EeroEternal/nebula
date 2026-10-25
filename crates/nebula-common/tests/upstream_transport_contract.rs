@@ -314,17 +314,14 @@ async fn invalid_url_is_a_caller_fault_not_an_upstream_failure() {
         .execute(UpstreamRequest::new(http::Method::POST, "not a url"))
         .await
         .expect_err("invalid url");
-    // Either shape is acceptable as long as it is a caller-side error, not a silent
-    // upstream failure: empty/blank URLs are rejected up front, unparsable ones come
-    // back from the client builder.
+    // Strict on purpose: this assertion exists to catch the regression where a builder
+    // error is classified as an upstream fault again (see `is_caller_fault`), so it must
+    // not accept `Connect`.
     assert!(
-        matches!(
-            error,
-            UpstreamError::InvalidRequest(_) | UpstreamError::Connect(_)
-        ),
-        "{error:?}"
+        matches!(error, UpstreamError::InvalidRequest(_)),
+        "an unbuildable request must be InvalidRequest, never an upstream failure: {error:?}"
     );
-    assert_eq!(error.label(), "other");
+    assert!(error.is_caller_fault(), "{error:?}");
 }
 
 #[tokio::test]

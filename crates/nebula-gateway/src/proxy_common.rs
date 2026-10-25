@@ -752,7 +752,7 @@ pub async fn forward_embedded(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_error",
                         "upstream_request_invalid",
-                        format!("upstream request could not be built: {e}"),
+                        "upstream request could not be built",
                     ));
                 }
                 router.record_endpoint_failure(&ep.model_uid, ep.replica_id);

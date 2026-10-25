@@ -278,23 +278,12 @@ impl UpstreamResponse {
 /// see dials" indistinguishable in an A/B.
 #[derive(Debug, Clone)]
 pub struct UpstreamStats {
+    /// Name of the transport that produced the snapshot (`reqwest` today).
     pub transport: &'static str,
     pub dials: Option<u64>,
     pub failed_dial: Option<u64>,
     pub in_flight: Option<u64>,
     pub connections: Option<u64>,
-}
-
-impl Default for UpstreamStats {
-    fn default() -> Self {
-        Self {
-            transport: "unknown",
-            dials: None,
-            failed_dial: None,
-            in_flight: None,
-            connections: None,
-        }
-    }
 }
 
 impl UpstreamStats {
@@ -316,7 +305,7 @@ impl UpstreamStats {
         };
         emit(
             "nebula_upstream_dials_total",
-            "Upstream connections dialled by the engine transport (unmeasured by reqwest).",
+            "Upstream connections dialled by the engine transport.",
             "counter",
             self.dials,
         );
@@ -334,7 +323,7 @@ impl UpstreamStats {
         );
         emit(
             "nebula_upstream_connections",
-            "Pooled upstream connections (unmeasured by reqwest).",
+            "Pooled upstream connections held by the engine transport.",
             "gauge",
             self.connections,
         );
