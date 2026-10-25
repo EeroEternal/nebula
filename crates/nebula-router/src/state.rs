@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nebula_common::auth::AuthConfig;
-use nebula_common::DualWriteEmitter;
+use nebula_common::{DualWriteEmitter, UpstreamTransport};
 
 use crate::metrics::Metrics;
 
@@ -9,7 +9,8 @@ use crate::metrics::Metrics;
 pub struct AppState {
     pub model_uid: String,
     pub router: Arc<nebula_router::Router>,
-    pub http: reqwest::Client,
+    /// Engine data-plane transport (`NEBULA_UPSTREAM_TRANSPORT`); one attempt per call.
+    pub upstream: Arc<dyn UpstreamTransport>,
     pub metrics: Arc<Metrics>,
     pub dual_write: DualWriteEmitter,
     pub max_request_body_bytes: usize,

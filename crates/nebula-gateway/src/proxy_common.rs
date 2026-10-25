@@ -8,7 +8,8 @@ use axum::{
 use bytes::Bytes;
 use nebula_common::{
     build_execution_context, inject_execution_context, parse_and_sanitize_inference_hint,
-    peek_json_model_field, Tenant, TenantDenyCode, HEADER_HINT_TRUSTED, HEADER_INFERENCE_HINT,
+    peek_json_model_field, reqwest_error_kind, Tenant, TenantDenyCode, UpstreamError,
+    UpstreamRequest, UpstreamResponse, HEADER_HINT_TRUSTED, HEADER_INFERENCE_HINT,
 };
 use nebula_meta::MetaStore;
 use serde_json::Value;
@@ -174,7 +175,7 @@ pub async fn post_router_chat(
     st: &AppState,
     prepared: &PreparedUpstream,
     chat_body: &Value,
-) -> Result<(reqwest::Response, Option<Bytes>), Response> {
+) -> Result<(UpstreamResponse, Option<Bytes>), Response> {
     let body = Bytes::from(serde_json::to_vec(chat_body).unwrap_or_default());
     if st.router.is_some() {
         return forward_embedded(
@@ -197,7 +198,9 @@ pub async fn post_router_chat(
         HeaderValue::from_static("application/json"),
     );
     let resp = post_router_path(st, &url, req_headers, body).await?;
-    Ok((resp, None))
+    // The Gateway → Router hop is Nebula-internal and stays on `reqwest`; adapt it to
+    // the one response type the handlers see.
+    Ok((UpstreamResponse::from_reqwest(resp), None))
 }
 
 pub async fn load_tenant(store: &dyn MetaStore, tenant_id: &str) -> anyhow::Result<Option<Tenant>> {
@@ -261,21 +264,18 @@ pub fn append_headers(src: &reqwest::header::HeaderMap, dst: &mut Response) {
     }
 }
 
+/// Metric label for a `reqwest` error on the Gateway → Router hop (not the engine
+/// path, which is typed). The mapping lives in `nebula_common::upstream` so both
+/// crates share one table.
 pub fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        return "timeout";
-    }
-    if error.is_connect() {
-        return "connect";
-    }
-    "other"
+    reqwest_error_kind(error)
 }
 
 /// Forward a non-SSE or SSE upstream response to the client (shared by proxy_post).
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_upstream_response(
     st: &AppState,
-    resp: reqwest::Response,
+    resp: UpstreamResponse,
     request_id: Option<&str>,
     req_start: Option<std::time::Instant>,
     permit: Option<nebula_common::queue::EnginePermit>,
@@ -312,11 +312,9 @@ pub async fn forward_upstream_response(
             st.metrics.observe_ttft(m, req_t0.elapsed().as_secs_f64());
         }
         let mut upstream: std::pin::Pin<
-            Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>,
+            Box<dyn futures_util::Stream<Item = Result<Bytes, UpstreamError>> + Send>,
         > = match prefetched_first {
-            Some(head) => Box::pin(
-                futures_util::stream::once(async move { Ok(head) }).chain(resp.bytes_stream()),
-            ),
+            Some(head) => Box::pin(resp.bytes_stream().prepend(head)),
             None => Box::pin(resp.bytes_stream()),
         };
         let stream_idle = nebula_common::stream_idle_timeout();
@@ -538,7 +536,7 @@ pub async fn forward_embedded(
     uri_path: &str,
     uri_query: &str,
     body_bytes: &[u8],
-) -> Result<(reqwest::Response, Option<Bytes>), Response> {
+) -> Result<(UpstreamResponse, Option<Bytes>), Response> {
     let Some(router) = st.router.as_ref() else {
         return Err((
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -641,14 +639,13 @@ pub async fn forward_embedded(
         );
         nebula_common::telemetry::inject_trace_context(&mut req_headers);
 
-        match st
-            .http
-            .request(method.clone(), url)
-            .headers(req_headers)
-            .body(body.clone())
-            .send()
-            .await
-        {
+        let upstream_request = UpstreamRequest {
+            method: method.clone(),
+            url,
+            headers: req_headers,
+            body: Some(body.clone()),
+        };
+        match st.upstream.execute(upstream_request).await {
             Ok(mut resp) => {
                 if resp.status().is_server_error() {
                     router.record_endpoint_failure(&ep.model_uid, ep.replica_id);
@@ -755,7 +752,7 @@ pub async fn forward_embedded(
             }
             Err(e) => {
                 router.record_endpoint_failure(&ep.model_uid, ep.replica_id);
-                let kind = classify_reqwest_error(&e);
+                let kind = e.label();
                 st.metrics.record_upstream_error(kind);
                 if attempt + 1 < max_attempts {
                     attempt += 1;

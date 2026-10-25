@@ -103,6 +103,7 @@ pub mod auth;
 pub mod dual_write;
 pub mod http;
 pub mod telemetry;
+pub mod upstream;
 pub use args::{parse_etcd_endpoints, CommonArgs};
 pub use dual_write::DualWriteEmitter;
 pub use http::{
@@ -110,4 +111,9 @@ pub use http::{
     first_byte_total_budget, health_http_client, proxy_http_client, stream_idle_timeout,
     ChunkDeadline, HttpClientOptions, DEFAULT_FIRST_BYTE_TOTAL_BUDGET_MS,
     DEFAULT_PROXY_FIRST_BYTE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+};
+pub use upstream::{
+    from_reqwest_error, reqwest_error_kind, upstream_transport_from_env, BoxBytesStream,
+    ReqwestTransport, UpstreamBody, UpstreamError, UpstreamRequest, UpstreamResponse,
+    UpstreamStats, UpstreamTransport,
 };

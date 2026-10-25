@@ -22,7 +22,10 @@ pub struct AppState {
     pub stage_timing: bool,
     /// Engine-level bounded fair queue admission (`NEBULA_GATEWAY_QUEUE_*`).
     pub queues: Option<Arc<nebula_common::queue::EngineQueues>>,
+    /// Gateway → Router hop and control-plane HTTP (Nebula-internal, stays `reqwest`).
     pub http: reqwest::Client,
+    /// Engine data-plane transport (`NEBULA_UPSTREAM_TRANSPORT`); one attempt per call.
+    pub upstream: std::sync::Arc<dyn nebula_common::UpstreamTransport>,
     pub store: Arc<EtcdMetaStore>,
     pub auth: GatewayAuth,
     pub metrics: Arc<Metrics>,

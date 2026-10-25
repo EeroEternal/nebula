@@ -192,6 +192,8 @@ impl Metrics {
 
 pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     let mut body = String::new();
+    // Engine data-plane transport counters (measured fields only; `None` emits nothing).
+    st.upstream.stats().render_prometheus(&mut body);
 
     // Global counters
     body.push_str(&format!(

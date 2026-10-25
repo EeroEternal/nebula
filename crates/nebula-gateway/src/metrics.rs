@@ -601,6 +601,9 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     if let Some(queues) = st.queues.as_ref() {
         body.push_str(&render_queue_metrics(queues));
     }
+    // Engine data-plane transport counters. Fields the transport cannot measure are
+    // omitted, never reported as 0 (a fake zero would hide "not measured").
+    st.upstream.stats().render_prometheus(&mut body);
     (
         axum::http::StatusCode::OK,
         [(

@@ -74,6 +74,11 @@ async fn main() {
         tracing::error!(error=%e, "failed to build reqwest client");
         std::process::exit(1);
     });
+    let upstream = nebula_common::upstream_transport_from_env().unwrap_or_else(|e| {
+        tracing::error!(error=%e, "failed to build the upstream transport");
+        std::process::exit(1);
+    });
+    tracing::info!(transport = upstream.name(), "upstream transport");
 
     let store = match nebula_meta::EtcdMetaStore::connect(&args.common.etcd_endpoints()).await {
         Ok(store) => store,
@@ -208,6 +213,7 @@ async fn main() {
         stage_timing,
         queues,
         http,
+        upstream,
         store: Arc::new(store),
         auth,
         metrics,

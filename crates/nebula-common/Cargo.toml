@@ -6,6 +6,10 @@ license.workspace = true
 
 [dependencies]
 serde.workspace = true
+bytes.workspace = true
+http.workspace = true
+async-trait.workspace = true
+futures-util = "0.3"
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
@@ -19,7 +23,7 @@ axum.workspace = true
 tokio.workspace = true
 openssl = { version = "0.10", features = ["vendored"] }
 clap.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 chrono.workspace = true
 xtrace-client.workspace = true
 

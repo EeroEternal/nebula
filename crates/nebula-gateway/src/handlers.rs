@@ -218,11 +218,11 @@ async fn proxy_chat_as_responses(
         // Embedded mode may have already consumed the byte that let it commit 200;
         // replay it so the adapter sees the whole upstream body.
         let mut upstream: std::pin::Pin<
-            Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>,
+            Box<
+                dyn futures_util::Stream<Item = Result<Bytes, nebula_common::UpstreamError>> + Send,
+            >,
         > = match prefetched_first {
-            Some(head) => Box::pin(
-                futures_util::stream::once(async move { Ok(head) }).chain(resp.bytes_stream()),
-            ),
+            Some(head) => Box::pin(resp.bytes_stream().prepend(head)),
             None => Box::pin(resp.bytes_stream()),
         };
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
@@ -487,11 +487,11 @@ async fn proxy_chat_as_anthropic(
         // Embedded mode may have already consumed the byte that let it commit 200;
         // replay it so the adapter sees the whole upstream body.
         let mut upstream: std::pin::Pin<
-            Box<dyn futures_util::Stream<Item = reqwest::Result<Bytes>> + Send>,
+            Box<
+                dyn futures_util::Stream<Item = Result<Bytes, nebula_common::UpstreamError>> + Send,
+            >,
         > = match prefetched_first {
-            Some(head) => Box::pin(
-                futures_util::stream::once(async move { Ok(head) }).chain(resp.bytes_stream()),
-            ),
+            Some(head) => Box::pin(resp.bytes_stream().prepend(head)),
             None => Box::pin(resp.bytes_stream()),
         };
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
@@ -779,7 +779,7 @@ pub async fn proxy_post(
             .send()
             .await
         {
-            Ok(r) => (r, None),
+            Ok(r) => (nebula_common::UpstreamResponse::from_reqwest(r), None),
             Err(e) => {
                 let kind = classify_reqwest_error(&e);
                 st.metrics.record_upstream_error(kind);
