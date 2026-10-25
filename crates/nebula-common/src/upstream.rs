@@ -20,6 +20,13 @@
 //! - **Dropping the body cancels upstream.** The `in_flight` counter is released from
 //!   the body's `Drop`, and dropping a `reqwest` body stream closes the connection.
 //!
+//! **Not guaranteed by every implementation:** `reqwest`/hyper transparently re-sends a
+//! request whose pooled connection was already closed by the peer, so one `execute()` can
+//! put two requests on the wire when the socket went stale between checkout and write.
+//! The contract test cannot see it (its mock closes the connection after each response, so
+//! every attempt is a fresh socket). `xlite-transport` must not inherit this: there the
+//! re-dial is an explicit caller-visible `execute_redial_once` with telemetry.
+//!
 //! Selection is `NEBULA_UPSTREAM_TRANSPORT=reqwest|xlite` (default `reqwest`) via
 //! [`upstream_transport_from_env`]. An unimplemented value fails at startup instead of
 //! falling back silently: an A/B that quietly runs two clones of the same transport
@@ -46,28 +53,47 @@ type BoxBytesStream = Pin<Box<dyn Stream<Item = Result<Bytes, UpstreamError>> + 
 #[non_exhaustive]
 pub enum UpstreamError {
     /// The request could not be built or sent (bad URL, bad header, …). A caller bug,
-    /// never an upstream failure: it must not be counted as an upstream error.
+    /// never an upstream failure: call sites must skip the upstream-error counter and
+    /// must not blame the replica (see [`UpstreamError::is_caller_fault`]).
     #[error("invalid upstream request: {0}")]
     InvalidRequest(String),
     /// Name resolution failed.
+    ///
+    /// Produced by `xlite-transport` (xlite#96 item 2), which types its dial errors; the
+    /// `reqwest` implementation cannot tell DNS from connect and reports [`Self::Connect`].
     #[error("dns resolution failed")]
     Dns(#[source] Box<dyn std::error::Error + Send + Sync>),
-    /// TCP/TLS connect failed (refused, unreachable, handshake).
+    /// TCP connect failed, or a TLS handshake did: `reqwest` does not expose the two
+    /// separately, so both land here. `xlite-transport` reports its handshake failures as
+    /// its own `Tls` variant, which the adapter maps back here until this enum splits.
     #[error("connect failed")]
     Connect(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The attempt expired before response headers arrived.
     #[error("timed out waiting for upstream headers")]
     HeaderTimeout,
     /// The body stalled past the caller's idle budget.
+    ///
+    /// Produced by a transport that runs its own stall watchdog; Nebula passes no stall
+    /// budget (deadlines belong to `ChunkDeadline`), so this is unreachable from the
+    /// `reqwest` implementation by construction — and if it ever appears, that is a bug.
     #[error("upstream body stalled")]
     Stall,
     /// The connection ended before the body completed (truncated response).
+    ///
+    /// Produced by `xlite-transport` (typed pump errors); `reqwest` surfaces a truncated
+    /// body as a decode/other error, so it arrives as [`Self::Other`] today.
     #[error("upstream body incomplete")]
     BodyIncomplete,
     /// The peer reset the connection.
+    ///
+    /// Same producer split as [`Self::BodyIncomplete`]: typed by `xlite-transport`,
+    /// [`Self::Other`] under `reqwest`.
     #[error("upstream connection reset")]
     Reset,
     /// The caller dropped the attempt (client abort).
+    ///
+    /// Only a transport that observes its own cancellation can report this; the caller
+    /// notices an abort as a dropped body, so no current implementation produces it.
     #[error("upstream attempt cancelled")]
     Cancelled,
     /// Transport failure that fits none of the above; the cause is preserved.
@@ -76,6 +102,15 @@ pub enum UpstreamError {
 }
 
 impl UpstreamError {
+    /// True when the failure is Nebula's own bug rather than the upstream's.
+    ///
+    /// Call sites must not count these as upstream errors, must not mark the replica
+    /// unhealthy, and must not retry another replica: a request we failed to build would
+    /// fail identically everywhere.
+    pub fn is_caller_fault(&self) -> bool {
+        matches!(self, UpstreamError::InvalidRequest(_))
+    }
+
     /// Metric label from the frozen three-value taxonomy.
     pub fn label(&self) -> &'static str {
         match self {
@@ -241,35 +276,68 @@ impl UpstreamResponse {
 /// Per-transport pool counters. `None` means *not measured*, never zero: the reqwest
 /// client exposes no pool surface, and reporting 0 would make "no dials" and "cannot
 /// see dials" indistinguishable in an A/B.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UpstreamStats {
-    pub transport: Option<&'static str>,
+    pub transport: &'static str,
     pub dials: Option<u64>,
     pub failed_dial: Option<u64>,
     pub in_flight: Option<u64>,
     pub connections: Option<u64>,
 }
 
+impl Default for UpstreamStats {
+    fn default() -> Self {
+        Self {
+            transport: "unknown",
+            dials: None,
+            failed_dial: None,
+            in_flight: None,
+            connections: None,
+        }
+    }
+}
+
 impl UpstreamStats {
     /// Append Prometheus lines for the measured fields only; unmeasured ones emit nothing
     /// rather than a fake zero.
+    ///
+    /// The series carry no component prefix because the Gateway and the Router are
+    /// separate scrape targets publishing their own `transport` label — two processes
+    /// never contribute to the same series.
     pub fn render_prometheus(&self, out: &mut String) {
-        let transport = self.transport.unwrap_or("unknown");
-        let mut emit = |metric: &str, kind: &str, value: Option<u64>| {
+        let transport = self.transport;
+        let mut emit = |metric: &str, help: &str, kind: &str, value: Option<u64>| {
             if let Some(v) = value {
                 out.push_str(&format!(
-                    "# TYPE {metric} {kind}\n{metric}{{transport=\"{transport}\"}} {v}\n"
+                    "# HELP {metric} {help}\n# TYPE {metric} {kind}\n\
+                     {metric}{{transport=\"{transport}\"}} {v}\n"
                 ));
             }
         };
-        emit("nebula_upstream_dials_total", "counter", self.dials);
+        emit(
+            "nebula_upstream_dials_total",
+            "Upstream connections dialled by the engine transport (unmeasured by reqwest).",
+            "counter",
+            self.dials,
+        );
         emit(
             "nebula_upstream_failed_dial_total",
+            "Upstream dial attempts that failed before a request could be written.",
             "counter",
             self.failed_dial,
         );
-        emit("nebula_upstream_in_flight", "gauge", self.in_flight);
-        emit("nebula_upstream_connections", "gauge", self.connections);
+        emit(
+            "nebula_upstream_in_flight",
+            "Upstream attempts currently holding a response body.",
+            "gauge",
+            self.in_flight,
+        );
+        emit(
+            "nebula_upstream_connections",
+            "Pooled upstream connections (unmeasured by reqwest).",
+            "gauge",
+            self.connections,
+        );
     }
 }
 
@@ -291,16 +359,17 @@ pub struct ReqwestTransport {
     client: reqwest::Client,
     in_flight: Arc<AtomicU64>,
     failed_dial: AtomicU64,
-    transport: &'static str,
 }
 
 impl ReqwestTransport {
+    /// Label used for logs and the `transport` metric label.
+    pub const NAME: &'static str = "reqwest";
+
     pub fn new(client: reqwest::Client) -> Self {
         Self {
             client,
             in_flight: Arc::new(AtomicU64::new(0)),
             failed_dial: AtomicU64::new(0),
-            transport: "reqwest",
         }
     }
 }
@@ -357,12 +426,12 @@ impl UpstreamTransport for ReqwestTransport {
             failed_dial: Some(self.failed_dial.load(Ordering::Relaxed)),
             in_flight: Some(self.in_flight.load(Ordering::Relaxed)),
             connections: None,
-            transport: Some(self.transport),
+            transport: Self::NAME,
         }
     }
 
     fn name(&self) -> &'static str {
-        self.transport
+        Self::NAME
     }
 }
 

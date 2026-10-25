@@ -209,17 +209,31 @@ async fn error_taxonomy_labels_are_frozen() {
     assert_eq!(UpstreamError::BodyIncomplete.label(), "other");
     assert_eq!(UpstreamError::Reset.label(), "other");
     assert_eq!(UpstreamError::Cancelled.label(), "other");
+    // A caller fault keeps the "other" label purely so the frozen series shape holds if
+    // it ever leaks past `is_caller_fault`; the branch above is what actually protects it.
     assert_eq!(
         UpstreamError::InvalidRequest("no url".into()).label(),
         "other"
     );
 
-    // Caller bugs must be distinguishable from upstream failures: `InvalidRequest`
-    // exists so a bad URL never reaches the upstream-error counters.
-    assert!(!matches!(
-        UpstreamError::InvalidRequest("no url".into()),
-        UpstreamError::Connect(_) | UpstreamError::HeaderTimeout
-    ));
+    // Caller bugs are a separate class: `is_caller_fault()` is what the Gateway/Router
+    // branches on to skip the upstream-error counter, skip `record_endpoint_failure` and
+    // skip the replica retry — so this predicate is the invariant, not the label.
+    assert!(UpstreamError::InvalidRequest("no url".into()).is_caller_fault());
+    for upstream_fault in [
+        UpstreamError::HeaderTimeout,
+        UpstreamError::Stall,
+        UpstreamError::BodyIncomplete,
+        UpstreamError::Reset,
+        UpstreamError::Cancelled,
+        UpstreamError::Other(Box::new(std::io::Error::other("x"))),
+        UpstreamError::Connect(Box::new(std::io::Error::other("refused"))),
+    ] {
+        assert!(
+            !upstream_fault.is_caller_fault(),
+            "{upstream_fault:?} is an upstream failure and must be counted/retried"
+        );
+    }
 }
 
 #[tokio::test]
@@ -290,8 +304,11 @@ async fn dropping_the_body_closes_the_upstream_connection() {
     panic!("dropping the response must close the upstream socket, not leak it");
 }
 
+/// The classification is what the call sites branch on; no mock is needed because the
+/// failure is decided before any socket exists (an empty URL is rejected up front, an
+/// unparsable one is rejected by the client builder).
 #[tokio::test]
-async fn invalid_request_is_a_caller_bug_and_opens_no_connection() {
+async fn invalid_url_is_a_caller_fault_not_an_upstream_failure() {
     let transport = transport(None);
     let error = transport
         .execute(UpstreamRequest::new(http::Method::POST, "not a url"))

@@ -74,6 +74,9 @@ async fn main() {
         tracing::error!(error=%e, "failed to build reqwest client");
         std::process::exit(1);
     });
+    // Two proxies with the same timeouts, on purpose: `http` serves the Gateway → Router
+    // hop and control-plane calls, while `upstream` owns the engine data plane and is the
+    // one the xlite swap replaces. Sharing one pool would tie an A/B to hop traffic.
     let upstream = nebula_common::upstream_transport_from_env().unwrap_or_else(|e| {
         tracing::error!(error=%e, "failed to build the upstream transport");
         std::process::exit(1);

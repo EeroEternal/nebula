@@ -160,7 +160,7 @@ pub async fn post_router_path(
     match st.http.post(url).headers(headers).body(body).send().await {
         Ok(r) => Ok(r),
         Err(e) => {
-            let kind = classify_reqwest_error(&e);
+            let kind = reqwest_error_kind(&e);
             st.metrics.record_upstream_error(kind);
             tracing::error!(error=%e, "upstream request failed");
             Err(upstream_transport_error(
@@ -262,13 +262,6 @@ pub fn append_headers(src: &reqwest::header::HeaderMap, dst: &mut Response) {
             dst.headers_mut().insert(name, value);
         }
     }
-}
-
-/// Metric label for a `reqwest` error on the Gateway → Router hop (not the engine
-/// path, which is typed). The mapping lives in `nebula_common::upstream` so both
-/// crates share one table.
-pub fn classify_reqwest_error(error: &reqwest::Error) -> &'static str {
-    reqwest_error_kind(error)
 }
 
 /// Forward a non-SSE or SSE upstream response to the client (shared by proxy_post).
@@ -751,6 +744,17 @@ pub async fn forward_embedded(
                 return Ok((resp, prefetched));
             }
             Err(e) => {
+                if e.is_caller_fault() {
+                    // Our own request was unbuildable: retrying another replica would
+                    // fail identically, and the replica is healthy.
+                    tracing::error!(error = %e, model_uid = %ep.model_uid, "upstream request rejected by our transport");
+                    return Err(crate::interface::openai_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "upstream_request_invalid",
+                        format!("upstream request could not be built: {e}"),
+                    ));
+                }
                 router.record_endpoint_failure(&ep.model_uid, ep.replica_id);
                 let kind = e.label();
                 st.metrics.record_upstream_error(kind);

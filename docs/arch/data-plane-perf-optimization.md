@@ -61,7 +61,7 @@ Client ------> [ Gateway (内嵌 In-Process Router) ] (HTTP) --------> [ vLLM En
 - **实施细节**：
   1. `nebula-gateway` 直接在进程内初始化 `Arc<Router>`，并在后台启动与 etcd 同步的 `endpoints_sync_loop` / `stats_sync_loop`；
   2. 请求到达 Gateway 完成鉴权与门控后，直接调用 `router.route(&ctx, &model_uid)` 进行内存原子选路（微秒级），直接获得选中的 `EndpointInfo`；
-  3. Gateway 复用连接池直接 `reqwest` 打向目标引擎 `endpoint.url`。
+  3. Gateway 越过内部 HTTP hop 直接打向目标引擎 `endpoint.url`；引擎出站统一走 `nebula_common::UpstreamTransport` 契约（默认 `reqwest` 实现，`NEBULA_UPSTREAM_TRANSPORT=xlite` 可换装，见 issue #80）。
 - **收益**：直接砍掉 1 次内部 HTTP RTT，消除全部内部网络转发损耗。
 
 ---

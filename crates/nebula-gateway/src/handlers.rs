@@ -25,8 +25,8 @@ use crate::interface::{
     AnthropicSseMapper, OpenAiStreamChunk,
 };
 use crate::proxy_common::{
-    classify_reqwest_error, forward_embedded, forward_upstream_response, post_router_chat,
-    prepare_upstream, prepare_upstream_from_json, queue_deny_response,
+    forward_embedded, forward_upstream_response, post_router_chat, prepare_upstream,
+    prepare_upstream_from_json, queue_deny_response,
 };
 use crate::responses::{build_non_stream_json, build_response, ResponseStreamBuilder};
 use crate::state::AppState;
@@ -781,7 +781,7 @@ pub async fn proxy_post(
         {
             Ok(r) => (nebula_common::UpstreamResponse::from_reqwest(r), None),
             Err(e) => {
-                let kind = classify_reqwest_error(&e);
+                let kind = nebula_common::reqwest_error_kind(&e);
                 st.metrics.record_upstream_error(kind);
                 tracing::error!(error=%e, "upstream request failed");
                 return upstream_transport_error(kind, format!("upstream request failed: {kind}"));

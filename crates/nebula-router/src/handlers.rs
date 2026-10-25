@@ -380,6 +380,31 @@ pub async fn proxy_chat_completions(
                 }
             }
             Err(e) => {
+                if e.is_caller_fault() {
+                    // A request we could not build fails identically on every replica:
+                    // do not count it as an upstream error, do not blame this replica,
+                    // do not retry.
+                    tracing::error!(
+                        error = %e,
+                        model_uid = %ep.model_uid,
+                        "upstream request rejected by our transport"
+                    );
+                    let e2e = request_start.elapsed().as_secs_f64();
+                    st.metrics.record_model_status(&model_uid, 500);
+                    st.metrics.observe_e2e_latency(&model_uid, e2e);
+                    st.dual_write.emit_request_outcome(
+                        "nebula_router",
+                        Some(&model_uid),
+                        500,
+                        Some(e2e),
+                        false,
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "upstream request invalid",
+                    )
+                        .into_response();
+                }
                 st.router
                     .record_endpoint_failure(&ep.model_uid, ep.replica_id);
                 let kind = e.label();
