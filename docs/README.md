@@ -47,6 +47,7 @@
 |------|------|
 | [`arch/vision.md`](arch/vision.md) | 统一模型服务平台总纲：定位、能力分层（L0–L4）、原则与演进 |
 | [`arch/architecture.md`](arch/architecture.md) | 系统架构（L0 组件级实现） |
+| [`arch/ha.md`](arch/ha.md) | HA-first 目标架构与重构路线：多活、共享配额/租约、Recipe 一致性、故障注入验收 |
 | [`arch/selection.md`](arch/selection.md) | L3 智能选择层：画像、打分、草稿与半自动落地 |
 | [`arch/pool.md`](arch/pool.md) | L2 资源池与 `pd_split`：HardwarePool、池约束、共享 KV 角色化放置/路由与故障注入实测 |
 | [`arch/roadmap.md`](arch/roadmap.md) | 排期（与 vision Phase 0–3 对齐） |
