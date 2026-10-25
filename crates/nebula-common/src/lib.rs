@@ -113,7 +113,6 @@ pub use http::{
     DEFAULT_PROXY_FIRST_BYTE_TIMEOUT_MS, DEFAULT_STREAM_IDLE_TIMEOUT_MS,
 };
 pub use upstream::{
-    from_reqwest_error, reqwest_error_kind, upstream_transport_from_env, BoxBytesStream,
-    ReqwestTransport, UpstreamBody, UpstreamError, UpstreamRequest, UpstreamResponse,
-    UpstreamStats, UpstreamTransport,
+    reqwest_error_kind, upstream_transport_from_env, ReqwestTransport, UpstreamBody, UpstreamError,
+    UpstreamRequest, UpstreamResponse, UpstreamStats, UpstreamTransport,
 };

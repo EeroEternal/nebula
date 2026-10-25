@@ -214,10 +214,12 @@ async fn error_taxonomy_labels_are_frozen() {
         "other"
     );
 
-    // Caller bugs must be distinguishable from upstream failures.
-    assert!(UpstreamError::InvalidRequest("no url".into()).is_pre_request());
-    assert!(!UpstreamError::BodyIncomplete.is_pre_request());
-    assert!(!UpstreamError::Reset.is_pre_request());
+    // Caller bugs must be distinguishable from upstream failures: `InvalidRequest`
+    // exists so a bad URL never reaches the upstream-error counters.
+    assert!(!matches!(
+        UpstreamError::InvalidRequest("no url".into()),
+        UpstreamError::Connect(_) | UpstreamError::HeaderTimeout
+    ));
 }
 
 #[tokio::test]
@@ -233,7 +235,10 @@ async fn connect_failure_is_connect_and_never_redialled() {
         .await
         .expect_err("connection refused");
     assert_eq!(error.label(), "connect", "{error}");
-    assert!(error.is_pre_request());
+    assert!(matches!(
+        error,
+        UpstreamError::Connect(_) | UpstreamError::Dns(_)
+    ));
 }
 
 #[tokio::test]

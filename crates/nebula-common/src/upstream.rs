@@ -34,7 +34,7 @@ use futures_util::{Stream, StreamExt};
 use http::{HeaderMap, Method, StatusCode};
 
 /// A response body as raw bytes, carrying the transport's error type.
-pub type BoxBytesStream = Pin<Box<dyn Stream<Item = Result<Bytes, UpstreamError>> + Send>>;
+type BoxBytesStream = Pin<Box<dyn Stream<Item = Result<Bytes, UpstreamError>> + Send>>;
 
 /// Why an upstream attempt did not produce a usable response.
 ///
@@ -84,19 +84,6 @@ impl UpstreamError {
             _ => "other",
         }
     }
-
-    /// True when the failure happened before any request bytes could have been
-    /// processed by the upstream (safe-to-redial class, missing only the "was this a
-    /// reused connection" half the transport cannot know).
-    pub fn is_pre_request(&self) -> bool {
-        matches!(
-            self,
-            UpstreamError::InvalidRequest(_)
-                | UpstreamError::Dns(_)
-                | UpstreamError::Connect(_)
-                | UpstreamError::HeaderTimeout
-        )
-    }
 }
 
 /// Metric label for a `reqwest` error, kept as the single mapping table so the Gateway's
@@ -116,7 +103,7 @@ pub fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
 /// `reqwest` does not expose typed DNS/TLS discrimination, so those two variants are
 /// produced by transports that can tell them apart (the xlite data plane); here the
 /// distinction collapses into `Connect`, and `Display` is preserved in the source chain.
-pub fn from_reqwest_error(error: reqwest::Error) -> UpstreamError {
+fn from_reqwest_error(error: reqwest::Error) -> UpstreamError {
     // A request the client refuses to build is a caller bug, not an upstream failure:
     // it must be distinguishable so it never reaches the upstream-error counters.
     if error.is_builder() {
@@ -169,10 +156,6 @@ impl UpstreamBody {
         }
     }
 
-    pub fn empty() -> Self {
-        Self::new(futures_util::stream::empty())
-    }
-
     /// Replay `head` before the rest of the stream.
     ///
     /// This is the pre-first-byte commitment pattern: read one chunk to decide whether
@@ -180,10 +163,6 @@ impl UpstreamBody {
     /// that chunk so no byte is lost or reordered.
     pub fn prepend(self, head: Bytes) -> Self {
         Self::new(futures_util::stream::once(async move { Ok(head) }).chain(self))
-    }
-
-    pub fn into_stream(self) -> BoxBytesStream {
-        self.inner
     }
 }
 
@@ -207,6 +186,8 @@ pub struct UpstreamResponse {
 }
 
 impl UpstreamResponse {
+    /// The constructor a transport implementation uses to hand a response back
+    /// (`xlite-transport` will call this; `from_reqwest` does today).
     pub fn new(status: StatusCode, headers: HeaderMap, body: UpstreamBody) -> Self {
         Self {
             status,
@@ -226,11 +207,7 @@ impl UpstreamResponse {
                 .bytes_stream()
                 .map(|chunk| chunk.map_err(from_reqwest_error)),
         );
-        Self {
-            status,
-            headers,
-            body,
-        }
+        Self::new(status, headers, body)
     }
 
     pub fn status(&self) -> StatusCode {
