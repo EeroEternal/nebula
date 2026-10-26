@@ -18,6 +18,8 @@
 # Env:
 #   RUN_SMOKE=1   also build release binaries and run mock-engine smoke
 #                 (needs docker compose / etcd, see scripts/ci_smoke.sh)
+#   RUN_HA_QUOTA=1 also run the two-Gateway cluster-quota drill
+#                 (needs etcd/etcdctl on PATH, see scripts/ha_quota_drill.sh)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -55,6 +57,12 @@ if [ -f frontend/package.json ]; then
   (cd frontend && npx tsc -b --noEmit && npm run lint && npm run build)
 else
   echo "frontend/package.json not found; skipping frontend gate"
+fi
+
+if [ "${RUN_HA_QUOTA:-0}" = "1" ]; then
+  echo "========== HA cluster-quota drill (issue #68, needs etcd on PATH) =========="
+  cargo build -p nebula-gateway
+  ./scripts/ha_quota_drill.sh
 fi
 
 if [ "${RUN_SMOKE:-0}" = "1" ]; then

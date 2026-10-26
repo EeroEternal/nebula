@@ -79,6 +79,8 @@ NEBULA_GATEWAY_QUEUE_TENANT_SHARE=0.5
 
 实现：`nebula_common::quota_shard`（纯函数 + 单测：Σ 分片 ≤ 全局、`allowed_models` 不被切分、未设限额保持未设）。准入路径零 etcd/PG I/O。
 
+**实测**（`scripts/ha_quota_drill.sh`：真 etcd + 2 个真实 Gateway 进程，10/min 租户配额）：`members=1` 时两副本共放行 20 次（复现 N×），`members=2` 时 5+5=10 次、其余 10 次 `429 tenant_rps_exceeded`；流式请求全程占用并发槽，流结束才释放。证据与未覆盖项见 [`ha/quota-drill.md`](ha/quota-drill.md)。
+
 已知边界（都是刻意的）：
 
 - **成员数是部署不变量，不是实时成员视图**。扩缩 Gateway 必须同步改 `NEBULA_GATEWAY_QUOTA_MEMBERS`；改小了会真的超卖。自动成员注册 + 自动重分片属 HA-P2 后续（需 `/gateways/` lease 注册表）。
