@@ -66,6 +66,8 @@ Control plane: 3-node etcd + PostgreSQL HA + multi-owner prefix index
 | ModelRecipe / Prompt/KV ABI | 与 Placement 同事务的 resolved snapshot | digest 和只读快照 | 禁止新旧 Recipe 与 Placement 混用 |
 | Endpoint / Capability | Node 写 etcd lease，Router 消费快照 | `/endpoints/` 只读快照 | 缺失 digest 是 Unknown，不视为同 ABI |
 | Tenant 配置 | BFF 写，Gateway 快照 | 禁止逐请求 etcd/PG | 热路径读取失败不能静默放行 |
+
+> 2026-10-26 多机演练发现：Gateway 至今仍是**逐请求**读 `/tenants/{id}`（表内目标是快照），且死 etcd 节点会让读失败后**静默放行**（配额可绕过）。已加一次重试 + `nebula_gateway_tenant_lookup_failed_total` 计数（见 [`../dev/ha/railway-drill.md`](../dev/ha/railway-drill.md)），后台租户快照仍属 HA-P1 未完成项。
 | Tenant 配额 | 集群一致配额视图 | 首版确定性配额分片，后续按证据优化 | 分片总和不超过全局限制，禁止 N× |
 | Tool-Pause lease | 共享租约记录，单写 Owner + CAS | 仅 Tool-Pause 提交/续接/过期等低频转移 | TTL、epoch、fencing、一次性消费 |
 | Session/pin | 共享租约与幂等键驱动引擎控制 API | 后台执行，响应不被 pin 阻塞 | 重复提交不重复 pin，失败只降级性能 |

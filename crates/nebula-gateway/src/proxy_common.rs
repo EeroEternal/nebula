@@ -48,7 +48,23 @@ pub async fn prepare_upstream(
 
     let _conc_guard = if st.auth.env.multi_tenant {
         if let Some(ref tenant_id) = ctx.tenant_id {
-            match load_tenant(&*st.store, tenant_id).await {
+            // shortcut: the tenant is read from etcd on every request (no snapshot
+            // yet, HA-P1). A dead member in ETCD_ENDPOINT shows up as `Unavailable`
+            // on the first try, so retry once; if every attempt fails the request is
+            // served WITHOUT quota — counted, never silent.
+            let mut attempts = 0;
+            let tenant_result = loop {
+                attempts += 1;
+                match load_tenant(&*st.store, tenant_id).await {
+                    Ok(v) => break Ok(v),
+                    Err(e) if attempts < 2 => {
+                        tracing::warn!(error=%e, tenant_id=%tenant_id, attempts, "tenant lookup failed; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match tenant_result {
                 Ok(Some(tenant)) => {
                     if ctx.pinned_replica_id.is_some() {
                         if let Err(code) = st.tenant_admission.try_admit_pin(&tenant).await {
@@ -71,7 +87,15 @@ pub async fn prepare_upstream(
                 }
                 Ok(None) => None,
                 Err(e) => {
-                    tracing::warn!(error=%e, tenant_id=%tenant_id, "tenant lookup failed; allowing request");
+                    st.metrics
+                        .tenant_lookup_failed_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        error=%e,
+                        tenant_id=%tenant_id,
+                        attempts,
+                        "tenant lookup failed; serving without quota (counted)"
+                    );
                     None
                 }
             }

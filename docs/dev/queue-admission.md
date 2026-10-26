@@ -81,6 +81,8 @@ NEBULA_GATEWAY_QUEUE_TENANT_SHARE=0.5
 
 **实测**（`scripts/ha_quota_drill.sh`：真 etcd + 2 个真实 Gateway 进程，10/min 租户配额）：`members=1` 时两副本共放行 20 次（复现 N×），`members=2` 时 5+5=10 次、其余 10 次 `429 tenant_rps_exceeded`；流式请求全程占用并发槽，流结束才释放。证据与未覆盖项见 [`ha/quota-drill.md`](ha/quota-drill.md)。
 
+**多机复测**（3 台 Railway Sandbox VM：3 节点 etcd + 2 台 Gateway + 1 台 mock 引擎）：T1/T2 数字同上（20 vs 10），并覆盖 `limit < members`、kill etcd 单节点、kill Gateway 后重启。演练中发现并修掉一个真缺陷——死 etcd 节点会让逐请求的租户读取失败并**静默放行**（配额被绕过），现在失败重试一次、仍失败才放行且计入 `nebula_gateway_tenant_lookup_failed_total`。详见 [`ha/railway-drill.md`](ha/railway-drill.md)。
+
 已知边界（都是刻意的）：
 
 - **成员数是部署不变量，不是实时成员视图**。扩缩 Gateway 必须同步改 `NEBULA_GATEWAY_QUOTA_MEMBERS`；改小了会真的超卖。自动成员注册 + 自动重分片属 HA-P2 后续（需 `/gateways/` lease 注册表）。

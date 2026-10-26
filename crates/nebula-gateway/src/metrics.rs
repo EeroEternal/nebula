@@ -137,6 +137,9 @@ pub struct Metrics {
     pub hint_forwarded_total: AtomicU64,
     pub hint_rejected_total: AtomicU64,
     pub hint_untrusted_total: AtomicU64,
+    /// Tenant quota lookups that failed and fell back to "serve without quota".
+    /// Non-zero means the hot-path etcd read is degraded — treat it as an alarm.
+    pub tenant_lookup_failed_total: AtomicU64,
     /// Client disconnect / explicit abort — not counted as 5xx error budget.
     pub requests_aborted_total: AtomicU64,
     /// Streams that ended with an upstream error before `[DONE]` (truncated 200).
@@ -375,6 +378,14 @@ pub fn render_metrics(metrics: &Metrics) -> String {
     body.push_str(&format!(
         "nebula_gateway_hint_total{{stage=\"rejected\"}} {}\n",
         metrics.hint_rejected_total.load(Ordering::Relaxed),
+    ));
+    body.push_str(
+        "# HELP nebula_gateway_tenant_lookup_failed_total Tenant quota reads that failed;\
+         \n# TYPE nebula_gateway_tenant_lookup_failed_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_tenant_lookup_failed_total {}\n",
+        metrics.tenant_lookup_failed_total.load(Ordering::Relaxed),
     ));
     body.push_str(&format!(
         "nebula_gateway_hint_total{{stage=\"untrusted\"}} {}\n",
