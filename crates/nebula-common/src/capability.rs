@@ -73,6 +73,12 @@ pub fn static_version_support(engine_type: &str) -> Vec<EngineVersionSupport> {
                 "prompt/prefix cache SLI mapped only when official metrics exist".into(),
             ],
         }],
+        "tokenspeed" => vec![EngineVersionSupport {
+            engine_type: "tokenspeed".into(),
+            min_inclusive: Some("0.1.0".into()),
+            max_exclusive: None,
+            known_issues: Vec::new(),
+        }],
         _ => Vec::new(),
     }
 }
@@ -215,7 +221,7 @@ pub struct EngineCapability {
 }
 
 /// Engine types Nebula can launch as ordinary replicas today.
-pub const KNOWN_ENGINE_TYPES: &[&str] = &["vllm", "sglang"];
+pub const KNOWN_ENGINE_TYPES: &[&str] = &["vllm", "sglang", "tokenspeed"];
 
 /// Default engine when `engine_type` is omitted (backward compatible).
 pub const DEFAULT_ENGINE_TYPE: &str = "vllm";
@@ -246,7 +252,38 @@ pub fn static_capability(engine_type: &str) -> Option<EngineCapability> {
     match engine_type {
         "vllm" => Some(static_capability_vllm()),
         "sglang" => Some(static_capability_sglang()),
+        "tokenspeed" => Some(static_capability_tokenspeed()),
         _ => None,
+    }
+}
+
+pub fn static_capability_tokenspeed() -> EngineCapability {
+    EngineCapability {
+        engine_type: "tokenspeed".into(),
+        engine_version: None,
+        source: CapabilitySource::StaticTable,
+        openai_compatible: Some(true),
+        tensor_parallel: Some(true),
+        data_parallel: Some(true),
+        lora: Some(false),
+        structured_output: Some(true),
+        kv_connector: Some(true),
+        grpc: Some(false),
+        tool_calling: SupportLevel::Supported,
+        score_api: SupportLevel::Unsupported,
+        topologies: vec![
+            ServingTopologyKind::Standalone,
+            ServingTopologyKind::Replicated,
+        ],
+        observability: ObservabilityCapability {
+            pending_requests: SupportLevel::Supported,
+            kv_cache_usage: SupportLevel::Supported,
+            prefix_cache_hit_rate: SupportLevel::Supported,
+            prompt_cache_hit_rate: SupportLevel::Unsupported,
+            ttft: SupportLevel::Unknown,
+            tpot: SupportLevel::Unknown,
+        },
+        notes: Some("TokenSpeed unified-path inference engine replicas".into()),
     }
 }
 
@@ -414,12 +451,12 @@ pub fn validate_model_config(
         {
             return Err("speculative_config.draft_model is required for draft_model".into());
         }
-        if engine_type == "sglang"
+        if matches!(engine_type, "sglang" | "tokenspeed")
             && spec.method == Some(crate::model_request::SpeculativeMethod::Ngram)
         {
-            return Err(
-                "engine 'sglang' does not support speculative_config.method = ngram".into(),
-            );
+            return Err(format!(
+                "engine '{engine_type}' does not support speculative_config.method = ngram"
+            ));
         }
     }
 
@@ -565,6 +602,17 @@ mod tests {
         );
         assert_eq!(s.tool_calling, SupportLevel::Supported);
         assert_eq!(s.score_api, SupportLevel::Supported);
+
+        let ts = static_capability_tokenspeed();
+        assert_eq!(
+            ts.observability.prefix_cache_hit_rate,
+            SupportLevel::Supported
+        );
+        assert_eq!(ts.tool_calling, SupportLevel::Supported);
+        assert_eq!(
+            tool_calling_for_engine(Some("tokenspeed")),
+            SupportLevel::Supported
+        );
     }
 
     #[test]

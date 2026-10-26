@@ -69,13 +69,23 @@ pub struct EndpointInfo {
 /// `None` on optional metric fields means the value is unavailable
 /// (unsupported by the engine version, scrape miss, or unknown) — never treat
 /// absence as zero.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct EndpointStats {
     pub model_uid: String,
     pub replica_id: u32,
     pub last_updated_ms: u64,
 
     pub pending_requests: u64,
+
+    /// Queued (unscheduled / Head-of-Line blocked) requests scraped from
+    /// `num_requests_waiting` when exposed by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_requests: Option<u64>,
+
+    /// Actively executing requests in the continuous batch scraped from
+    /// `num_requests_running` when exposed by the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_requests: Option<u64>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prefix_cache_hit_rate: Option<f64>,
@@ -93,6 +103,11 @@ pub struct EndpointStats {
     /// when exposed by the engine (`None` when the engine does not expose the counter).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix_cache_queries_total: Option<f64>,
+
+    /// Cumulative request preemptions / retractions scraped from `num_preemptions_total`
+    /// when exposed by the engine (`None` when not exposed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub num_preemptions_total: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +117,10 @@ struct EndpointStatsDe {
     last_updated_ms: u64,
     pending_requests: u64,
     #[serde(default)]
+    waiting_requests: Option<u64>,
+    #[serde(default)]
+    running_requests: Option<u64>,
+    #[serde(default)]
     prefix_cache_hit_rate: Option<f64>,
     #[serde(default)]
     prompt_cache_hit_rate: Option<f64>,
@@ -109,6 +128,8 @@ struct EndpointStatsDe {
     kv_cache_usage: Option<f64>,
     #[serde(default)]
     prefix_cache_queries_total: Option<f64>,
+    #[serde(default)]
+    num_preemptions_total: Option<u64>,
     /// Legacy permille-as-bytes fields; accepted on read only.
     #[serde(default)]
     kv_cache_used_bytes: Option<u64>,
@@ -136,10 +157,13 @@ impl From<EndpointStatsDe> for EndpointStats {
             replica_id: d.replica_id,
             last_updated_ms: d.last_updated_ms,
             pending_requests: d.pending_requests,
+            waiting_requests: d.waiting_requests,
+            running_requests: d.running_requests,
             prefix_cache_hit_rate: d.prefix_cache_hit_rate,
             prompt_cache_hit_rate: d.prompt_cache_hit_rate,
             kv_cache_usage,
             prefix_cache_queries_total: d.prefix_cache_queries_total,
+            num_preemptions_total: d.num_preemptions_total,
         }
     }
 }
@@ -160,10 +184,13 @@ impl EndpointStats {
             replica_id,
             last_updated_ms,
             pending_requests: 0,
+            waiting_requests: None,
+            running_requests: None,
             prefix_cache_hit_rate: None,
             prompt_cache_hit_rate: None,
             kv_cache_usage: None,
             prefix_cache_queries_total: None,
+            num_preemptions_total: None,
         }
     }
 }

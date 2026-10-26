@@ -7,11 +7,13 @@ pub struct Candidate<'a> {
 }
 
 /// Request-scoped routing context (P1c / Batch 5.2): the primary replica holding
-/// the request's KV prefix chain plus per-replica matched block counts across
-/// all candidate owners.
+/// the request's KV prefix chain, per-replica matched block counts across
+/// all candidate owners, and the model's prefix block granularity (`block_size`,
+/// defaulting to 16 tokens when 0).
 pub struct SelectionCtx<'a> {
     pub prefix_owner: Option<u32>,
     pub prefix_matches: Option<&'a std::collections::HashMap<u32, usize>>,
+    pub block_size: usize,
 }
 
 impl SelectionCtx<'_> {
@@ -19,6 +21,15 @@ impl SelectionCtx<'_> {
         Self {
             prefix_owner: None,
             prefix_matches: None,
+            block_size: 16,
+        }
+    }
+
+    pub fn tokens_per_block(&self) -> f64 {
+        if self.block_size == 0 {
+            TOKENS_PER_KV_BLOCK
+        } else {
+            self.block_size as f64
         }
     }
 }
@@ -54,11 +65,24 @@ impl RoutingStrategy for LeastPending {
     fn select(&self, _ctx: &SelectionCtx<'_>, candidates: &[Candidate]) -> Option<Selection> {
         let mut best_idx: Option<usize> = None;
         let mut best_pending = u64::MAX;
+        let mut best_waiting = u64::MAX;
+        let mut best_kv = f64::MAX;
 
         for (i, c) in candidates.iter().enumerate() {
             let pending = c.stats.map(|s| s.pending_requests).unwrap_or(0);
-            if pending < best_pending {
+            let waiting = c.stats.and_then(|s| s.waiting_requests).unwrap_or(pending);
+            let kv = c.stats.and_then(|s| s.kv_cache_usage).unwrap_or(f64::MAX);
+            let is_better = if pending != best_pending {
+                pending < best_pending
+            } else if waiting != best_waiting {
+                waiting < best_waiting
+            } else {
+                kv < best_kv
+            };
+            if is_better {
                 best_pending = pending;
+                best_waiting = waiting;
+                best_kv = kv;
                 best_idx = Some(i);
             }
         }
@@ -175,7 +199,12 @@ impl RoutingStrategy for PrefixCacheAware {
 
 const TOKENS_PER_KV_BLOCK: f64 = 16.0;
 const QUEUE_WAIT_COST_PER_PENDING: f64 = 64.0;
+/// Head-of-Line waiting requests (`num_requests_waiting`, blocked behind an
+/// incomplete chunked prefill or KV admission) incur a steeper latency cost
+/// than requests already running in the GPU batch (TokenSpeed `scheduler.md` §1.1).
+const QUEUE_WAIT_COST_PER_WAITING: f64 = 96.0;
 const KV_USAGE_PENALTY_WEIGHT: f64 = 16.0;
+const PREEMPTION_PENALTY_WEIGHT: f64 = 32.0;
 
 pub struct PrefixAffinity;
 
@@ -221,18 +250,36 @@ impl RoutingStrategy for PrefixAffinity {
         let mut best_score = f64::NEG_INFINITY;
         let mut best_blocks = 0usize;
 
+        let tokens_per_block = ctx.tokens_per_block();
         for (i, c) in candidates.iter().enumerate() {
             let blocks = matched_blocks_for(c.endpoint.replica_id);
-            let saved_tokens = (blocks as f64) * TOKENS_PER_KV_BLOCK;
-            let pending = c.stats.map(|s| s.pending_requests).unwrap_or(0) as f64;
+            let saved_tokens = (blocks as f64) * tokens_per_block;
+            let queue_cost = match c
+                .stats
+                .and_then(|s| Some((s.waiting_requests?, s.running_requests?)))
+            {
+                Some((waiting, running)) => {
+                    QUEUE_WAIT_COST_PER_WAITING * (waiting as f64)
+                        + QUEUE_WAIT_COST_PER_PENDING * (running as f64)
+                }
+                None => {
+                    let pending = c.stats.map(|s| s.pending_requests).unwrap_or(0) as f64;
+                    QUEUE_WAIT_COST_PER_PENDING * pending
+                }
+            };
             let kv_usage = c
                 .stats
                 .and_then(|s| s.kv_cache_usage)
                 .unwrap_or(0.0)
                 .clamp(0.0, 1.0);
-            let score = saved_tokens
-                - QUEUE_WAIT_COST_PER_PENDING * pending
-                - KV_USAGE_PENALTY_WEIGHT * kv_usage;
+            let preemption_penalty =
+                if c.stats.and_then(|s| s.num_preemptions_total).unwrap_or(0) > 0 {
+                    PREEMPTION_PENALTY_WEIGHT
+                } else {
+                    0.0
+                };
+            let score =
+                saved_tokens - queue_cost - KV_USAGE_PENALTY_WEIGHT * kv_usage - preemption_penalty;
             // Tie-break: higher score > deeper matched blocks > primary prefix_owner > lower index
             let is_better = if (score - best_score).abs() > 1e-9 {
                 score > best_score
@@ -314,9 +361,8 @@ mod tests {
             last_updated_ms: 0,
             pending_requests: pending,
             prefix_cache_hit_rate: prefix_hit,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: kv_usage,
+            ..Default::default()
         }
     }
 
@@ -504,6 +550,7 @@ mod tests {
         let ctx_short = SelectionCtx {
             prefix_owner: Some(0),
             prefix_matches: Some(&short_matches),
+            block_size: 16,
         };
         assert_eq!(
             PrefixAffinity
@@ -519,12 +566,93 @@ mod tests {
         let ctx_deep = SelectionCtx {
             prefix_owner: Some(0),
             prefix_matches: Some(&deep_matches),
+            block_size: 16,
         };
         assert_eq!(
             PrefixAffinity
                 .select(&ctx_deep, &candidates)
                 .map(|s| (s.index, s.fallback_reason)),
             Some((0, None))
+        );
+
+        // With 64-token blocks (e.g. MLA / TokenSpeed prefix_granularity = 64),
+        // 4 matched blocks = 256 saved tokens > 3 pending requests (cost = 192),
+        // whereas at 16-token blocks 4 blocks = 64 tokens < 192 would have spilled.
+        let mut mla_matches = std::collections::HashMap::new();
+        mla_matches.insert(0u32, 4usize);
+        let ctx_mla = SelectionCtx {
+            prefix_owner: Some(0),
+            prefix_matches: Some(&mla_matches),
+            block_size: 64,
+        };
+        assert_eq!(
+            PrefixAffinity
+                .select(&ctx_mla, &candidates)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((0, None))
+        );
+    }
+
+    #[test]
+    fn test_waiting_vs_running_and_preemption_penalties() {
+        let ep0 = make_ep("m", 0);
+        let ep1 = make_ep("m", 1);
+
+        // Both replicas have pending_requests = 2, but Replica 0 has 2 waiting
+        // (HoL blocked behind chunked prefill), while Replica 1 has 0 waiting
+        // and 2 running in batch. LeastPending must prefer Replica 1.
+        let mut s0 = make_stats("m", 0, 2, Some(0.3), None);
+        s0.waiting_requests = Some(2);
+        s0.running_requests = Some(0);
+
+        let mut s1 = make_stats("m", 1, 2, Some(0.3), None);
+        s1.waiting_requests = Some(0);
+        s1.running_requests = Some(2);
+
+        let candidates = vec![
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
+        ];
+        assert_eq!(
+            LeastPending
+                .select(&SelectionCtx::none(), &candidates)
+                .map(|s| s.index),
+            Some(1)
+        );
+
+        // Under PrefixAffinity, if both hold 4 blocks (64 tokens), Replica 1
+        // (running batch, lower queue cost and 0 preemptions) beats Replica 0
+        // (HoL waiting queue + active preemptions).
+        s0.num_preemptions_total = Some(2);
+        let candidates_aff = vec![
+            Candidate {
+                endpoint: &ep0,
+                stats: Some(&s0),
+            },
+            Candidate {
+                endpoint: &ep1,
+                stats: Some(&s1),
+            },
+        ];
+        let mut both_matches = std::collections::HashMap::new();
+        both_matches.insert(0u32, 4usize);
+        both_matches.insert(1u32, 4usize);
+        let ctx_both = SelectionCtx {
+            prefix_owner: Some(0),
+            prefix_matches: Some(&both_matches),
+            block_size: 16,
+        };
+        assert_eq!(
+            PrefixAffinity
+                .select(&ctx_both, &candidates_aff)
+                .map(|s| (s.index, s.fallback_reason)),
+            Some((1, None))
         );
     }
 }

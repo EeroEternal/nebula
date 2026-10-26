@@ -113,6 +113,15 @@ pub fn build_capacity_snapshot(
                 ));
             }
         }
+        let preemptions_total: u64 = model_stats
+            .iter()
+            .filter_map(|s| s.num_preemptions_total)
+            .sum();
+        if preemptions_total > 0 {
+            hints.push(format!(
+                "kv_preemptions_detected: preemptions_total={preemptions_total} — Decode KV retraction/preemption active; consider adding replicas or lowering max_num_seqs"
+            ));
+        }
         let is_pd_split = matches!(dep.topology, Some(DeploymentTopology::PdSplit))
             || eps.iter().any(|e| e.role != ReplicaRole::Mixed);
         if is_pd_split {
@@ -308,10 +317,9 @@ mod tests {
             replica_id: 1,
             last_updated_ms: 1,
             pending_requests: 12,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.9),
+            num_preemptions_total: Some(3),
+            ..Default::default()
         };
         let snap = build_capacity_snapshot(
             &[dep("m1", 1)],
@@ -331,6 +339,10 @@ mod tests {
             .hints
             .iter()
             .any(|h| h.starts_with("avg_kv_usage=")));
+        assert!(snap.models[0]
+            .hints
+            .iter()
+            .any(|h| h.starts_with("kv_preemptions_detected: preemptions_total=3")));
     }
 
     #[test]
@@ -488,20 +500,16 @@ mod tests {
             replica_id: 0,
             last_updated_ms: 1,
             pending_requests: 6,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.30),
+            ..Default::default()
         };
         let s1 = EndpointStats {
             model_uid: "m1".into(),
             replica_id: 1,
             last_updated_ms: 1,
             pending_requests: 1,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.90),
+            ..Default::default()
         };
         let snap = build_capacity_snapshot(&[d], &[ep0, ep1], &[s0, s1], &[], 4, 2, 10);
         assert!(snap.models[0]

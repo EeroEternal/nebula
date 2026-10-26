@@ -17,6 +17,7 @@ pub fn build_engine_extra_args(
     Ok(match engine.as_str() {
         "vllm" => build_vllm_extra_args(config),
         "sglang" => build_sglang_extra_args(config),
+        "tokenspeed" => build_tokenspeed_extra_args(config),
         other => {
             return Err(format!(
                 "no CLI encoder for engine_type '{other}' (resolved from {:?})",
@@ -34,6 +35,7 @@ pub fn build_engine_extra_args_lenient(
     let engine = resolve_engine_type(engine_type);
     match engine.as_str() {
         "sglang" => build_sglang_extra_args(config),
+        "tokenspeed" => build_tokenspeed_extra_args(config),
         _ => build_vllm_extra_args(config),
     }
 }
@@ -167,6 +169,65 @@ fn build_sglang_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
     }
     if cfg.enable_prefix_caching == Some(false) {
         args.push("--disable-radix-cache".to_string());
+    }
+    if let Some(spec) = cfg.speculative_config.as_ref() {
+        if let Some(algo) = spec.method.and_then(|m| m.as_sglang_algorithm()) {
+            args.push("--speculative-algorithm".to_string());
+            args.push(algo.to_string());
+        }
+        if let Some(ref draft) = spec.draft_model {
+            args.push("--speculative-draft-model-path".to_string());
+            args.push(draft.clone());
+        }
+        if let Some(k) = spec.num_speculative_tokens {
+            args.push("--speculative-num-draft-tokens".to_string());
+            args.push(k.to_string());
+        }
+    }
+
+    if args.is_empty() {
+        None
+    } else {
+        Some(args)
+    }
+}
+
+fn build_tokenspeed_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+
+    if let Some(tp) = cfg.tensor_parallel_size {
+        args.push("--tensor-parallel-size".to_string());
+        args.push(tp.to_string());
+    }
+    if let Some(util) = cfg.gpu_memory_utilization {
+        args.push("--gpu-memory-utilization".to_string());
+        args.push(util.to_string());
+    }
+    if let Some(max_len) = cfg.max_model_len {
+        args.push("--max-model-len".to_string());
+        args.push(max_len.to_string());
+    }
+    if let Some(name) = cfg.served_model_name.as_deref() {
+        args.push("--served-model-name".to_string());
+        args.push(name.to_string());
+    }
+    if let Some(dtype) = cfg.kv_cache_dtype.as_deref() {
+        args.push("--kv-cache-dtype".to_string());
+        args.push(dtype.to_string());
+    }
+    if cfg.trust_remote_code == Some(true) {
+        args.push("--trust-remote-code".to_string());
+    }
+    if let Some(block) = cfg.block_size {
+        args.push("--prefix-granularity".to_string());
+        args.push(block.to_string());
+    }
+    if let Some(mode) = cfg.tokenizer_mode.as_deref() {
+        args.push("--tokenizer-mode".to_string());
+        args.push(mode.to_string());
+    }
+    if cfg.enable_prefix_caching == Some(true) {
+        args.push("--enable-prefix-caching".to_string());
     }
     if let Some(spec) = cfg.speculative_config.as_ref() {
         if let Some(algo) = spec.method.and_then(|m| m.as_sglang_algorithm()) {
@@ -357,5 +418,45 @@ mod tests {
             .windows(2)
             .any(|w| w[0] == "--speculative-num-draft-tokens" && w[1] == "8"));
         assert!(!sg_args.iter().any(|a| a == "--prompt-lookup-max"));
+    }
+
+    #[test]
+    fn tokenspeed_uses_native_server_args_flags() {
+        let cfg = ModelConfig {
+            kv_cache_dtype: Some("fp8".into()),
+            trust_remote_code: Some(true),
+            block_size: Some(64),
+            enable_prefix_caching: Some(true),
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Mtp),
+                draft_model: None,
+                num_speculative_tokens: Some(3),
+                prompt_lookup_max: None,
+                prompt_lookup_min: None,
+            }),
+            ..sample_cfg()
+        };
+        let args = build_engine_extra_args(Some("tokenspeed"), &cfg)
+            .unwrap()
+            .unwrap();
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--tensor-parallel-size" && w[1] == "2"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--gpu-memory-utilization" && w[1] == "0.85"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--max-model-len" && w[1] == "8192"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--prefix-granularity" && w[1] == "64"));
+        assert!(args.iter().any(|a| a == "--enable-prefix-caching"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--speculative-algorithm" && w[1] == "NEXTN"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--speculative-num-draft-tokens" && w[1] == "3"));
     }
 }

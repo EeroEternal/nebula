@@ -13,8 +13,8 @@ pub fn parse_vllm_metrics_text(
     replica_id: u32,
     last_updated_ms: u64,
 ) -> EndpointStats {
-    let mut pending_requests: u64 = 0;
-    let mut running_requests: u64 = 0;
+    let mut waiting_requests: Option<u64> = None;
+    let mut running_requests: Option<u64> = None;
     let mut kv_cache_usage: Option<f64> = None;
     let mut prefix_cache_hit_rate: Option<f64> = None;
 
@@ -38,9 +38,9 @@ pub fn parse_vllm_metrics_text(
         //   vllm_num_requests_waiting{...} 3
 
         if let Some(val) = extract_metric(line, "num_requests_waiting") {
-            pending_requests = val as u64;
+            waiting_requests = Some(val as u64);
         } else if let Some(val) = extract_metric(line, "num_requests_running") {
-            running_requests = val as u64;
+            running_requests = Some(val as u64);
         } else if let Some(val) = extract_metric(line, "kv_cache_usage_perc") {
             kv_cache_usage = Some(val);
         } else if kv_cache_usage.is_none() {
@@ -77,11 +77,14 @@ pub fn parse_vllm_metrics_text(
         model_uid: model_uid.to_string(),
         replica_id,
         last_updated_ms,
-        pending_requests: pending_requests + running_requests,
+        pending_requests: waiting_requests.unwrap_or(0) + running_requests.unwrap_or(0),
+        waiting_requests,
+        running_requests,
         prefix_cache_hit_rate,
         prompt_cache_hit_rate: None,
         kv_cache_usage,
         prefix_cache_queries_total: diag.prefix_cache_queries_total,
+        num_preemptions_total: diag.num_preemptions_total.map(|v| v as u64),
     }
 }
 
@@ -124,8 +127,8 @@ pub fn parse_sglang_metrics_text(
     replica_id: u32,
     last_updated_ms: u64,
 ) -> EndpointStats {
-    let mut pending_requests: u64 = 0;
-    let mut running_requests: u64 = 0;
+    let mut waiting_requests: Option<u64> = None;
+    let mut running_requests: Option<u64> = None;
     let mut kv_cache_usage: Option<f64> = None;
 
     for line in text.lines() {
@@ -134,9 +137,9 @@ pub fn parse_sglang_metrics_text(
         }
 
         if let Some(val) = extract_sglang_metric(line, "num_requests_waiting") {
-            pending_requests = val as u64;
+            waiting_requests = Some(val as u64);
         } else if let Some(val) = extract_sglang_metric(line, "num_requests_running") {
-            running_requests = val as u64;
+            running_requests = Some(val as u64);
         } else if let Some(val) = extract_sglang_metric(line, "token_usage") {
             kv_cache_usage = Some(val);
         } else if kv_cache_usage.is_none() {
@@ -159,16 +162,78 @@ pub fn parse_sglang_metrics_text(
         model_uid: model_uid.to_string(),
         replica_id,
         last_updated_ms,
-        pending_requests: pending_requests + running_requests,
+        pending_requests: waiting_requests.unwrap_or(0) + running_requests.unwrap_or(0),
+        waiting_requests,
+        running_requests,
         prefix_cache_hit_rate,
         prompt_cache_hit_rate: None,
         kv_cache_usage,
         prefix_cache_queries_total: diag.prefix_cache_queries_total,
+        num_preemptions_total: diag.num_preemptions_total.map(|v| v as u64),
     }
 }
 
-/// Dispatch `/metrics` parsing by engine type (`sglang` vs vLLM default), so both
-/// execution planes (node / k8s-controller) treat engines uniformly.
+/// Parse TokenSpeed `/metrics` into `EndpointStats`.
+///
+/// TokenSpeed exposes `tokenspeed:num_requests_waiting` / `num_requests_running`,
+/// `tokenspeed:kv_cache_usage_perc` (or `token_usage`), and prefix cache hit counters.
+pub fn parse_tokenspeed_metrics_text(
+    text: &str,
+    model_uid: &str,
+    replica_id: u32,
+    last_updated_ms: u64,
+) -> EndpointStats {
+    let mut waiting_requests: Option<u64> = None;
+    let mut running_requests: Option<u64> = None;
+    let mut kv_cache_usage: Option<f64> = None;
+    let mut prefix_cache_hit_rate: Option<f64> = None;
+
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(val) = extract_ns_metric(line, "tokenspeed", "num_requests_waiting") {
+            waiting_requests = Some(val as u64);
+        } else if let Some(val) = extract_ns_metric(line, "tokenspeed", "num_requests_running") {
+            running_requests = Some(val as u64);
+        } else if let Some(val) = extract_ns_metric(line, "tokenspeed", "kv_cache_usage_perc")
+            .or_else(|| extract_ns_metric(line, "tokenspeed", "token_usage"))
+        {
+            kv_cache_usage = Some(val);
+        } else if let Some(val) = extract_ns_metric(line, "tokenspeed", "prefix_cache_hit_rate") {
+            prefix_cache_hit_rate = Some(val);
+        }
+    }
+
+    let diag = parse_engine_scrape_diagnostics(Some("tokenspeed"), text);
+    if prefix_cache_hit_rate.is_none() {
+        if let (Some(hits), Some(queries)) = (
+            diag.prefix_cache_hits_total,
+            diag.prefix_cache_queries_total,
+        ) {
+            if queries > 0.0 {
+                prefix_cache_hit_rate = Some(hits / queries);
+            }
+        }
+    }
+
+    EndpointStats {
+        model_uid: model_uid.to_string(),
+        replica_id,
+        last_updated_ms,
+        pending_requests: waiting_requests.unwrap_or(0) + running_requests.unwrap_or(0),
+        waiting_requests,
+        running_requests,
+        prefix_cache_hit_rate,
+        prompt_cache_hit_rate: None,
+        kv_cache_usage,
+        prefix_cache_queries_total: diag.prefix_cache_queries_total,
+        num_preemptions_total: diag.num_preemptions_total.map(|v| v as u64),
+    }
+}
+
+/// Dispatch `/metrics` parsing by engine type (`sglang` / `tokenspeed` vs vLLM default),
+/// so both execution planes (node / k8s-controller) treat engines uniformly.
 pub fn parse_engine_metrics(
     engine_type: Option<&str>,
     text: &str,
@@ -178,39 +243,46 @@ pub fn parse_engine_metrics(
 ) -> EndpointStats {
     match engine_type.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("sglang") => parse_sglang_metrics_text(text, model_uid, replica_id, last_updated_ms),
+        Some("tokenspeed") => {
+            parse_tokenspeed_metrics_text(text, model_uid, replica_id, last_updated_ms)
+        }
         _ => parse_vllm_metrics_text(text, model_uid, replica_id, last_updated_ms),
     }
 }
 
 /// Extended engine scrape diagnostics (Batch 5.6): speculative decoding mean
 /// acceptance length ($\tau$, the true speedup metric rather than raw acceptance
-/// rate) and `prefix_cache_queries_total` for detecting silent prefix-cache
-/// disablement on hybrid-attention models (e.g. `Qwen3.8` `is_hybrid=True`).
+/// rate), `prefix_cache_queries_total` for detecting silent prefix-cache
+/// disablement on hybrid-attention models (e.g. `Qwen3.8` `is_hybrid=True`),
+/// and `num_preemptions_total` for Decode LIFO retraction / KV pressure visibility.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EngineScrapeDiagnostics {
     pub prefix_cache_queries_total: Option<f64>,
     pub prefix_cache_hits_total: Option<f64>,
     /// Mean accepted tokens per forward pass ($\tau \ge 1.0$, e.g. `1.0 + accepted / drafts`).
     pub spec_decode_mean_acceptance_length: Option<f64>,
+    /// Cumulative request preemptions / retractions (`num_preemptions_total`).
+    pub num_preemptions_total: Option<f64>,
 }
 
-/// Parse speculative-decoding $\tau$ and prefix-cache query counters from a
-/// vLLM or SGLang `/metrics` body.
+/// Parse speculative-decoding $\tau$, prefix-cache query counters, and preemption
+/// counters from a vLLM, SGLang, or TokenSpeed `/metrics` body.
 pub fn parse_engine_scrape_diagnostics(
     engine_type: Option<&str>,
     text: &str,
 ) -> EngineScrapeDiagnostics {
-    let is_sglang = matches!(
-        engine_type.map(|s| s.to_ascii_lowercase()).as_deref(),
-        Some("sglang")
-    );
-    let ns = if is_sglang { "sglang" } else { "vllm" };
+    let ns = match engine_type.map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("sglang") => "sglang",
+        Some("tokenspeed") => "tokenspeed",
+        _ => "vllm",
+    };
 
     let mut queries: Option<f64> = None;
     let mut hits: Option<f64> = None;
     let mut mean_tau: Option<f64> = None;
     let mut accepted_tokens: Option<f64> = None;
     let mut draft_rounds: Option<f64> = None;
+    let mut preemptions: Option<f64> = None;
 
     for line in text.lines() {
         if line.starts_with('#') {
@@ -231,6 +303,10 @@ pub fn parse_engine_scrape_diagnostics(
             .or_else(|| extract_ns_metric(line, ns, "spec_decode_draft_rounds_total"))
         {
             draft_rounds = Some(v);
+        } else if let Some(v) = extract_ns_metric(line, ns, "num_preemptions_total")
+            .or_else(|| extract_ns_metric(line, ns, "num_retractions_total"))
+        {
+            preemptions = Some(v);
         }
     }
 
@@ -246,6 +322,7 @@ pub fn parse_engine_scrape_diagnostics(
         prefix_cache_queries_total: queries,
         prefix_cache_hits_total: hits,
         spec_decode_mean_acceptance_length: mean_tau,
+        num_preemptions_total: preemptions,
     }
 }
 
@@ -367,6 +444,13 @@ sglang:token_usage{model=\"m\"} 0.45\n";
     fn dispatch_by_engine() {
         let v = "vllm:num_requests_waiting{} 2\n";
         let sg = "sglang:num_requests_waiting{} 5\n";
+        let ts = "\
+tokenspeed:num_requests_waiting{model=\"deepseek-r1\"} 3\n\
+tokenspeed:num_requests_running{model=\"deepseek-r1\"} 4\n\
+tokenspeed:kv_cache_usage_perc{model=\"deepseek-r1\"} 0.62\n\
+tokenspeed:prefix_cache_hits_total{model=\"deepseek-r1\"} 80\n\
+tokenspeed:prefix_cache_queries_total{model=\"deepseek-r1\"} 100\n\
+tokenspeed:num_retractions_total{model=\"deepseek-r1\"} 2\n";
         assert_eq!(
             parse_engine_metrics(Some("vllm"), v, "m", 0, 1).pending_requests,
             2
@@ -375,6 +459,12 @@ sglang:token_usage{model=\"m\"} 0.45\n";
             parse_engine_metrics(Some("sglang"), sg, "m", 0, 1).pending_requests,
             5
         );
+        let ts_stats = parse_engine_metrics(Some("tokenspeed"), ts, "m", 0, 1);
+        assert_eq!(ts_stats.pending_requests, 7);
+        assert_eq!(ts_stats.kv_cache_usage, Some(0.62));
+        assert_eq!(ts_stats.prefix_cache_hit_rate, Some(0.8));
+        let ts_diag = parse_engine_scrape_diagnostics(Some("tokenspeed"), ts);
+        assert_eq!(ts_diag.num_preemptions_total, Some(2.0));
         // Unknown engine falls back to vLLM.
         assert_eq!(parse_engine_metrics(None, v, "m", 0, 1).pending_requests, 2);
     }

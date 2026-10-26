@@ -78,3 +78,4 @@
 | [`dev/queue-admission.md`](dev/queue-admission.md) | **P0-#2 设计**：引擎级有界公平队列准入（不做 AIMD） |
 | [`dev/prefix-affinity.md`](dev/prefix-affinity.md) | **P1 多副本与前缀亲和**：ZMQ KV events、`sha256_cbor` 链式哈希、`chat_template` 对齐与 `nebula-indexd` 全局索引 |
 | [`dev/engines.md`](dev/engines.md) | 多引擎对齐（vLLM / SGLang）与 LMCache 共享 KV 选型实测 |
+| [`dev/tokenspeed.md`](dev/tokenspeed.md) | **TokenSpeed 架构剖析与 Nebula 演进对标**：Zone A/B 与 Zone C 对标、动态块粒度、远端 `/lookup` 收敛、三类注意力 KV 容量模型与持久化算子编译缓存 |

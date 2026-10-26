@@ -884,20 +884,16 @@ mod assignment_tests {
                 replica_id: 0,
                 last_updated_ms: 900_000,
                 pending_requests: 0,
-                prefix_cache_hit_rate: None,
-                prefix_cache_queries_total: None,
-                prompt_cache_hit_rate: None,
                 kv_cache_usage: Some(0.01),
+                ..Default::default()
             },
             EndpointStats {
                 model_uid: "m".into(),
                 replica_id: 1,
                 last_updated_ms: 900_000,
                 pending_requests: 0,
-                prefix_cache_hit_rate: None,
-                prefix_cache_queries_total: None,
-                prompt_cache_hit_rate: None,
                 kv_cache_usage: Some(0.01),
+                ..Default::default()
             },
         ];
         // Even if caller passes loose min=1/max=4 and cooldown has long elapsed,

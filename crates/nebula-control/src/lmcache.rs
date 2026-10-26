@@ -163,34 +163,7 @@ impl LmcacheController {
     }
 }
 
-/// Deepest `["<Backend>", n]` entry belonging to `model_uid`'s instances.
-///
-/// Instances are named `{model_uid}-{replica_id}`, so the filter is a prefix match; an
-/// unfiltered max would report another model's cache as this model's hit.
-pub fn max_matched_tokens_for_model(v: &serde_json::Value, model_uid: &str) -> u64 {
-    let prefix = format!("{model_uid}-");
-    fn scan(value: &serde_json::Value, prefix: &str) -> Option<u64> {
-        match value {
-            serde_json::Value::Array(a) => a.get(1).and_then(|n| n.as_u64()),
-            serde_json::Value::Object(inner) => {
-                // The prefix names *instances*; wrappers like `layout_info` must still be
-                // traversed, so the filter only applies on the level whose values are
-                // token lists.
-                let instance_level = inner.values().any(|v| v.is_array());
-                inner
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != "event_id")
-                    .filter(|(k, val)| {
-                        !(instance_level && val.is_array()) || k.as_str().starts_with(prefix)
-                    })
-                    .filter_map(|(_, val)| scan(val, prefix))
-                    .max()
-            }
-            _ => None,
-        }
-    }
-    scan(v, &prefix).unwrap_or(0)
-}
+pub use nebula_common::max_matched_tokens_for_model;
 
 /// Deepest `["<Backend>", n]` entry in a `/lookup` response (`layout_info` nesting).
 ///
@@ -198,18 +171,7 @@ pub fn max_matched_tokens_for_model(v: &serde_json::Value, model_uid: &str) -> u
 /// never disagree about "how much of this prefix is cached".
 #[cfg(test)]
 fn max_matched_tokens(v: &serde_json::Value) -> u64 {
-    fn scan(value: &serde_json::Value) -> Option<u64> {
-        match value {
-            serde_json::Value::Array(a) => a.get(1).and_then(|n| n.as_u64()),
-            serde_json::Value::Object(inner) => inner
-                .iter()
-                .filter(|(k, _)| k.as_str() != "event_id")
-                .filter_map(|(_, val)| scan(val))
-                .max(),
-            _ => None,
-        }
-    }
-    scan(v).unwrap_or(0)
+    nebula_common::max_matched_tokens(v).unwrap_or(0)
 }
 
 #[cfg(test)]

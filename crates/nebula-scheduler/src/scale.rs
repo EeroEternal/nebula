@@ -16,11 +16,16 @@ pub fn select_replicas_to_remove(
     }
     let remove_count = remove_count.min(assignments.len());
 
-    let pending_of = |replica_id: u32| -> u64 {
+    let load_of = |replica_id: u32| -> (u64, u64) {
         stats
             .and_then(|list| list.iter().find(|s| s.replica_id == replica_id))
-            .map(|s| s.pending_requests)
-            .unwrap_or(0)
+            .map(|s| {
+                (
+                    s.pending_requests,
+                    s.running_requests.unwrap_or(s.pending_requests),
+                )
+            })
+            .unwrap_or((0, 0))
     };
 
     let mut remaining_prefill = assignments
@@ -32,11 +37,11 @@ pub fn select_replicas_to_remove(
         .filter(|a| a.role == ReplicaRole::Decode)
         .count();
 
-    let mut scored: Vec<(u32, ReplicaRole, u64)> = assignments
+    let mut scored: Vec<(u32, ReplicaRole, (u64, u64))> = assignments
         .iter()
-        .map(|a| (a.replica_id, a.role, pending_of(a.replica_id)))
+        .map(|a| (a.replica_id, a.role, load_of(a.replica_id)))
         .collect();
-    scored.sort_by_key(|(rid, _, pending)| (*pending, *rid));
+    scored.sort_by_key(|(rid, _, (pending, running))| (*pending, *running, *rid));
 
     let mut removed = Vec::new();
     for (rid, role, _) in scored {
@@ -82,10 +87,7 @@ mod tests {
             replica_id,
             last_updated_ms: 0,
             pending_requests: pending,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
-            kv_cache_usage: None,
+            ..Default::default()
         }
     }
 

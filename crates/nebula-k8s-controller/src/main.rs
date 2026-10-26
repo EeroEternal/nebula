@@ -727,10 +727,13 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         .unwrap_or("/opt/powerllm/worker/data/models/Qwen2.5-7B-Instruct");
 
     let is_sglang = engine_type.eq_ignore_ascii_case("sglang");
+    let is_tokenspeed = engine_type.eq_ignore_ascii_case("tokenspeed");
     // Honour the resolved deployment/replica/spec pinned image
     // (compat-matrix/baked-digest discipline, review #4).
     let default_image = if is_sglang {
         "lmsysorg/sglang:latest"
+    } else if is_tokenspeed {
+        "lightseekorg/tokenspeed:latest"
     } else {
         "vllm/vllm-openai:v0.23.0"
     };
@@ -742,6 +745,19 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
             "-m",
             "sglang.launch_server",
             "--model-path",
+            "/models/weights",
+            "--served-model-name",
+            model_uid,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "43537",
+            "--trust-remote-code",
+            "--enable-metrics"
+        ])
+    } else if is_tokenspeed {
+        json!([
+            "--model",
             "/models/weights",
             "--served-model-name",
             model_uid,
@@ -771,7 +787,7 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
     // PYTHONHASHSEED is unset) and the algo pinned to sha256_cbor (default
     // "sha256" is pickle-based, not reproducible outside Python).
     let mut kv_hash_seed: Option<String> = None;
-    if !is_sglang {
+    if !is_sglang && !is_tokenspeed {
         if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
             let seed = std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string());
             if let Some(arr) = args.as_array_mut() {
@@ -833,7 +849,9 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         "env": [
             { "name": "PYTHONUNBUFFERED", "value": "1" },
             { "name": "NVIDIA_VISIBLE_DEVICES", "value": gpu_index.to_string() },
-            { "name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility" }
+            { "name": "NVIDIA_DRIVER_CAPABILITIES", "value": "compute,utility" },
+            { "name": "TRITON_CACHE_DIR", "value": "/models/weights/.cache/triton" },
+            { "name": "TORCHINDUCTOR_CACHE_DIR", "value": "/models/weights/.cache/torchinductor" }
         ],
         "ports": [{ "containerPort": 43537, "protocol": "TCP" }],
         "volumeMounts": [
@@ -855,6 +873,8 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
     if is_sglang {
         // SGLang image entrypoint is not the server; invoke the module explicitly.
         container["command"] = json!(["python3"]);
+    } else if is_tokenspeed {
+        container["command"] = json!(["tokenspeed", "serve"]);
     }
 
     let manifest = json!({

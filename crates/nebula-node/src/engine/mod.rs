@@ -1,6 +1,7 @@
 pub mod container;
 pub mod discover;
 pub mod sglang;
+pub mod tokenspeed;
 pub mod vllm;
 
 use std::path::Path;
@@ -315,6 +316,13 @@ pub fn create_engine(
             }
             Ok(Box::new(engine))
         }
+        "tokenspeed" => {
+            let mut engine = tokenspeed::TokenspeedEngine::new(args);
+            if let Some(img) = docker_image_override {
+                engine.config.docker_image = Some(img.to_string());
+            }
+            Ok(Box::new(engine))
+        }
         other => {
             // validate_engine_type should have rejected this; keep a hard error.
             anyhow::bail!(
@@ -359,6 +367,12 @@ mod create_engine_tests {
                 .unwrap()
                 .engine_type(),
             "sglang"
+        );
+        assert_eq!(
+            create_engine(&test_args(), Some("tokenspeed"), None)
+                .unwrap()
+                .engine_type(),
+            "tokenspeed"
         );
     }
 }

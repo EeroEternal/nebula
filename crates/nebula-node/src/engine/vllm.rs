@@ -357,6 +357,9 @@ impl Engine for VllmEngine {
             cmd.arg("-e")
                 .arg("TRANSFORMERS_CACHE=/model/.cache/huggingface");
             cmd.arg("-e").arg("XDG_CACHE_HOME=/model/.cache");
+            cmd.arg("-e").arg("TRITON_CACHE_DIR=/model/.cache/triton");
+            cmd.arg("-e")
+                .arg("TORCHINDUCTOR_CACHE_DIR=/model/.cache/torchinductor");
             cmd.arg("-e").arg("HF_HUB_DISABLE_XET=1");
 
             if let Some(seed) = kv_hash_seed.as_deref() {
