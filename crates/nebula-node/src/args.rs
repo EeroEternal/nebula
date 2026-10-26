@@ -104,6 +104,43 @@ pub struct Args {
     #[arg(long)]
     pub sglang_max_running_requests: Option<u32>,
 
+    // ---- TokenSpeed engine parameters ----
+    /// TokenSpeed launch command (used in local binary and container modes).
+    #[arg(long, default_value = "tokenspeed serve")]
+    pub tokenspeed_bin: String,
+
+    /// Working directory for TokenSpeed local binary mode.
+    #[arg(long, default_value = "/home/ai")]
+    pub tokenspeed_cwd: String,
+
+    /// Host for TokenSpeed to bind to.
+    #[arg(long, default_value = "0.0.0.0")]
+    pub tokenspeed_host: String,
+
+    /// If set, launch TokenSpeed via `docker run` using this image.
+    #[arg(long)]
+    pub tokenspeed_docker_image: Option<String>,
+
+    /// Host path to mount as /model inside the TokenSpeed container.
+    #[arg(long, default_value = "/DATA/Model")]
+    pub tokenspeed_model_dir: String,
+
+    /// Tensor parallel size for TokenSpeed.
+    #[arg(long)]
+    pub tokenspeed_tensor_parallel_size: Option<u32>,
+
+    /// Data parallel size for TokenSpeed.
+    #[arg(long)]
+    pub tokenspeed_data_parallel_size: Option<u32>,
+
+    /// GPU memory utilization for TokenSpeed.
+    #[arg(long)]
+    pub tokenspeed_gpu_memory_utilization: Option<f32>,
+
+    /// Max number of concurrent sequences for TokenSpeed.
+    #[arg(long)]
+    pub tokenspeed_max_num_seqs: Option<u32>,
+
     /// Port for the Node HTTP API (containers, images, etc.).
     #[arg(long, default_value_t = 9090)]
     pub api_port: u16,

@@ -327,6 +327,7 @@ export function ImagesView() {
                         options={[
                             { value: "vllm", label: "vLLM" },
                             { value: "sglang", label: "SGLang" },
+                            { value: "tokenspeed", label: "TokenSpeed" },
                             { value: "xllm", label: "xLLM" },
                         ]}
                     />

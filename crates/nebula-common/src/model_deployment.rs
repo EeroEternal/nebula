@@ -279,6 +279,57 @@ pub fn lmcache_instance_id(model_uid: &str, replica_id: u32) -> String {
     format!("{model_uid}-{replica_id}")
 }
 
+/// Deepest `["<Backend>", n]` entry belonging to `model_uid`'s instances in a
+/// `lmcache_controller` `/lookup` response.
+///
+/// Instances registered via [`lmcache_instance_id`] are named `{model_uid}-{replica_id}`,
+/// so filtering by `{model_uid}-` (or exact `model_uid`) prevents a shared
+/// `LMCacheController` from reporting another model's cached prefix as a hit for
+/// `model_uid`. Shared by both `nebula-control` and `nebula-router`.
+pub fn max_matched_tokens_for_model(v: &serde_json::Value, model_uid: &str) -> u64 {
+    let prefix = format!("{model_uid}-");
+    fn scan(value: &serde_json::Value, model_uid: &str, prefix: &str) -> Option<u64> {
+        match value {
+            serde_json::Value::Array(a) => a.get(1).and_then(|n| n.as_u64()),
+            serde_json::Value::Object(inner) => {
+                // The prefix names *instances*; wrappers like `layout_info` must still be
+                // traversed, so the filter only applies on the level whose values are
+                // token lists.
+                let instance_level = inner.values().any(|v| v.is_array());
+                inner
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "event_id")
+                    .filter(|(k, val)| {
+                        !(instance_level && val.is_array())
+                            || k.as_str() == model_uid
+                            || k.as_str().starts_with(prefix)
+                    })
+                    .filter_map(|(_, val)| scan(val, model_uid, prefix))
+                    .max()
+            }
+            _ => None,
+        }
+    }
+    scan(v, model_uid, &prefix).unwrap_or(0)
+}
+
+/// Deepest `["<Backend>", n]` entry across all instances in a `/lookup` response
+/// (`layout_info` nested or flat shape). Returns `None` when no positive match exists.
+pub fn max_matched_tokens(v: &serde_json::Value) -> Option<u64> {
+    fn scan(value: &serde_json::Value) -> Option<u64> {
+        match value {
+            serde_json::Value::Array(a) => a.get(1).and_then(|n| n.as_u64()).filter(|&n| n > 0),
+            serde_json::Value::Object(inner) => inner
+                .iter()
+                .filter(|(k, _)| k.as_str() != "event_id")
+                .filter_map(|(_, val)| scan(val))
+                .max(),
+            _ => None,
+        }
+    }
+    scan(v)
+}
+
 /// LMCache controller registration env for a pd_split replica.
 ///
 /// The controller (`lmcache_controller`, ports 9000/9001) answers the
@@ -558,13 +609,18 @@ pub fn validate_pd_split_with_context(
 
     match topology {
         DeploymentTopology::Replicated => {
-            // Rule 4: replicated + explicit roles = reject
+            // Rule 4: replicated + explicit roles or kv_sharing = reject
             if let Some(specs) = deployment.replica_specs.as_ref() {
                 if specs.iter().any(|s| s.role.is_some()) {
                     return Err(
                         "replica role is only valid with topology=pd_split; remove role fields or set topology".into(),
                     );
                 }
+            }
+            if deployment.kv_sharing.is_some() {
+                return Err(
+                    "kv_sharing is only valid with topology=pd_split; remove kv_sharing or set topology=pd_split".into(),
+                );
             }
             Ok(())
         }
@@ -997,6 +1053,36 @@ mod tests {
             ..pd_dep()
         };
         assert!(validate_pd_split(&d, Some("vllm")).is_ok());
+    }
+
+    #[test]
+    fn replicated_rejects_kv_sharing_without_pd_split_topology() {
+        let d = ModelDeployment {
+            topology: Some(DeploymentTopology::Replicated),
+            replica_specs: None,
+            ..pd_dep()
+        };
+        let err = validate_pd_split(&d, Some("vllm")).unwrap_err();
+        assert!(
+            err.contains("kv_sharing is only valid with topology=pd_split"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn lookup_max_matched_tokens_filters_by_model_prefix() {
+        let v = serde_json::json!({
+            "event_id": "Lookup99",
+            "layout_info": {
+                "qwen-0": ["LocalCPUBackend", 256],
+                "qwen-1": ["LocalCPUBackend", 768],
+                "llama-0": ["LocalCPUBackend", 4096]
+            }
+        });
+        assert_eq!(max_matched_tokens_for_model(&v, "qwen"), 768);
+        assert_eq!(max_matched_tokens_for_model(&v, "llama"), 4096);
+        assert_eq!(max_matched_tokens_for_model(&v, "deepseek"), 0);
+        assert_eq!(max_matched_tokens(&v), Some(4096));
     }
 
     #[test]

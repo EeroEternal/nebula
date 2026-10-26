@@ -26,7 +26,7 @@ pub enum ModelArchitecture {
 /// Static/derived model traits used as selection input.
 ///
 /// etcd (optional): `/model_profiles/{profile_id}`
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ModelProfile {
     pub profile_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41,6 +41,19 @@ pub struct ModelProfile {
     pub quantization: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
+    /// Sliding-window attention bound `W` (`kSlidingWindow` in TokenSpeed CapacityModel).
+    /// When set, attention KV footprint per request caps at `min(context_len, W)` tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sliding_window_tokens: Option<u32>,
+    /// Fraction `[0.0, 1.0]` of layers using recurrent/linear state (`kState`, e.g.
+    /// Mamba2 or Qwen3.5 Gated DeltaNet), which occupy a constant 2-slot state checkpoint
+    /// per active request regardless of sequence length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linear_attention_layer_ratio: Option<f64>,
+    /// DeepSeek MLA compressed KV latent rank (e.g. 512), reducing per-token KV footprint
+    /// relative to uncompressed GQA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_lora_rank: Option<u32>,
     #[serde(default)]
     pub updated_at_ms: u64,
 }
@@ -209,6 +222,55 @@ pub const ROOFLINE_MEMORY_BOUND_4BIT_REASON: &str =
 pub const ROOFLINE_NATIVE_W4A4_REASON: &str =
     "native W4A4/NVFP4 hardware path preserves 4-bit speedup without register unpack penalty";
 
+/// Estimate total KV-cache / recurrent-state working-set VRAM (MB) for `concurrency`
+/// active sequences at `context_len` tokens, modeling the three attention cache kinds
+/// (`kFull`, `kSlidingWindow`, and 2-slot `kState` checkpoint) plus MLA latent rank compression.
+pub fn estimate_kv_cache_vram_mb(
+    profile: &ModelProfile,
+    concurrency: u32,
+    context_len: u32,
+) -> f64 {
+    if concurrency == 0 || context_len == 0 {
+        return 0.0;
+    }
+    let params_b = profile.parameter_billions.unwrap_or(7.0).max(0.5);
+    let quant_lower = profile
+        .quantization
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let dtype_factor = if quant_lower.contains("fp8") || quant_lower.contains("int8") {
+        0.5
+    } else {
+        1.0
+    };
+    let mla_factor = profile
+        .kv_lora_rank
+        .filter(|&r| r > 0)
+        .map(|r| (r as f64 / 2048.0).clamp(0.15, 1.0))
+        .unwrap_or(1.0);
+    // Empirical GQA BF16 baseline: ~0.018 MB per token per 1B parameters.
+    let mb_per_token = 0.018 * params_b * dtype_factor * mla_factor;
+
+    let linear_ratio = profile
+        .linear_attention_layer_ratio
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    let attn_ratio = 1.0 - linear_ratio;
+
+    let effective_attn_tokens = match profile.sliding_window_tokens.filter(|&w| w > 0) {
+        Some(w) => context_len.min(w) as f64,
+        None => context_len as f64,
+    };
+    // Recurrent state layers (`kState`) hold a fixed 2-slot state checkpoint
+    // (~128 token-equivalents per sequence) independent of sequence length.
+    const STATE_CHECKPOINT_TOKEN_EQUIV: f64 = 128.0;
+
+    let per_request_mb = mb_per_token
+        * (attn_ratio * effective_attn_tokens + linear_ratio * STATE_CHECKPOINT_TOKEN_EQUIV);
+    per_request_mb * (concurrency as f64)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuantBucket {
     FourBit,
@@ -374,6 +436,17 @@ fn build_score_breakdown(
 
 fn annotate_scores(req: &SelectionRequest, candidates: &mut [BackendCandidate]) {
     let pref = req.constraints.preference;
+    let has_hybrid_kv_geometry = req.model.sliding_window_tokens.is_some()
+        || req.model.linear_attention_layer_ratio.is_some()
+        || req.model.kv_lora_rank.is_some();
+    let kv_reason = if has_hybrid_kv_geometry {
+        let conc = req.workload.concurrency.unwrap_or(1).max(1);
+        let ctx = req.model.context_length.unwrap_or(4096).max(1);
+        let vram_mb = estimate_kv_cache_vram_mb(&req.model, conc, ctx);
+        Some(format!("estimated_kv_vram_mb={vram_mb:.1}"))
+    } else {
+        None
+    };
     for c in candidates.iter_mut() {
         let (roofline_bonus, roofline_reason) = roofline_quantization_adjustment(req, c);
         let score = score_candidate(pref, c, roofline_bonus);
@@ -386,6 +459,11 @@ fn annotate_scores(req: &SelectionRequest, candidates: &mut [BackendCandidate]) 
         if let Some(reason) = roofline_reason {
             if !c.reasons.iter().any(|r| r == reason) {
                 c.reasons.push(reason.to_string());
+            }
+        }
+        if let Some(ref kv_r) = kv_reason {
+            if !c.reasons.iter().any(|r| r == kv_r) {
+                c.reasons.push(kv_r.clone());
             }
         }
     }
@@ -614,6 +692,7 @@ mod tests {
                 quantization: None,
                 context_length: Some(4096),
                 updated_at_ms: 1,
+                ..Default::default()
             },
             workload: WorkloadHint {
                 workload_id: Some("short-chat-v1".into()),
@@ -642,6 +721,7 @@ mod tests {
                 quantization: None,
                 context_length: Some(4096),
                 updated_at_ms: 1,
+                ..Default::default()
             },
             workload: WorkloadHint {
                 workload_id: Some("short-chat-v1".into()),
@@ -713,6 +793,7 @@ mod tests {
                     quantization: None,
                     context_length: None,
                     updated_at_ms: 0,
+                    ..Default::default()
                 },
                 workload: WorkloadHint {
                     workload_id: None,
@@ -816,6 +897,7 @@ mod tests {
             quantization: None,
             context_length: Some(32768),
             updated_at_ms: 1,
+            ..Default::default()
         };
 
         // Concurrency <= 4 (memory-bound): 4-bit gets +15 bonus and ranks first
@@ -871,5 +953,50 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r == ROOFLINE_COMPUTE_BOUND_FP8_REASON));
+    }
+
+    #[test]
+    fn three_kind_attention_kv_capacity_model_scales_full_sliding_state_and_mla() {
+        let full_attn = ModelProfile {
+            profile_id: "full".into(),
+            model_name: "Qwen/Qwen2.5-32B".into(),
+            parameter_billions: Some(32.0),
+            context_length: Some(32768),
+            ..Default::default()
+        };
+        let full_vram = estimate_kv_cache_vram_mb(&full_attn, 8, 32768);
+
+        // Sliding window (W = 4096): caps attention KV at 4096 tokens instead of 32768 (8x reduction)
+        let sliding = ModelProfile {
+            sliding_window_tokens: Some(4096),
+            ..full_attn.clone()
+        };
+        let sliding_vram = estimate_kv_cache_vram_mb(&sliding, 8, 32768);
+        assert!(
+            (sliding_vram * 8.0 - full_vram).abs() < 1e-3,
+            "sliding window W=4096 at ctx=32768 should be 1/8 of full attention: {sliding_vram} vs {full_vram}"
+        );
+
+        // Hybrid 75% linear/recurrent state layers (Qwen3.5 Gated DeltaNet style: kState 2-slot checkpoint)
+        let hybrid_state = ModelProfile {
+            linear_attention_layer_ratio: Some(0.75),
+            ..full_attn.clone()
+        };
+        let hybrid_vram = estimate_kv_cache_vram_mb(&hybrid_state, 8, 32768);
+        assert!(
+            hybrid_vram < full_vram * 0.30,
+            "75% kState layers with constant 2-slot state should cut long-context KV VRAM by >70%: {hybrid_vram} vs {full_vram}"
+        );
+
+        // MLA compressed latent KV rank (e.g. rank 512)
+        let mla = ModelProfile {
+            kv_lora_rank: Some(512),
+            ..full_attn
+        };
+        let mla_vram = estimate_kv_cache_vram_mb(&mla, 8, 32768);
+        assert!(
+            (mla_vram * 4.0 - full_vram).abs() < 1e-3,
+            "MLA rank=512 should compress KV VRAM by 4x relative to rank=2048 baseline"
+        );
     }
 }

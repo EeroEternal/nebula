@@ -28,6 +28,7 @@ pub struct PromptHasher {
     cache: DashMap<String, Option<Arc<Tokenizer>>>,
     templates: DashMap<String, Option<Arc<String>>>,
     block_size: usize,
+    model_block_sizes: DashMap<String, usize>,
 }
 
 /// jinja2's `tojson`, which is what every HuggingFace chat template means by `| tojson`.
@@ -230,7 +231,31 @@ impl PromptHasher {
             cache: DashMap::new(),
             templates: DashMap::new(),
             block_size: DEFAULT_BLOCK_SIZE,
+            model_block_sizes: DashMap::new(),
         }
+    }
+
+    /// Register a model-specific prefix block granularity (e.g., 16 for standard
+    /// GQA, 64 for MLA / TokenSpeed Radix prefix granularity). Values of `0` are
+    /// ignored so division/chunking is always well-defined.
+    pub fn set_model_block_size(&self, model_uid: &str, block_size: usize) {
+        if block_size > 0 {
+            self.model_block_sizes
+                .insert(model_uid.to_string(), block_size);
+        }
+    }
+
+    pub fn clear_model_block_size(&self, model_uid: &str) {
+        self.model_block_sizes.remove(model_uid);
+    }
+
+    /// Effective prefix block size for `model_uid` (defaults to `DEFAULT_BLOCK_SIZE` = 16).
+    pub fn block_size_for(&self, model_uid: &str) -> usize {
+        self.model_block_sizes
+            .get(model_uid)
+            .map(|e| *e.value())
+            .filter(|&bs| bs > 0)
+            .unwrap_or(self.block_size)
     }
 
     fn candidate_paths(
@@ -306,9 +331,16 @@ impl PromptHasher {
         loaded
     }
 
-    /// Chain vLLM-compatible block hashes from already-tokenized `ids`.
+    /// Chain vLLM-compatible block hashes from already-tokenized `ids` using
+    /// the default block size (`DEFAULT_BLOCK_SIZE`).
     pub fn hashes_from_ids(&self, ids: &[u32]) -> Vec<[u8; 32]> {
         compute_block_hashes(ids, self.block_size)
+    }
+
+    /// Chain block hashes from `ids` using `model_uid`'s configured block size
+    /// (`block_size_for(model_uid)`, defaulting to 16).
+    pub fn hashes_from_ids_for_model(&self, model_uid: &str, ids: &[u32]) -> Vec<[u8; 32]> {
+        compute_block_hashes(ids, self.block_size_for(model_uid))
     }
 
     /// Tokenize `prompt` and chain its block hashes. `None` when no tokenizer
@@ -321,7 +353,7 @@ impl PromptHasher {
         prompt: &str,
     ) -> Option<Vec<[u8; 32]>> {
         let ids = self.prompt_ids(model_uid, model_name, prompt)?;
-        Some(self.hashes_from_ids(&ids))
+        Some(self.hashes_from_ids_for_model(model_uid, &ids))
     }
 
     /// Token ids for the raw prompt (used by the LMCache controller lookup).
@@ -500,10 +532,28 @@ mod tests {
             cache: DashMap::new(),
             templates: DashMap::new(),
             block_size: 16,
+            model_block_sizes: DashMap::new(),
         };
         assert!(h.prompt_hashes("m", Some("org/model"), "hello").is_none());
         assert!(h
             .chat_hashes("m", None, &serde_json::json!({"messages": []}))
             .is_none());
+    }
+
+    #[test]
+    fn per_model_block_size_adjusts_hash_granularity() {
+        let h = PromptHasher::from_env();
+        let ids: Vec<u32> = (0..128).collect();
+        // Default 16 tokens/block -> 8 blocks
+        assert_eq!(h.block_size_for("deepseek-v3"), 16);
+        assert_eq!(h.hashes_from_ids_for_model("deepseek-v3", &ids).len(), 8);
+
+        // Configure 64 tokens/block (MLA / TokenSpeed prefix_granularity) -> 2 blocks
+        h.set_model_block_size("deepseek-v3", 64);
+        assert_eq!(h.block_size_for("deepseek-v3"), 64);
+        assert_eq!(h.hashes_from_ids_for_model("deepseek-v3", &ids).len(), 2);
+
+        h.clear_model_block_size("deepseek-v3");
+        assert_eq!(h.block_size_for("deepseek-v3"), 16);
     }
 }

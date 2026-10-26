@@ -4,8 +4,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use nebula_common::{
-    EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext, InferenceHint, ModelSpec,
-    ReplicaRole,
+    max_matched_tokens_for_model, EndpointInfo, EndpointStats, EndpointStatus, ExecutionContext,
+    InferenceHint, ModelSpec, ReplicaRole,
 };
 
 pub mod first_byte;
@@ -21,24 +21,33 @@ use strategy::{Candidate, LeastPending, RoutingStrategy, SelectionCtx};
 /// admission control kicks in and returns Overloaded.
 const KV_CACHE_OVERLOAD_THRESHOLD: f64 = 0.95;
 
-/// Extract the largest matched-prefix length from an LMCache controller
-/// `/lookup` response. Shapes seen in the wild (both mean "n tokens cached"):
-///   {"event_id": "...", "lmcache_default_instance": ["LocalCPUBackend", 512]}
-///   {"event_id": "...", "layout_info": {"<instance>": ["LocalCPUBackend", 569]}}
-fn max_matched_tokens(v: &serde_json::Value) -> Option<u64> {
-    fn scan(m: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
-        m.iter()
-            .filter(|(k, _)| k.as_str() != "event_id")
-            .filter_map(|(_, val)| match val {
-                // instance -> ["LocalCPUBackend", n]
-                serde_json::Value::Array(a) => a.get(1).and_then(|n| n.as_u64()),
-                // layout_info -> {instance -> ["LocalCPUBackend", n]}
-                serde_json::Value::Object(inner) => scan(inner),
-                _ => None,
-            })
-            .max()
+/// Extract matched tokens for `model_uid` from an LMCache controller `/lookup`
+/// response, falling back to `fallback_instance_id` (such as
+/// `"lmcache_default_instance"`) only when the response contains that exact
+/// single-instance key and no `{model_uid}-*` instance matched.
+///
+/// shortcut: the fallback instance carries no model tag, so a controller run
+/// with one shared default instance cannot isolate models; only `{model_uid}-*`
+/// instances (`lmcache_instance_id`) are per-model. Upgrade when LMCache's
+/// `/lookup` reports which model an instance holds.
+fn lookup_matched_tokens_for_router(
+    v: &serde_json::Value,
+    model_uid: &str,
+    fallback_instance_id: Option<&str>,
+) -> u64 {
+    let by_model = max_matched_tokens_for_model(v, model_uid);
+    if by_model > 0 {
+        return by_model;
     }
-    v.as_object().and_then(scan)
+    if let Some(inst) = fallback_instance_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if inst != model_uid {
+            return max_matched_tokens_for_model(v, inst);
+        }
+    }
+    0
 }
 
 /// pd_split controller lookups are cached briefly (prefix warmth changes on
@@ -393,8 +402,11 @@ pub struct Router {
     /// `short_bypass` | `prefill_spillover`. Without the node/controller scrape these
     /// decisions are impossible, and the degradation used to be invisible.
     stage_stats_missing: DashMap<&'static str, AtomicU64>,
-    /// pd_split controller warm-lookup cache: (model, sha256(token_ids)) → (warm, ts).
-    pd_warm_cache: DashMap<(String, [u8; 32]), (bool, u64)>,
+    /// pd_split controller warm-lookup cache: (model, sha256(token_ids)) → (matched_tokens, ts).
+    pd_warm_cache: DashMap<(String, [u8; 32]), (u64, u64)>,
+    /// pd_split remote matched token depth keyed by (model_uid, first_block_hash) → (matched_tokens, ts),
+    /// used to credit `saved_prefill_tokens` when `LMCacheConnectorV1` disables local ZMQ kv-events.
+    pd_warm_tokens_by_prefix: DashMap<(String, [u8; 32]), (u64, u64)>,
     pd_lookup_total: AtomicU64,
     /// Set once when the cold-streak alarm has been logged for this process.
     pd_cold_streak_warned: std::sync::atomic::AtomicBool,
@@ -506,6 +518,7 @@ impl Router {
             pd_bypass_tokens,
             pd_short_bypass_total: AtomicU64::new(0),
             pd_warm_cache: DashMap::new(),
+            pd_warm_tokens_by_prefix: DashMap::new(),
             pd_lookup_total: AtomicU64::new(0),
             pd_cold_streak_warned: std::sync::atomic::AtomicBool::new(false),
             pd_lookup_warm_total: AtomicU64::new(0),
@@ -1037,13 +1050,23 @@ impl Router {
     /// bounded by `PD_WARM_CACHE_MAX_ENTRIES`; any error degrades to "cold" so
     /// routing never blocks on the controller.
     pub async fn controller_warm(&self, model_uid: &str, token_ids: &[u32]) -> bool {
+        self.controller_warm_tokens(model_uid, token_ids).await > 0
+    }
+
+    /// Ask the LMCache controller how many prefix tokens of `token_ids` are
+    /// cached for `model_uid`'s instances (`{model_uid}-*`).
+    pub async fn controller_warm_tokens(&self, model_uid: &str, token_ids: &[u32]) -> u64 {
         let bypass_tokens = self.pd_bypass_tokens;
         if token_ids.is_empty() || (bypass_tokens > 0 && token_ids.len() < bypass_tokens) {
-            return false;
+            return 0;
         }
         let Ok(url) = std::env::var("NEBULA_PD_SPLIT_LOOKUP_URL") else {
-            return false;
+            return 0;
         };
+        // TokenSpeed `scheduler.md` §1 (`prefix_replay_tokens >= 1`): at least the
+        // final prompt token must always be recomputed to produce logits for the
+        // first output token, so a prompt of length L can save at most L - 1 tokens.
+        let max_replayable = token_ids.len().saturating_sub(1) as u64;
         let cache_key = warm_cache_key(model_uid, token_ids);
         {
             let now = now_ms();
@@ -1051,18 +1074,21 @@ impl Router {
                 now.saturating_sub(*ts) >= PD_WARM_CACHE_MS
             });
             if let Some(entry) = self.pd_warm_cache.get(&cache_key) {
-                let (warm, ts) = *entry.value();
+                let (cached_matched, ts) = *entry.value();
                 if now.saturating_sub(ts) < PD_WARM_CACHE_MS {
-                    return warm;
+                    return cached_matched.min(max_replayable);
                 }
             }
         }
+        let fallback_inst = std::env::var("NEBULA_PD_SPLIT_INSTANCE_ID").ok();
+        let instance_id = fallback_inst
+            .clone()
+            .unwrap_or_else(|| "lmcache_default_instance".to_string());
         let body = serde_json::json!({
             "tokens": token_ids,
-            "instance_id": std::env::var("NEBULA_PD_SPLIT_INSTANCE_ID")
-                .unwrap_or_else(|_| "lmcache_default_instance".to_string()),
+            "instance_id": instance_id,
         });
-        let warm = match self
+        let matched = match self
             .http_client
             .post(&url)
             .json(&body)
@@ -1073,25 +1099,26 @@ impl Router {
             Ok(resp) if resp.status().is_success() => {
                 match resp.json::<serde_json::Value>().await {
                     Ok(v) => {
-                        let matched = max_matched_tokens(&v);
-                        matched.map(|n| n > 0).unwrap_or(false)
+                        lookup_matched_tokens_for_router(&v, model_uid, Some(instance_id.as_str()))
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "pd_split lookup response unparseable; treating as cold");
-                        false
+                        0
                     }
                 }
             }
             Ok(resp) => {
                 tracing::warn!(status = %resp.status(), "pd_split lookup rejected; treating as cold");
-                false
+                0
             }
             Err(e) => {
                 tracing::warn!(error = %e, "pd_split lookup unreachable; treating as cold");
-                false
+                0
             }
         };
-        self.insert_warm_cache_at(cache_key, warm, now_ms());
+        let matched = matched.min(max_replayable);
+        let warm = matched > 0;
+        self.insert_warm_cache_at(cache_key, matched, now_ms());
         let lookups = self.pd_lookup_total.fetch_add(1, Ordering::Relaxed) + 1;
         if warm {
             self.pd_lookup_warm_total.fetch_add(1, Ordering::Relaxed);
@@ -1116,10 +1143,42 @@ impl Router {
             }
             self.note_stage_stats_missing("warm_signal_cold");
         }
-        warm
+        matched
     }
 
-    fn insert_warm_cache_at(&self, cache_key: (String, [u8; 32]), warm: bool, now: u64) {
+    pub fn record_pd_warm_prefix_tokens(
+        &self,
+        model_uid: &str,
+        first_block_hash: [u8; 32],
+        matched_tokens: u64,
+    ) {
+        if matched_tokens == 0 {
+            return;
+        }
+        let now = now_ms();
+        let key = (model_uid.to_string(), first_block_hash);
+        if self.pd_warm_tokens_by_prefix.len() >= PD_WARM_CACHE_MAX_ENTRIES
+            && !self.pd_warm_tokens_by_prefix.contains_key(&key)
+        {
+            self.pd_warm_tokens_by_prefix
+                .retain(|_, (_, ts)| now.saturating_sub(*ts) < PD_WARM_CACHE_MS);
+            while self.pd_warm_tokens_by_prefix.len() >= PD_WARM_CACHE_MAX_ENTRIES {
+                let Some(oldest_key) = self
+                    .pd_warm_tokens_by_prefix
+                    .iter()
+                    .min_by_key(|e| e.value().1)
+                    .map(|e| e.key().clone())
+                else {
+                    break;
+                };
+                self.pd_warm_tokens_by_prefix.remove(&oldest_key);
+            }
+        }
+        self.pd_warm_tokens_by_prefix
+            .insert(key, (matched_tokens, now));
+    }
+
+    fn insert_warm_cache_at(&self, cache_key: (String, [u8; 32]), matched_tokens: u64, now: u64) {
         if self.pd_warm_cache.len() >= PD_WARM_CACHE_MAX_ENTRIES
             && !self.pd_warm_cache.contains_key(&cache_key)
         {
@@ -1141,7 +1200,7 @@ impl Router {
                 self.pd_warm_cache.remove(&oldest_key);
             }
         }
-        self.pd_warm_cache.insert(cache_key, (warm, now));
+        self.pd_warm_cache.insert(cache_key, (matched_tokens, now));
     }
 
     /// pd_split warm-signal observability (lookups, warm results).
@@ -1166,6 +1225,27 @@ impl Router {
         self.prefix_index.entries_by_model()
     }
 
+    /// True when the request asks for prompt-position logits (`echo: true` or
+    /// `prompt_logprobs > 0`).
+    ///
+    /// Per TokenSpeed `scheduler.md` §1 ("What the probe may claim"):
+    /// cached KV blocks carry no logits, so a request returning prompt logprobs
+    /// must recompute prompt positions as ordinary prefill input (`max_cached_prefix_tokens = 0`),
+    /// and in disaggregated `pd_split` the Decode role never computes prompt
+    /// logprobs (only the Prefill node returns them).
+    pub fn body_requires_prompt_logits(body: &[u8]) -> bool {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return false;
+        };
+        let echo = v.get("echo").and_then(|e| e.as_bool()).unwrap_or(false);
+        let prompt_logprobs = match v.get("prompt_logprobs") {
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(serde_json::Value::Number(n)) => n.as_i64().map(|k| k > 0).unwrap_or(false),
+            _ => false,
+        };
+        echo || prompt_logprobs
+    }
+
     /// Route hints for a request body: prefix hashes (prefix_affinity index /
     /// pd_split warm decisions) plus the pd_split controller warm signal.
     /// Tokenizes the body at most once so chat template rendering and BPE
@@ -1185,17 +1265,30 @@ impl Router {
         if self.strategy_name() != "prefix_affinity" && !has_roles {
             return (None, false);
         }
+        if Self::body_requires_prompt_logits(body) {
+            return (None, false);
+        }
         let Some(ids) = self.body_token_ids(model_uid, body) else {
             return (None, false);
         };
         self.remember_session_prefix(tenant_id, session_id, &ids);
-        let hashes = Some(self.prefix_hasher.hashes_from_ids(&ids));
+        let hashes = self
+            .prefix_hasher
+            .hashes_from_ids_for_model(model_uid, &ids);
         let warm = if has_roles {
-            self.controller_warm(model_uid, &ids).await
+            let matched = self.controller_warm_tokens(model_uid, &ids).await;
+            if matched > 0 {
+                if let Some(&first_h) = hashes.first() {
+                    self.record_pd_warm_prefix_tokens(model_uid, first_h, matched);
+                }
+                true
+            } else {
+                false
+            }
         } else {
             false
         };
-        (hashes, warm)
+        (Some(hashes), warm)
     }
 
     /// Extract token IDs for an OpenAI-style or SGLang `/v1/score` body
@@ -1326,6 +1419,16 @@ impl Router {
             self.register_model_alias(&spec.model_uid, engine_id);
         }
 
+        if let Some(bs) = spec
+            .config
+            .as_ref()
+            .and_then(|c| c.block_size)
+            .filter(|&bs| bs > 0)
+        {
+            self.prefix_hasher
+                .set_model_block_size(&spec.model_uid, bs as usize);
+        }
+
         if let Some(path) = spec.model_path.as_deref() {
             self.register_model_alias(&spec.model_uid, path);
             if let Some(base) = path.rsplit('/').next() {
@@ -1351,6 +1454,7 @@ impl Router {
         }
         self.model_uids_to_names.remove(model_uid);
         self.engine_model_ids.remove(model_uid);
+        self.prefix_hasher.clear_model_block_size(model_uid);
     }
 
     /// OpenAI `model` field to send to the engine after routing.
@@ -1664,6 +1768,7 @@ impl Router {
             owner
         });
 
+        let block_size = self.prefix_hasher.block_size_for(model_uid);
         let is_pd_split = candidates_data
             .iter()
             .any(|(ep, _)| ep.role != ReplicaRole::Mixed);
@@ -1706,7 +1811,7 @@ impl Router {
             let bypass_tokens = self.pd_bypass_tokens;
             let is_short_prompt = bypass_tokens > 0
                 && prefix_hashes
-                    .map(|hs| hs.len() * 16 < bypass_tokens)
+                    .map(|hs| hs.len().saturating_mul(block_size) < bypass_tokens)
                     .unwrap_or(false);
             let spillover_threshold = self.pd_prefill_spillover_pending.load(Ordering::Relaxed);
             if pool.is_empty() {
@@ -1853,6 +1958,7 @@ impl Router {
         let sel_ctx = SelectionCtx {
             prefix_owner,
             prefix_matches: scoped_prefix_matches.as_ref(),
+            block_size,
         };
 
         let selected = if let Some(hint) = active_hint.as_ref() {
@@ -1900,15 +2006,37 @@ impl Router {
         }
 
         // Batch 6.4 (Account): tokens the *served* replica already held = prefill work the
-        // cluster did not repeat. Blocks are 16 tokens (the value the hash chain is built
-        // on), and only the selected replica's matched depth counts - a deeper owner that
-        // we did not route to saved nothing.
-        if let Some(matches) = scoped_prefix_matches.as_ref() {
-            if let Some(&blocks) = matches.get(&selected.replica_id) {
-                self.record_saved_prefill_tokens(
-                    &selected.model_uid,
-                    (blocks as u64).saturating_mul(16),
-                );
+        // cluster did not repeat. Blocks are `block_size` tokens (the granularity the hash
+        // chain is built on for this model), and only the selected replica's matched depth
+        // counts - a deeper owner that we did not route to saved nothing. When `pd_split`
+        // routes a controller-warm request to a Decode replica that retrieves from remote
+        // `lm://` (where `LMCacheConnectorV1` disables local ZMQ `kv-events`), credit the
+        // matched token count reported by `lmcache_controller` `/lookup`.
+        let local_matched_blocks = scoped_prefix_matches
+            .as_ref()
+            .and_then(|m| m.get(&selected.replica_id).copied())
+            .unwrap_or(0);
+        if local_matched_blocks > 0 {
+            self.record_saved_prefill_tokens(
+                &selected.model_uid,
+                (local_matched_blocks as u64).saturating_mul(block_size as u64),
+            );
+        } else if is_pd_split && pd_warm && selected.role == ReplicaRole::Decode {
+            let now = now_ms();
+            let remote_saved = prefix_hashes
+                .and_then(|hs| hs.first())
+                .and_then(|first_h| {
+                    let key = (selected.model_uid.clone(), *first_h);
+                    self.pd_warm_tokens_by_prefix.remove_if(&key, |_, (_, ts)| {
+                        now.saturating_sub(*ts) >= PD_WARM_CACHE_MS
+                    });
+                    self.pd_warm_tokens_by_prefix.get(&key).map(|e| e.value().0)
+                })
+                // No record means no measured depth (evicted by the cap); credit
+                // nothing rather than assume the whole prompt was cached.
+                .unwrap_or(0);
+            if remote_saved > 0 {
+                self.record_saved_prefill_tokens(&selected.model_uid, remote_saved);
             }
         }
 
@@ -2199,7 +2327,7 @@ fn sse_frame_token_events(val: &serde_json::Value) -> u32 {
 #[cfg(test)]
 mod plan_version_tests {
     use super::*;
-    use nebula_common::{EndpointKind, EndpointStatus};
+    use nebula_common::{max_matched_tokens, EndpointKind, EndpointStatus};
 
     fn ready_ep(model_uid: &str, replica_id: u32, plan_version: u64) -> EndpointInfo {
         EndpointInfo {
@@ -2391,14 +2519,14 @@ mod plan_version_tests {
         // Fill to capacity with entries at t = 1_000.
         for i in 0..(PD_WARM_CACHE_MAX_ENTRIES as u32) {
             let key = warm_cache_key("m1", &[151644, i]);
-            router.insert_warm_cache_at(key, true, 1_000);
+            router.insert_warm_cache_at(key, 512, 1_000);
         }
         assert_eq!(router.pd_warm_cache.len(), PD_WARM_CACHE_MAX_ENTRIES);
 
         // Inserting one more within TTL (t = 1_500) must evict the oldest entry
         // so the cache never exceeds PD_WARM_CACHE_MAX_ENTRIES.
         let fresh_key = warm_cache_key("m1", &[999_999]);
-        router.insert_warm_cache_at(fresh_key.clone(), true, 1_500);
+        router.insert_warm_cache_at(fresh_key.clone(), 512, 1_500);
         assert_eq!(router.pd_warm_cache.len(), PD_WARM_CACHE_MAX_ENTRIES);
         assert!(router.pd_warm_cache.contains_key(&fresh_key));
 
@@ -2406,12 +2534,12 @@ mod plan_version_tests {
         // inserting at capacity sweeps all expired entries first.
         for i in 0..10u32 {
             let key = warm_cache_key("m1", &[888_000, i]);
-            router.insert_warm_cache_at(key, false, 1_500);
+            router.insert_warm_cache_at(key, 0, 1_500);
         }
         assert_eq!(router.pd_warm_cache.len(), PD_WARM_CACHE_MAX_ENTRIES);
         let after_ttl = 1_000 + PD_WARM_CACHE_MS + 100;
         let post_ttl_key = warm_cache_key("m1", &[777_777]);
-        router.insert_warm_cache_at(post_ttl_key.clone(), true, after_ttl);
+        router.insert_warm_cache_at(post_ttl_key.clone(), 256, after_ttl);
         assert!(
             router.pd_warm_cache.len() < 32,
             "expired entries must be swept when inserting at capacity, got len={}",
@@ -2496,6 +2624,77 @@ mod plan_version_tests {
             "layout_info": { "a": ["LocalCPUBackend", 256], "b": ["LocalCPUBackend", 569] }
         });
         assert_eq!(max_matched_tokens(&multi), Some(569));
+
+        // Router lookup filters by model prefix (`{model_uid}-*`) so a second
+        // model sharing the same LMCacheController cannot trigger a false warm hit.
+        let shared_ctrl: serde_json::Value = serde_json::json!({
+            "event_id": "LookupShared",
+            "layout_info": {
+                "qwen25-7b-0": ["LocalCPUBackend", 512],
+                "llama3-8b-0": ["LocalCPUBackend", 2048]
+            }
+        });
+        assert_eq!(
+            lookup_matched_tokens_for_router(
+                &shared_ctrl,
+                "qwen25-7b",
+                Some("lmcache_default_instance")
+            ),
+            512
+        );
+        assert_eq!(
+            lookup_matched_tokens_for_router(
+                &shared_ctrl,
+                "mistral-7b",
+                Some("lmcache_default_instance")
+            ),
+            0,
+            "unrelated model on shared controller must not inherit another model's warm tokens"
+        );
+        assert_eq!(
+            lookup_matched_tokens_for_router(&flat, "qwen25-7b", Some("lmcache_default_instance")),
+            512,
+            "single-instance legacy key lmcache_default_instance still resolves when configured"
+        );
+    }
+
+    #[test]
+    fn pd_split_remote_warm_hit_records_saved_prefill_tokens_and_respects_model_block_size() {
+        let router = Router::new();
+        router.upsert_endpoint(ep_with_role("m_pd", 0, ReplicaRole::Prefill));
+        router.upsert_endpoint(ep_with_role("m_pd", 1, ReplicaRole::Decode));
+
+        // Configure model m_pd with 64-token blocks (e.g. MLA / TokenSpeed prefix_granularity)
+        router.register_model_spec(&nebula_common::ModelSpec {
+            model_uid: "m_pd".into(),
+            model_name: "DeepSeek-R1".into(),
+            model_source: nebula_common::ModelSource::Local,
+            model_path: None,
+            engine_type: Some("tokenspeed".into()),
+            docker_image: None,
+            config: Some(nebula_common::ModelConfig {
+                block_size: Some(64),
+                ..Default::default()
+            }),
+            labels: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            created_by: None,
+        });
+        assert_eq!(router.prefix_hasher.block_size_for("m_pd"), 64);
+
+        let h0: [u8; 32] = [0xaa; 32];
+        let h1: [u8; 32] = [0xbb; 32];
+        let hashes = [h0, h1];
+
+        // Controller reported 384 matched tokens in remote lm:// (no local ZMQ kv-events).
+        router.record_pd_warm_prefix_tokens("m_pd", h0, 384);
+        let ep = router
+            .route(&ctx_with_session(None), "m_pd", Some(&hashes), true)
+            .unwrap();
+        assert_eq!(ep.replica_id, 1);
+        assert_eq!(ep.role, ReplicaRole::Decode);
+        assert_eq!(router.saved_prefill_tokens("m_pd"), 384);
     }
 
     #[test]
@@ -2588,10 +2787,8 @@ mod plan_version_tests {
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
+            ..Default::default()
         });
         router
             .route(&ctx_with_session(None), "m1", Some(&short), false)
@@ -2674,10 +2871,8 @@ mod plan_version_tests {
             replica_id: 0,
             last_updated_ms: now,
             pending_requests: 2,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.2),
+            ..Default::default()
         });
 
         // By default (DEFAULT_PD_PREFILL_SPILLOVER_PENDING = 0), spillover is off.
@@ -2686,10 +2881,8 @@ mod plan_version_tests {
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
+            ..Default::default()
         });
         let ep_default = router
             .route(&ctx_with_session(None), "m1", None, false)
@@ -2720,10 +2913,8 @@ mod plan_version_tests {
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
+            ..Default::default()
         });
 
         let ep = router
@@ -2917,20 +3108,16 @@ mod plan_version_tests {
             replica_id: 0,
             last_updated_ms: now,
             pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
+            ..Default::default()
         });
         router.upsert_stats(EndpointStats {
             model_uid: "m1".into(),
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
+            ..Default::default()
         });
         let ep = router
             .route(&ctx_with_session(None), "m1", Some(&short_hashes), false)
@@ -2953,10 +3140,8 @@ mod plan_version_tests {
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 3,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.4),
+            ..Default::default()
         });
         let ep_busy = router
             .route(&ctx_with_session(None), "m1", Some(&short_hashes), false)
@@ -2990,20 +3175,16 @@ mod plan_version_tests {
             replica_id: 0,
             last_updated_ms: now,
             pending_requests: 4,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.5),
+            ..Default::default()
         });
         router.upsert_stats(EndpointStats {
             model_uid: "m1".into(),
             replica_id: 1,
             last_updated_ms: now,
             pending_requests: 0,
-            prefix_cache_hit_rate: None,
-            prefix_cache_queries_total: None,
-            prompt_cache_hit_rate: None,
             kv_cache_usage: Some(0.1),
+            ..Default::default()
         });
 
         let ep = router
@@ -3154,6 +3335,21 @@ mod plan_version_tests {
         // /v1/rerank body (`{"query", "documents"}`) must NOT be tokenized as /v1/score.
         let rerank_body = br#"{"model":"m1","query":"hello world","documents":["doc1","doc2"]}"#;
         assert_eq!(router.body_token_ids("m1", rerank_body), None);
+
+        // Requests asking for prompt logits (`echo: true` or `prompt_logprobs > 0`)
+        // cannot skip prefill via cached KV pages (TokenSpeed `scheduler.md` §1).
+        assert!(Router::body_requires_prompt_logits(
+            br#"{"model":"m1","prompt":"hello world","echo":true}"#
+        ));
+        assert!(Router::body_requires_prompt_logits(
+            br#"{"model":"m1","prompt":"hello world","prompt_logprobs":5}"#
+        ));
+        assert!(!Router::body_requires_prompt_logits(
+            br#"{"model":"m1","prompt":"hello world","prompt_logprobs":0}"#
+        ));
+        assert!(!Router::body_requires_prompt_logits(
+            br#"{"model":"m1","prompt":"hello world"}"#
+        ));
     }
 }
 

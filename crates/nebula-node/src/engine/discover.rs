@@ -174,6 +174,35 @@ pub async fn discover_runtime_capability(
                         );
                         hints.prefix_cache_hit_rate = Some(SupportLevel::Unsupported);
                     }
+                    "tokenspeed" => {
+                        hints.pending_requests = Some(
+                            if text.contains("tokenspeed:num_requests_waiting")
+                                || text.contains("tokenspeed:num_requests_running")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
+                        hints.kv_cache_usage = Some(
+                            if text.contains("tokenspeed:kv_cache_usage")
+                                || text.contains("tokenspeed:token_usage")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
+                        hints.prefix_cache_hit_rate = Some(
+                            if text.contains("tokenspeed:cache_hit_rate")
+                                || text.contains("tokenspeed:prefix_cache")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
+                    }
                     _ => {}
                 }
             }

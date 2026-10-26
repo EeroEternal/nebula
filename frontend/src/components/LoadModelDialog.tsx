@@ -317,7 +317,7 @@ function StepEngine({ form, updateForm, images }: StepEngineProps) {
                 <div className="space-y-3">
                      <Label className="text-[10px] uppercase font-bold tracking-widest text-muted-foreground">{t('loadDialog.executionBackend')}</Label>
                     <div className="flex gap-2 p-1 bg-black/20 rounded-xl border border-border/50 w-fit">
-                        {['vllm', 'sglang'].map(eng => (
+                        {['vllm', 'sglang', 'tokenspeed'].map(eng => (
                             <button
                                 key={eng}
                                 onClick={() => updateForm({ engine_type: eng })}

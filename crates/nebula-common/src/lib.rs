@@ -32,11 +32,11 @@ pub use benchmark::{
 };
 pub use capability::{
     parse_version_tuple, resolve_engine_type, score_api_for_engine, static_capability,
-    static_capability_sglang, static_capability_vllm, static_version_support,
-    tool_calling_for_engine, validate_engine_and_config, validate_engine_type,
-    validate_engine_version, validate_model_config, CapabilitySource, EngineCapability,
-    EngineVersionSupport, ObservabilityCapability, ReplicaCapability, ServingTopologyKind,
-    SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
+    static_capability_sglang, static_capability_tokenspeed, static_capability_vllm,
+    static_version_support, tool_calling_for_engine, validate_engine_and_config,
+    validate_engine_type, validate_engine_version, validate_model_config, CapabilitySource,
+    EngineCapability, EngineVersionSupport, ObservabilityCapability, ReplicaCapability,
+    ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
 };
 pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
 pub use cluster::ClusterStatus;
@@ -67,11 +67,11 @@ pub use model_cache::{
 pub use model_deployment::{
     approved_pd_images_from_env, controller_addr, effective_replica_config,
     effective_replica_image, hardware_family_of_platform, kv_sharing_env, kv_transfer_config,
-    lmcache_controller_env, lmcache_instance_id, merge_model_config, validate_pd_split_image,
-    validate_pd_split_with_context, validate_replica_specs, wait_for_lmcache_controller,
-    DeploymentTopology, DesiredState, KvSharingSpec, ModelDeployment, ReplicaPlacementSpec,
-    ReplicaRole, DEFAULT_PIN_TIMEOUT_SEC, LMCACHE_CHUNK_TOKENS, LMCACHE_DEFAULT_KV_LOCATION,
-    PIN_TIMEOUT_SEC_RANGE,
+    lmcache_controller_env, lmcache_instance_id, max_matched_tokens, max_matched_tokens_for_model,
+    merge_model_config, validate_pd_split_image, validate_pd_split_with_context,
+    validate_replica_specs, wait_for_lmcache_controller, DeploymentTopology, DesiredState,
+    KvSharingSpec, ModelDeployment, ReplicaPlacementSpec, ReplicaRole, DEFAULT_PIN_TIMEOUT_SEC,
+    LMCACHE_CHUNK_TOKENS, LMCACHE_DEFAULT_KV_LOCATION, PIN_TIMEOUT_SEC_RANGE,
 };
 pub use model_request::*;
 pub use model_spec::{ModelSource, ModelSpec};
@@ -82,10 +82,10 @@ pub use node_status::{
 pub use placement::{next_placement_version, PlacementAssignment, PlacementPlan};
 pub use pool::{HardwarePool, PoolRole};
 pub use selection::{
-    draft_from_candidate, select_backends, switching_cost, BackendCandidate, CurrentBackend,
-    DeploymentDraft, DraftRequest, ModelArchitecture, ModelProfile, SelectionConstraints,
-    SelectionPreference, SelectionRequest, SelectionResponse, WorkloadHint,
-    ROOFLINE_COMPUTE_BOUND_FP8_REASON, ROOFLINE_MEMORY_BOUND_4BIT_REASON,
+    draft_from_candidate, estimate_kv_cache_vram_mb, select_backends, switching_cost,
+    BackendCandidate, CurrentBackend, DeploymentDraft, DraftRequest, ModelArchitecture,
+    ModelProfile, SelectionConstraints, SelectionPreference, SelectionRequest, SelectionResponse,
+    WorkloadHint, ROOFLINE_COMPUTE_BOUND_FP8_REASON, ROOFLINE_MEMORY_BOUND_4BIT_REASON,
     ROOFLINE_NATIVE_W4A4_REASON,
 };
 pub use slo::{

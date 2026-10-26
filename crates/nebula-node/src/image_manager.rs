@@ -285,7 +285,10 @@ async fn run_image_gc(store: &EtcdMetaStore) {
 /// Heuristic: only GC images that look like inference engine images.
 fn is_engine_image(image_ref: &str) -> bool {
     let lower = image_ref.to_lowercase();
-    lower.contains("vllm") || lower.contains("sglang") || lower.contains("xllm")
+    lower.contains("vllm")
+        || lower.contains("sglang")
+        || lower.contains("tokenspeed")
+        || lower.contains("xllm")
 }
 
 /// List all local Docker image references (repository:tag).
