@@ -392,6 +392,21 @@ etcdctl snapshot restore /backup/etcd-xxx.db --data-dir /var/lib/etcd-restore
 - xLB 在 **gateway 外面**：`Client → xLB(TLS) → nebula-gateway ×N → nebula-router → 引擎`。Router 侧的 `prefix_affinity` / `pd_split` / `Tool-Pause` 全部照旧在 gateway/router 内部生效。
 - 它**不做**鉴权、配额、路由决策、SLO 归因 —— 这些仍是 Gateway/BFF 的职责。
 
+### 多 Gateway 的租户配额：`NEBULA_GATEWAY_QUOTA_MEMBERS`
+
+租户配额（RPS / 并发 / token / pin）是 Gateway 进程内计数。起了 N 个 Gateway 又声明 `NEBULA_GATEWAY_QUOTA_MEMBERS=N`，每个副本只执行 `limit / N`，集群才不会变成 N 倍上限：
+
+```bash
+export NEBULA_GATEWAY_QUOTA_MEMBERS=2   # 默认 1 = 单副本，行为与以前完全一致
+```
+
+- **扩缩 Gateway 必须同步改这个值**（它是部署不变量，不是实时成员视图）：调小了会真超卖，调大了只会少用额度。
+- `limit < N` 的租户会被全部拒绝（一个槽位不能切开），整数余数也丢弃——严格优先于可用性。
+- 单个 Gateway 挂掉后，剩下副本仍只用自己的分片，可用量掉到 `(N-1)/N`，不会自动再分配。
+- 引擎级队列额度 `NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY` 不受此变量影响，仍是 per-Gateway。
+
+细节与验收口见 [`../dev/queue-admission.md`](../dev/queue-admission.md) §7.1。
+
 ### 关键约束（顺序错了会丢错误归因）
 
 ```text

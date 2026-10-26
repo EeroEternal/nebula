@@ -280,6 +280,9 @@ pub async fn forward_upstream_response(
     // Embedded mode: the first chunk was already read (and TTFT accounted for) by
     // `forward_embedded`, so the status was committed only after a byte arrived.
     prefetched_first: Option<Bytes>,
+    // Cluster tenant-quota guard (issue #68): held for the whole streamed body so
+    // a concurrency slot is released when the request really ends.
+    conc_guard: Option<nebula_common::admission::ConcurrencyGuard>,
 ) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
@@ -325,6 +328,7 @@ pub async fn forward_upstream_response(
         tokio::spawn(async move {
             // Engine queue permit is held for the whole streamed response.
             let _permit = permit;
+            let _conc_guard = conc_guard;
             let mut first = !first_already_seen;
             let mut aborted = false;
             let mut tool_pause_marked = false;
@@ -452,6 +456,7 @@ pub async fn forward_upstream_response(
         return out;
     }
 
+    let _conc_guard = conc_guard;
     let bytes = match tokio::time::timeout(nebula_common::stream_idle_timeout(), resp.bytes()).await
     {
         Ok(Ok(bytes)) => bytes,

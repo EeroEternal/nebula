@@ -23,9 +23,14 @@ struct TenantLive {
 }
 
 /// In-process admission state keyed by tenant_id.
+///
+/// `members` is the declared Gateway replica count the cluster quota is split
+/// across (issue #68): every limit is enforced as `limit / members`, so N
+/// replicas never multiply a tenant quota by N. `0` means 1 (no sharding).
 #[derive(Debug, Clone, Default)]
 pub struct TenantAdmission {
     inner: Arc<Mutex<HashMap<String, TenantLive>>>,
+    members: u32,
 }
 
 pub struct ConcurrencyGuard {
@@ -51,6 +56,19 @@ impl TenantAdmission {
         Self::default()
     }
 
+    /// Split every tenant quota across `members` Gateway replicas (issue #68).
+    pub fn with_members(members: u32) -> Self {
+        Self {
+            members,
+            ..Self::default()
+        }
+    }
+
+    /// Tenant limits as enforced by this replica (cluster limit ÷ members).
+    fn enforced(&self, tenant: &Tenant) -> TenantQuota {
+        crate::quota_shard::shard_quota(&tenant.quotas, self.members)
+    }
+
     /// Admit a request under `tenant` quotas. Returns a concurrency guard on success.
     pub async fn try_admit(
         &self,
@@ -63,7 +81,7 @@ impl TenantAdmission {
             AdmitDecision::Deny(code) => return Err(code),
         }
 
-        let quotas = &tenant.quotas;
+        let quotas = self.enforced(tenant);
         let mut map = self.inner.lock().await;
         let live = map.entry(tenant.tenant_id.clone()).or_default();
         let now = Instant::now();
@@ -103,7 +121,7 @@ impl TenantAdmission {
             AdmitDecision::Allow => {}
             AdmitDecision::Deny(code) => return Err(code),
         }
-        let Some(limit) = tenant.quotas.max_pin_requests_per_minute else {
+        let Some(limit) = self.enforced(tenant).max_pin_requests_per_minute else {
             return Ok(());
         };
 
@@ -208,6 +226,24 @@ mod tests {
         assert_eq!(
             adm.try_admit_pin(&t).await.err(),
             Some(TenantDenyCode::PinAdmissionExceeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_quota_shards_across_members() {
+        // Two Gateways enforce half of the tenant's RPS each: 5 + 5 = 10, not 20.
+        let adm = TenantAdmission::with_members(2);
+        let t = tenant(10, 10);
+        let mut admitted = 0;
+        for _ in 0..10 {
+            if adm.try_admit(&t, None, 0).await.is_ok() {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 5);
+        assert_eq!(
+            adm.try_admit(&t, None, 0).await.err(),
+            Some(TenantDenyCode::RpsExceeded)
         );
     }
 

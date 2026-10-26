@@ -190,8 +190,9 @@ async fn proxy_chat_as_responses(
         Ok(r) => r,
         Err(r) => return r,
     };
-    // Keep admission guard alive until response finishes.
-    let _guard = prepared._conc_guard;
+    // Cluster tenant-quota guard: held until the streamed response ends so a
+    // concurrency slot is released at completion, not at first byte (issue #68).
+    let conc_guard = prepared._conc_guard;
     let routed_endpoint = prepared
         .routed_endpoint
         .lock()
@@ -238,6 +239,7 @@ async fn proxy_chat_as_responses(
 
         tokio::spawn(async move {
             let _permit = queue_permit;
+            let _conc_guard = conc_guard;
             let mut tool_pause_marked = false;
             let mut first_chunk = true;
             let mut decode_tracker = nebula_router::SseDecodeTracker::default();
@@ -460,7 +462,7 @@ async fn proxy_chat_as_anthropic(
         Ok(r) => r,
         Err(r) => return r,
     };
-    let _guard = prepared._conc_guard;
+    let conc_guard = prepared._conc_guard;
     let routed_endpoint = prepared
         .routed_endpoint
         .lock()
@@ -506,6 +508,7 @@ async fn proxy_chat_as_anthropic(
 
         tokio::spawn(async move {
             let _permit = queue_permit;
+            let _conc_guard = conc_guard;
             let mut tool_pause_marked = false;
             let mut first_chunk = true;
             let mut decode_tracker = nebula_router::SseDecodeTracker::default();
@@ -800,7 +803,6 @@ pub async fn proxy_post(
             "stage timing (request path)"
         );
     }
-    let _guard = prepared._conc_guard;
     let routed_endpoint = prepared
         .routed_endpoint
         .lock()
@@ -819,6 +821,7 @@ pub async fn proxy_post(
         prepared.ctx.session_id.as_deref(),
         routed_endpoint,
         prefetched_first,
+        prepared._conc_guard,
     )
     .await
 }

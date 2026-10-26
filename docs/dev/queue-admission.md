@@ -34,7 +34,7 @@ xrouter 的教训（commit 原文）：
 | 6 | **Per-model ETA**（可选） | EMA 时长，做排队预估 |
 | 7 | **可观测** | `queue_depth` / `queue_wait_ms` / `admitted` / `queued` / `rejected{queue_full,tenant_queue_full}` / `upstream_ttft_ms` |
 
-**生命周期约束**：准入 guard 必须覆盖**整个流式响应**（从入队许可到 SSE 流结束）。现有 `TenantAdmission` 的 `ConcurrencyGuard` 在 handler 返回时释放，SSE 尚未流完——P0-#2 需把 guard 移进 SSE 转发任务，否则计数不准。
+**生命周期约束**：准入 guard 必须覆盖**整个流式响应**（从入队许可到 SSE 流结束）。`EnginePermit` 一开始就移进了 SSE 转发任务；`TenantAdmission` 的 `ConcurrencyGuard` 以前在 handler 返回时就释放（流式请求只占住 TTFT 那一段），现已同样移进转发任务，见 §7.2。
 
 **与现状关系**：`TenantAdmission`（租户 RPS/并发/token）**保留**；新增「引擎级有界队列」（model 维度），在**路由之后**生效。
 
@@ -63,18 +63,33 @@ NEBULA_GATEWAY_QUEUE_TENANT_SHARE=0.5
 ## 7. 非目标与交付边界（2026-10-12 按评估 A3 明确）
 
 - ❌ **AIMD / 任何用 TTFT-成功率调并发的控制器**（自锁振荡）。
-- ❌ **跨网关全局队列/集群级严格配额**（后续；不为它把逐请求协调塞进 etcd 热路径）。
+- ✅ **租户配额的集群级硬上限**已按 [`ha.md`](../arch/ha.md) §4.1 首版落地：确定性分片（见下）。
+- ❌ **跨网关全局引擎队列**：`EngineQueues` 的在途并发/等待者计数仍是进程级，N 个 Gateway 仍是 N 份引擎保护额度。
 - ❌ 改引擎（vLLM）。
 
-**⚠️ 交付边界：队列与配额是进程级（per-Gateway）保护，不是集群级治理。**
+### 7.1 租户配额：确定性分片（issue #68，2026-10-26）
 
-计数（并发/等待/租户份额/RPS 窗口）全部在 Gateway 进程内（`admission.rs`/`queue.rs`，进程内 `Arc` 状态）。部署 N 个 Gateway 时：
+`NEBULA_GATEWAY_QUOTA_MEMBERS=N`（默认 `1` = 现状不变）声明集群里有多少个 Gateway 共享同一份租户配额。每个 Gateway 强制执行 `limit / N`（向下取整，余数**故意不用**）：
 
-- 实际集群并发上限 ≈ **N × `MAX_CONCURRENCY`**（每进程独立计数）；
-- 租户配额同样按进程各算一份——**不能据此承诺"集群级严格配额"**；
-- 需要集群级硬限时的正确位置：入口 LB 层或未来的专用准入服务，而非把协调塞进 etcd。
+```text
+租户 rps=10, max_concurrency=5, members=2
+  → 每个 Gateway 实际执行 rps=5, concurrency=2
+  → 集群总上限 5+5=10 ≤ 10、2+2=4 ≤ 5（不会出现 20 / 10）
+```
 
-对外承诺口径：**"per-Gateway 引擎保护 + 租户公平"**；多 Gateway 部署的验收（双网关 + 热点租户 + 长流式）列入交付收敛批次。
+实现：`nebula_common::quota_shard`（纯函数 + 单测：Σ 分片 ≤ 全局、`allowed_models` 不被切分、未设限额保持未设）。准入路径零 etcd/PG I/O。
+
+已知边界（都是刻意的）：
+
+- **成员数是部署不变量，不是实时成员视图**。扩缩 Gateway 必须同步改 `NEBULA_GATEWAY_QUOTA_MEMBERS`；改小了会真的超卖。自动成员注册 + 自动重分片属 HA-P2 后续（需 `/gateways/` lease 注册表）。
+- **`limit < N` 时该租户被拒（分片=0）**：一个槽位无法切开，严格优先于可用性。
+- **整数余数丢弃**：`limit=5, N=2` 时全集群只能用 4。
+- 单个 Gateway 故障时剩下的副本仍只用自己的分片，可用量掉到 `(N-1)/N`；这就是 [`ha.md`](../arch/ha.md) §4.1 要求的「预留故障接管余量」，不会自动再分配。
+- 只覆盖租户配额（RPS / 并发 / token / pin）；引擎级队列额度与 `NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY` 仍是 per-Gateway。
+
+### 7.2 并发额度释放时机
+
+租户并发 `ConcurrencyGuard` 现在**跟着响应体一起活**（三条入口都把它移进 SSE 转发任务）：正常结束、`[DONE]` 后断开、客户端 abort、上游异常 EOF 都在流结束时释放；非流式在响应体构造完成后释放。修复前它在 handler 返回时就释放，流式请求只占住 TTFT 那一段。
 
 ## 8. 参考
 

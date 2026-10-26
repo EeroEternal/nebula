@@ -207,6 +207,17 @@ async fn main() {
         args.common.xtrace_token.as_deref(),
     );
 
+    // Issue #68: split each tenant quota across the declared Gateway replicas so
+    // N replicas cannot multiply the quota by N. No etcd I/O on the admission path.
+    let quota_members = nebula_common::quota_shard::members_from_env();
+    if quota_members > 1 {
+        tracing::info!(
+            quota_members,
+            env = nebula_common::quota_shard::ENV_QUOTA_MEMBERS,
+            "tenant quotas sharded across Gateway replicas"
+        );
+    }
+
     let st = AppState {
         _noop: Arc::new(()),
         router_base_url,
@@ -227,7 +238,7 @@ async fn main() {
         xtrace_url: args.common.xtrace_url.clone(),
         xtrace_token: args.common.xtrace_token.clone(),
         bff_url: args.bff_url,
-        tenant_admission: nebula_common::TenantAdmission::new(),
+        tenant_admission: nebula_common::TenantAdmission::with_members(quota_members),
     };
 
     let platform_routes = Router::new()
