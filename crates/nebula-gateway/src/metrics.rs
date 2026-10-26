@@ -606,6 +606,35 @@ fn render_queue_metrics(queues: &nebula_common::queue::EngineQueues) -> String {
 
 pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     let mut body = render_metrics(&st.metrics);
+    // Cluster quota membership (issue #68): the divisor this replica is using and
+    // whether the view it came from is still trusted.
+    body.push_str(
+        "# HELP nebula_gateway_quota_members Live Gateway replicas this quota shard is divided by.\n\
+         # TYPE nebula_gateway_quota_members gauge\n",
+    );
+    // Absent, not 0, when the divisor is pinned: there is no live membership.
+    if let Some(n) = st.tenant_admission.live_member_count() {
+        body.push_str(&format!("nebula_gateway_quota_members {n}\n"));
+    }
+    body.push_str(
+        "# HELP nebula_gateway_quota_view_fresh 1 when the membership view is trusted.\n\
+         # TYPE nebula_gateway_quota_view_fresh gauge\n",
+    );
+    if st.member_registry.is_some() {
+        let fresh = st.tenant_admission.live_member_count().is_some();
+        body.push_str(&format!(
+            "nebula_gateway_quota_view_fresh {}\n",
+            u8::from(fresh)
+        ));
+    }
+    body.push_str(
+        "# HELP nebula_gateway_quota_degraded_total Tenant admissions decided under an untrusted membership view.\n\
+         # TYPE nebula_gateway_quota_degraded_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_quota_degraded_total {}\n",
+        st.tenant_admission.degraded_total()
+    ));
     if let Some(router) = st.router.as_ref() {
         body.push_str(&render_router_metrics(router));
     }

@@ -69,7 +69,14 @@ NEBULA_GATEWAY_QUEUE_TENANT_SHARE=0.5
 
 ### 7.1 租户配额：确定性分片（issue #68，2026-10-26）
 
-`NEBULA_GATEWAY_QUOTA_MEMBERS=N`（默认 `1` = 现状不变）声明集群里有多少个 Gateway 共享同一份租户配额。每个 Gateway 强制执行 `limit / N`（向下取整，余数**故意不用**）：
+两种模式，默认走注册表：
+
+- **不设** `NEBULA_GATEWAY_QUOTA_MEMBERS`（默认）：每个 Gateway 注册 `/gateways/{instance_id}`（lease TTL 8s / 刷新 1s，`NEBULA_GATEWAY_MEMBER_TTL_MS` / `..._REFRESH_MS` 可调），按**实时成员数**分片：join/leave 自动重分片，故障副本的分片由存活副本接管，按排位分配余数（Σ 分片 == 限额）。
+- **设了** `NEBULA_GATEWAY_QUOTA_MEMBERS=N`：固定分母，不注册（隔离网络 / 固定拓扑 / 不想让 Gateway 写 etcd 时）。
+
+视图超过 `NEBULA_GATEWAY_QUOTA_VIEW_STALE_MS`（默认 3×refresher）未更新即视为不可信：`NEBULA_GATEWAY_QUOTA_DEGRADED=fail_closed`（默认，`503 tenant_quota_unavailable`）或 `fail_open`（按全局限额服务并计入 `nebula_gateway_quota_degraded_total`）。
+
+固定分母模式的算术：
 
 ```text
 租户 rps=10, max_concurrency=5, members=2
@@ -89,7 +96,7 @@ NEBULA_GATEWAY_QUEUE_TENANT_SHARE=0.5
 - **`limit < N` 时该租户被拒（分片=0）**：一个槽位无法切开，严格优先于可用性。
 - **整数余数丢弃**：`limit=5, N=2` 时全集群只能用 4。
 - 单个 Gateway 故障时剩下的副本仍只用自己的分片，可用量掉到 `(N-1)/N`；这就是 [`ha.md`](../arch/ha.md) §4.1 要求的「预留故障接管余量」，不会自动再分配。
-- 只覆盖租户配额（RPS / 并发 / token / pin）；引擎级队列额度与 `NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY` 仍是 per-Gateway。
+- 引擎级队列额度**也会**按成员数分片：`EngineQueues` 跟随同一成员视图，`cluster_cap = QUEUE_MAX_CONCURRENCY / members`，成员变化自动调整（无需重启）。代价是 LB 分发不均时能力不可转移（见 `ha/railway-drill-2.md` §4）。
 
 ### 7.2 并发额度释放时机
 

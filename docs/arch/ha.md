@@ -86,7 +86,7 @@ Control plane: 3-node etcd + PostgreSQL HA + multi-owner prefix index
 5. 预留故障接管余量；未使用分片是否动态再分配由后续真实负载决定，不在首版引入逐请求分布式锁。
 6. 对无法保证硬上限的降级状态必须显式标记，按资源选择 fail-open 或 fail-closed，并记录审计。
 
-**已落地（2026-10-26，#68 部分）**：第 1/2/4 条以**静态成员数**实现——每个 Gateway 强制执行 `limit / N`（`NEBULA_GATEWAY_QUOTA_MEMBERS`，默认 1 = 不分片），整数余数丢弃，所以任意时刻 Σ 分片 ≤ 全局上限，准入路径零 etcd/PG I/O；租户并发 guard 现已覆盖整个流式响应。未落地：第 3 条（成员变化自动重分片，需要 `/gateways/` lease 注册表和成员版本）与第 5 条（故障后未使用分片的动态再分配）。因此扩缩 Gateway **必须**同步改该变量，`limit < N` 的租户被拒而不是超卖。详见 [`../dev/queue-admission.md`](../dev/queue-admission.md) §7.1；实测（真 etcd + 2 个真实 Gateway 进程，`members=1` 放行 20 / `members=2` 放行 10）见 [`../dev/ha/quota-drill.md`](../dev/ha/quota-drill.md)，复现脚本 `scripts/ha_quota_drill.sh`。
+**已落地（2026-10-26，#68 部分）**：第 1/2/4 条以**静态成员数**实现——每个 Gateway 强制执行 `limit / N`（`NEBULA_GATEWAY_QUOTA_MEMBERS`，默认 1 = 不分片），整数余数丢弃，所以任意时刻 Σ 分片 ≤ 全局上限，准入路径零 etcd/PG I/O；租户并发 guard 现已覆盖整个流式响应。第 3/5 条也已落地（2026-10-26 第二轮）：`/gateways/{instance_id}` lease 注册表 + 后台视图，成员变化自动重分片、故障副本的分片由存活副本接管、优雅退出立即注销；视图不可信时默认 `fail_closed`（`503 tenant_quota_unavailable`），逐请求无协调。仍未实现：全体 etcd 失联时逐请求读租户仍是 fail-open（HA-P1 租户快照才是根治），以及 LB 分发不均导致的容量浪费。多机实测见 [`../dev/ha/railway-drill-2.md`](../dev/ha/railway-drill-2.md)。因此扩缩 Gateway **必须**同步改该变量，`limit < N` 的租户被拒而不是超卖。详见 [`../dev/queue-admission.md`](../dev/queue-admission.md) §7.1；实测（真 etcd + 2 个真实 Gateway 进程，`members=1` 放行 20 / `members=2` 放行 10）见 [`../dev/ha/quota-drill.md`](../dev/ha/quota-drill.md)，复现脚本 `scripts/ha_quota_drill.sh`。
 
 ### 4.2 Tool-Pause 租约
 

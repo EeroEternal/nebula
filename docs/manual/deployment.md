@@ -400,7 +400,8 @@ etcdctl snapshot restore /backup/etcd-xxx.db --data-dir /var/lib/etcd-restore
 export NEBULA_GATEWAY_QUOTA_MEMBERS=2   # 默认 1 = 单副本，行为与以前完全一致
 ```
 
-- **扩缩 Gateway 必须同步改这个值**（它是部署不变量，不是实时成员视图）：调小了会真超卖，调大了只会少用额度。
+- 默认**不设**这个变量：每个 Gateway 会注册 `/gateways/{instance_id}`（lease，`NEBULA_GATEWAY_MEMBER_TTL_MS` 默认 15000、`..._REFRESH_MS` 默认 2000），按实时成员数自动分片并在成员进出时重分片；视图不可信时默认 `fail_closed`（`503`，可用 `NEBULA_GATEWAY_QUOTA_DEGRADED=fail_open` 改成按全局限额服务并计数）。
+- 设了它就变成**固定分母**（不写 etcd）：隔离网络/固定拓扑时用；此时**扩缩 Gateway 必须同步改这个值**，否则调小了会真超卖。
 - `limit < N` 的租户会被全部拒绝（一个槽位不能切开），整数余数也丢弃——严格优先于可用性。
 - 单个 Gateway 挂掉后，剩下副本仍只用自己的分片，可用量掉到 `(N-1)/N`，不会自动再分配。
 - 引擎级队列额度 `NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY` 不受此变量影响，仍是 per-Gateway。
