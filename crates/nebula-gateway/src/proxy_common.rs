@@ -48,7 +48,23 @@ pub async fn prepare_upstream(
 
     let _conc_guard = if st.auth.env.multi_tenant {
         if let Some(ref tenant_id) = ctx.tenant_id {
-            match load_tenant(&*st.store, tenant_id).await {
+            // shortcut: the tenant is read from etcd on every request (no snapshot
+            // yet, HA-P1). A dead member in ETCD_ENDPOINT shows up as `Unavailable`
+            // on the first try, so retry once; if every attempt fails the request is
+            // served WITHOUT quota — counted, never silent.
+            let mut attempts = 0;
+            let tenant_result = loop {
+                attempts += 1;
+                match load_tenant(&*st.store, tenant_id).await {
+                    Ok(v) => break Ok(v),
+                    Err(e) if attempts < 2 => {
+                        tracing::warn!(error=%e, tenant_id=%tenant_id, attempts, "tenant lookup failed; retrying");
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    Err(e) => break Err(e),
+                }
+            };
+            match tenant_result {
                 Ok(Some(tenant)) => {
                     if ctx.pinned_replica_id.is_some() {
                         if let Err(code) = st.tenant_admission.try_admit_pin(&tenant).await {
@@ -71,7 +87,15 @@ pub async fn prepare_upstream(
                 }
                 Ok(None) => None,
                 Err(e) => {
-                    tracing::warn!(error=%e, tenant_id=%tenant_id, "tenant lookup failed; allowing request");
+                    st.metrics
+                        .tenant_lookup_failed_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(
+                        error=%e,
+                        tenant_id=%tenant_id,
+                        attempts,
+                        "tenant lookup failed; serving without quota (counted)"
+                    );
                     None
                 }
             }
@@ -280,6 +304,9 @@ pub async fn forward_upstream_response(
     // Embedded mode: the first chunk was already read (and TTFT accounted for) by
     // `forward_embedded`, so the status was committed only after a byte arrived.
     prefetched_first: Option<Bytes>,
+    // Cluster tenant-quota guard (issue #68): held for the whole streamed body so
+    // a concurrency slot is released when the request really ends.
+    conc_guard: Option<nebula_common::admission::ConcurrencyGuard>,
 ) -> Response {
     use std::convert::Infallible;
     use tokio::sync::mpsc;
@@ -325,6 +352,7 @@ pub async fn forward_upstream_response(
         tokio::spawn(async move {
             // Engine queue permit is held for the whole streamed response.
             let _permit = permit;
+            let _conc_guard = conc_guard;
             let mut first = !first_already_seen;
             let mut aborted = false;
             let mut tool_pause_marked = false;
@@ -452,6 +480,7 @@ pub async fn forward_upstream_response(
         return out;
     }
 
+    let _conc_guard = conc_guard;
     let bytes = match tokio::time::timeout(nebula_common::stream_idle_timeout(), resp.bytes()).await
     {
         Ok(Ok(bytes)) => bytes,

@@ -4,11 +4,13 @@
 //! Prometheus metrics must use low-cardinality `reason` labels only — never tenant_id.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::sync::Mutex;
 
+use crate::quota_shard::{shard_quota, shard_quota_ranked, MemberView};
 use crate::tenant::{admit_static, AdmitDecision, Tenant, TenantDenyCode, TenantQuota};
 
 #[derive(Debug, Default)]
@@ -22,10 +24,59 @@ struct TenantLive {
     pin_count: u64,
 }
 
+/// Where the cluster-quota divisor comes from (issue #68).
+#[derive(Debug, Clone)]
+pub enum QuotaScope {
+    /// Pinned divisor (`NEBULA_GATEWAY_QUOTA_MEMBERS`): no coordination.
+    Fixed(u32),
+    /// Live `/gateways/` membership: rank-ordered shards that re-shard on
+    /// join/leave and use the whole limit.
+    Live {
+        view: Arc<MemberView>,
+        self_id: String,
+    },
+}
+
+impl Default for QuotaScope {
+    fn default() -> Self {
+        QuotaScope::Fixed(1)
+    }
+}
+
+/// What to do when the live membership view cannot prove the cluster cap.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DegradePolicy {
+    /// Refuse the request: an unverifiable quota is not a quota.
+    #[default]
+    FailClosed,
+    /// Serve with the tenant's full (unsharded) limit and count it.
+    FailOpen,
+}
+
 /// In-process admission state keyed by tenant_id.
-#[derive(Debug, Clone, Default)]
+///
+/// Every limit is enforced on this replica's shard of the cluster quota, so N
+/// Gateways never multiply a tenant quota by N. With [`QuotaScope::Live`] the
+/// shard follows the `/gateways/` registry (join/leave re-shards; the remainder
+/// is handed out by rank so the shards sum to the limit exactly).
+#[derive(Debug, Clone)]
 pub struct TenantAdmission {
     inner: Arc<Mutex<HashMap<String, TenantLive>>>,
+    scope: QuotaScope,
+    degrade: DegradePolicy,
+    /// Requests served while the membership view could not be trusted.
+    degraded_total: Arc<AtomicU64>,
+}
+
+impl Default for TenantAdmission {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            scope: QuotaScope::Fixed(1),
+            degrade: DegradePolicy::FailClosed,
+            degraded_total: Arc::default(),
+        }
+    }
 }
 
 pub struct ConcurrencyGuard {
@@ -51,6 +102,59 @@ impl TenantAdmission {
         Self::default()
     }
 
+    /// Split every tenant quota across a pinned `members` count (issue #68).
+    pub fn with_members(members: u32) -> Self {
+        Self {
+            scope: QuotaScope::Fixed(members),
+            ..Self::default()
+        }
+    }
+
+    /// Follow the live `/gateways/` registry instead of a pinned count.
+    pub fn with_live_members(mut self, view: Arc<MemberView>, self_id: impl Into<String>) -> Self {
+        self.scope = QuotaScope::Live {
+            view,
+            self_id: self_id.into(),
+        };
+        self
+    }
+
+    /// Policy when the membership view is stale (default: fail closed).
+    pub fn with_degrade_policy(mut self, policy: DegradePolicy) -> Self {
+        self.degrade = policy;
+        self
+    }
+
+    /// Requests served under a degraded (untrusted) membership view.
+    pub fn degraded_total(&self) -> u64 {
+        self.degraded_total.load(Ordering::Relaxed)
+    }
+
+    /// Fresh live member count when the scope is live and the view is trusted.
+    pub fn live_member_count(&self) -> Option<u32> {
+        match &self.scope {
+            QuotaScope::Live { view, .. } => view.count(),
+            QuotaScope::Fixed(_) => None,
+        }
+    }
+
+    /// Quotas as enforced by this replica, or `Err` when the cap cannot be proven.
+    fn enforced(&self, tenant: &Tenant) -> Result<TenantQuota, TenantDenyCode> {
+        match &self.scope {
+            QuotaScope::Fixed(members) => Ok(shard_quota(&tenant.quotas, *members)),
+            QuotaScope::Live { view, self_id } => match view.shard_for(self_id) {
+                Some((rank, count)) => Ok(shard_quota_ranked(&tenant.quotas, rank, count)),
+                None => {
+                    self.degraded_total.fetch_add(1, Ordering::Relaxed);
+                    match self.degrade {
+                        DegradePolicy::FailOpen => Ok(tenant.quotas.clone()),
+                        DegradePolicy::FailClosed => Err(TenantDenyCode::QuotaUnavailable),
+                    }
+                }
+            },
+        }
+    }
+
     /// Admit a request under `tenant` quotas. Returns a concurrency guard on success.
     pub async fn try_admit(
         &self,
@@ -63,7 +167,7 @@ impl TenantAdmission {
             AdmitDecision::Deny(code) => return Err(code),
         }
 
-        let quotas = &tenant.quotas;
+        let quotas = self.enforced(tenant)?;
         let mut map = self.inner.lock().await;
         let live = map.entry(tenant.tenant_id.clone()).or_default();
         let now = Instant::now();
@@ -103,7 +207,7 @@ impl TenantAdmission {
             AdmitDecision::Allow => {}
             AdmitDecision::Deny(code) => return Err(code),
         }
-        let Some(limit) = tenant.quotas.max_pin_requests_per_minute else {
+        let Some(limit) = self.enforced(tenant)?.max_pin_requests_per_minute else {
             return Ok(());
         };
 
@@ -208,6 +312,104 @@ mod tests {
         assert_eq!(
             adm.try_admit_pin(&t).await.err(),
             Some(TenantDenyCode::PinAdmissionExceeded)
+        );
+    }
+
+    #[tokio::test]
+    async fn cluster_quota_shards_across_members() {
+        // Two Gateways enforce half of the tenant's RPS each: 5 + 5 = 10, not 20.
+        let adm = TenantAdmission::with_members(2);
+        let t = tenant(10, 10);
+        let mut admitted = 0;
+        for _ in 0..10 {
+            if adm.try_admit(&t, None, 0).await.is_ok() {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 5);
+        assert_eq!(
+            adm.try_admit(&t, None, 0).await.err(),
+            Some(TenantDenyCode::RpsExceeded)
+        );
+    }
+
+    fn live(members: &[&str], self_id: &str, stale_ms: u64) -> TenantAdmission {
+        let view = Arc::new(MemberView::new(std::time::Duration::from_millis(stale_ms)));
+        view.observe(members.iter().map(|m| m.to_string()).collect());
+        TenantAdmission::default().with_live_members(view, self_id)
+    }
+
+    #[tokio::test]
+    async fn live_scope_shards_by_rank_and_uses_the_remainder() {
+        // rps=10 across 3 members: rank 0 takes 4, ranks 1..2 take 3.
+        let adm = live(&["a", "b", "c"], "a", 10_000);
+        let t = tenant(10, 10);
+        let mut admitted = 0;
+        for _ in 0..10 {
+            if adm.try_admit(&t, None, 0).await.is_ok() {
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, 4, "rank 0 must take the remainder unit");
+        assert_eq!(adm.degraded_total(), 0);
+
+        let adm_b = live(&["a", "b", "c"], "b", 10_000);
+        let mut admitted_b = 0;
+        for _ in 0..10 {
+            if adm_b.try_admit(&t, None, 0).await.is_ok() {
+                admitted_b += 1;
+            }
+        }
+        assert_eq!(admitted_b, 3);
+    }
+
+    #[tokio::test]
+    async fn stale_membership_view_fails_closed_by_default() {
+        let adm = live(&["a", "b"], "a", 30);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let t = tenant(10, 10);
+        assert_eq!(
+            adm.try_admit(&t, None, 0).await.err(),
+            Some(TenantDenyCode::QuotaUnavailable),
+            "an unverifiable cap must not admit"
+        );
+        assert_eq!(adm.degraded_total(), 1);
+        // Pin admission takes the same path.
+        assert_eq!(
+            adm.try_admit_pin(&t).await.err(),
+            Some(TenantDenyCode::QuotaUnavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_view_with_fail_open_serves_at_the_full_limit() {
+        let view = Arc::new(MemberView::new(std::time::Duration::from_millis(30)));
+        view.observe(vec!["a".into(), "b".into()]);
+        let adm = TenantAdmission::default()
+            .with_live_members(view, "a")
+            .with_degrade_policy(DegradePolicy::FailOpen);
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        let t = tenant(10, 10);
+        let mut admitted = 0;
+        for _ in 0..12 {
+            if adm.try_admit(&t, None, 0).await.is_ok() {
+                admitted += 1;
+            }
+        }
+        // Fail-open means the documented cluster limit, not a multiplied one.
+        assert_eq!(admitted, 10);
+        assert!(adm.degraded_total() >= 10);
+    }
+
+    #[tokio::test]
+    async fn absent_member_is_never_counted_as_a_shard() {
+        // A Gateway whose own key is missing from the view cannot answer "which
+        // share am I?" — it must degrade, not guess.
+        let adm = live(&["b", "c"], "a", 10_000);
+        let t = tenant(10, 10);
+        assert_eq!(
+            adm.try_admit(&t, None, 0).await.err(),
+            Some(TenantDenyCode::QuotaUnavailable)
         );
     }
 

@@ -39,6 +39,9 @@ pub struct AppState {
     #[allow(dead_code)] // retained for BFF reverse-linking from platform routes
     pub bff_url: String,
     pub tenant_admission: TenantAdmission,
+    /// `/gateways/` lease registry, present unless the divisor is pinned
+    /// (`NEBULA_GATEWAY_QUOTA_MEMBERS`). Used for shutdown deregistration.
+    pub member_registry: Option<Arc<crate::quota_members::MemberRegistry>>,
 }
 
 impl AsRef<nebula_common::auth::AuthConfig> for AppState {

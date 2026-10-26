@@ -137,6 +137,9 @@ pub struct Metrics {
     pub hint_forwarded_total: AtomicU64,
     pub hint_rejected_total: AtomicU64,
     pub hint_untrusted_total: AtomicU64,
+    /// Tenant quota lookups that failed and fell back to "serve without quota".
+    /// Non-zero means the hot-path etcd read is degraded — treat it as an alarm.
+    pub tenant_lookup_failed_total: AtomicU64,
     /// Client disconnect / explicit abort — not counted as 5xx error budget.
     pub requests_aborted_total: AtomicU64,
     /// Streams that ended with an upstream error before `[DONE]` (truncated 200).
@@ -376,6 +379,14 @@ pub fn render_metrics(metrics: &Metrics) -> String {
         "nebula_gateway_hint_total{{stage=\"rejected\"}} {}\n",
         metrics.hint_rejected_total.load(Ordering::Relaxed),
     ));
+    body.push_str(
+        "# HELP nebula_gateway_tenant_lookup_failed_total Tenant quota reads that failed;\
+         \n# TYPE nebula_gateway_tenant_lookup_failed_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_tenant_lookup_failed_total {}\n",
+        metrics.tenant_lookup_failed_total.load(Ordering::Relaxed),
+    ));
     body.push_str(&format!(
         "nebula_gateway_hint_total{{stage=\"untrusted\"}} {}\n",
         metrics.hint_untrusted_total.load(Ordering::Relaxed),
@@ -595,6 +606,35 @@ fn render_queue_metrics(queues: &nebula_common::queue::EngineQueues) -> String {
 
 pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     let mut body = render_metrics(&st.metrics);
+    // Cluster quota membership (issue #68): the divisor this replica is using and
+    // whether the view it came from is still trusted.
+    body.push_str(
+        "# HELP nebula_gateway_quota_members Live Gateway replicas this quota shard is divided by.\n\
+         # TYPE nebula_gateway_quota_members gauge\n",
+    );
+    // Absent, not 0, when the divisor is pinned: there is no live membership.
+    if let Some(n) = st.tenant_admission.live_member_count() {
+        body.push_str(&format!("nebula_gateway_quota_members {n}\n"));
+    }
+    body.push_str(
+        "# HELP nebula_gateway_quota_view_fresh 1 when the membership view is trusted.\n\
+         # TYPE nebula_gateway_quota_view_fresh gauge\n",
+    );
+    if st.member_registry.is_some() {
+        let fresh = st.tenant_admission.live_member_count().is_some();
+        body.push_str(&format!(
+            "nebula_gateway_quota_view_fresh {}\n",
+            u8::from(fresh)
+        ));
+    }
+    body.push_str(
+        "# HELP nebula_gateway_quota_degraded_total Tenant admissions decided under an untrusted membership view.\n\
+         # TYPE nebula_gateway_quota_degraded_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_quota_degraded_total {}\n",
+        st.tenant_admission.degraded_total()
+    ));
     if let Some(router) = st.router.as_ref() {
         body.push_str(&render_router_metrics(router));
     }

@@ -9,7 +9,7 @@
 //! `docs/dev/queue-admission.md`.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -112,6 +112,10 @@ type PriorityWaiterQueue = Arc<Mutex<PriorityWaiterState>>;
 pub struct EngineQueue {
     cfg: QueueConfig,
     sem: Arc<Semaphore>,
+    /// Cluster member count the engine cap is divided by (issue #68). The
+    /// semaphore holds the single-replica ceiling; this divisor enforces this
+    /// replica's share of it and follows the `/gateways/` registry live.
+    divisor: Arc<AtomicU32>,
     priority_waiters: PriorityWaiterQueue,
     waiting: Mutex<WaitState>,
     inflight: Arc<AtomicUsize>,
@@ -196,10 +200,15 @@ impl Drop for WaitingGuard<'_> {
 
 impl EngineQueue {
     pub fn new(cfg: QueueConfig) -> Arc<Self> {
+        Self::new_with_divisor(cfg, Arc::new(AtomicU32::new(1)))
+    }
+
+    fn new_with_divisor(cfg: QueueConfig, divisor: Arc<AtomicU32>) -> Arc<Self> {
         let max = cfg.max_concurrency.max(1);
         Arc::new(Self {
             cfg,
             sem: Arc::new(Semaphore::new(max)),
+            divisor,
             priority_waiters: Arc::new(Mutex::new(PriorityWaiterState::default())),
             waiting: Mutex::new(WaitState::default()),
             inflight: Arc::new(AtomicUsize::new(0)),
@@ -244,6 +253,17 @@ impl EngineQueue {
         )
     }
 
+    /// In-flight ceiling for this replica: the configured engine sweetness
+    /// divided by the live Gateway count, never below 1.
+    pub fn cluster_cap(&self) -> usize {
+        let members = self.divisor.load(Ordering::Relaxed).max(1) as usize;
+        (self.cfg.max_concurrency.max(1) / members).max(1)
+    }
+
+    fn over_cluster_cap(&self) -> bool {
+        self.inflight.load(Ordering::Relaxed) >= self.cluster_cap()
+    }
+
     fn make_permit(
         &self,
         permit: OwnedSemaphorePermit,
@@ -280,9 +300,12 @@ impl EngineQueue {
         tenant: Option<&str>,
         priority_continuation: bool,
     ) -> Result<EnginePermit, QueueDeny> {
-        // Fast path: a slot is free.
-        if let Ok(permit) = self.sem.clone().try_acquire_owned() {
-            return Ok(self.make_permit(permit, priority_continuation));
+        // Fast path: a slot is free *and* this replica is under its share of the
+        // cluster-wide engine cap (N Gateways must not multiply it).
+        if !self.over_cluster_cap() {
+            if let Ok(permit) = self.sem.clone().try_acquire_owned() {
+                return Ok(self.make_permit(permit, priority_continuation));
+            }
         }
 
         // Busy: fast-fail, or `max_wait=0`, reject immediately.
@@ -397,6 +420,11 @@ impl EngineQueue {
             match recv_res {
                 Ok(Ok(permit)) => {
                     cancel_guard.rx = None;
+                    if self.over_cluster_cap() {
+                        // Returning the permit hands the slot to the next waiter.
+                        self.denied_full.fetch_add(1, Ordering::Relaxed);
+                        return Err(QueueDeny::QueueFull);
+                    }
                     Ok(self.make_permit(permit, true))
                 }
                 Ok(Err(_)) => {
@@ -413,6 +441,10 @@ impl EngineQueue {
                         q.waiters.retain(|(id, _)| *id != waiter_id);
                     }
                     if let Ok(permit) = rx.try_recv() {
+                        if self.over_cluster_cap() {
+                            self.denied_full.fetch_add(1, Ordering::Relaxed);
+                            return Err(QueueDeny::QueueFull);
+                        }
                         return Ok(self.make_permit(permit, true));
                     }
                     self.denied_timeout.fetch_add(1, Ordering::Relaxed);
@@ -438,7 +470,15 @@ impl EngineQueue {
             let waited =
                 tokio::time::timeout(effective_wait, self.sem.clone().acquire_owned()).await;
             match waited {
-                Ok(Ok(permit)) => Ok(self.make_permit(permit, false)),
+                Ok(Ok(permit)) => {
+                    if self.over_cluster_cap() {
+                        // Slot handed over while this replica is at its cluster
+                        // share: give it back rather than exceed the engine cap.
+                        self.denied_full.fetch_add(1, Ordering::Relaxed);
+                        return Err(QueueDeny::QueueFull);
+                    }
+                    Ok(self.make_permit(permit, false))
+                }
                 Ok(Err(_)) => Err(QueueDeny::Closed),
                 Err(_) => {
                     self.denied_timeout.fetch_add(1, Ordering::Relaxed);
@@ -452,6 +492,7 @@ impl EngineQueue {
 /// Lazily-created per-model queues sharing one config.
 pub struct EngineQueues {
     cfg: QueueConfig,
+    divisor: Arc<AtomicU32>,
     queues: Mutex<HashMap<String, Arc<EngineQueue>>>,
 }
 
@@ -459,6 +500,7 @@ impl EngineQueues {
     pub fn new(cfg: QueueConfig) -> Arc<Self> {
         Arc::new(Self {
             cfg,
+            divisor: Arc::new(AtomicU32::new(1)),
             queues: Mutex::new(HashMap::new()),
         })
     }
@@ -469,9 +511,20 @@ impl EngineQueues {
 
     pub fn for_model(&self, model: &str) -> Arc<EngineQueue> {
         let mut map = self.queues.lock().unwrap_or_else(|e| e.into_inner());
+        let divisor = self.divisor.clone();
         map.entry(model.to_string())
-            .or_insert_with(|| EngineQueue::new(self.cfg.clone()))
+            .or_insert_with(|| EngineQueue::new_with_divisor(self.cfg.clone(), divisor))
             .clone()
+    }
+
+    /// Follow the live Gateway member count: the engine cap is shared, so N
+    /// replicas must not each admit the engine's full sweet spot (issue #68).
+    pub fn set_members(&self, members: u32) {
+        self.divisor.store(members.max(1), Ordering::Relaxed);
+    }
+
+    pub fn members(&self) -> u32 {
+        self.divisor.load(Ordering::Relaxed).max(1)
     }
 
     pub fn snapshot(&self) -> Vec<(String, Arc<EngineQueue>)> {

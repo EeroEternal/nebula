@@ -11,11 +11,13 @@ mod platform_v1;
 mod platform_webhooks;
 mod protocol_adapt;
 mod proxy_common;
+mod quota_members;
 mod responses;
 mod state;
 mod util;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     middleware,
@@ -163,6 +165,78 @@ async fn main() {
     let stage_timing = std::env::var("NEBULA_GATEWAY_STAGE_TIMING")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    // Cluster quota scope (issue #68). `NEBULA_GATEWAY_QUOTA_MEMBERS=N` pins the
+    // divisor; otherwise the Gateway registers in `/gateways/` and shards against
+    // the live replica count (join/leave re-shards, a failed replica's share goes
+    // to the survivors).
+    let quota_ttl = Duration::from_millis(env_num("NEBULA_GATEWAY_MEMBER_TTL_MS", 15_000));
+    let quota_refresh = Duration::from_millis(env_num("NEBULA_GATEWAY_MEMBER_REFRESH_MS", 2_000));
+    let view_stale = Duration::from_millis(env_num(
+        "NEBULA_GATEWAY_QUOTA_VIEW_STALE_MS",
+        quota_refresh.as_millis() as u64 * 3,
+    ));
+    let degrade = match std::env::var("NEBULA_GATEWAY_QUOTA_DEGRADED")
+        .unwrap_or_else(|_| "fail_closed".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "fail_open" => nebula_common::admission::DegradePolicy::FailOpen,
+        _ => nebula_common::admission::DegradePolicy::FailClosed,
+    };
+    let pinned_members = nebula_common::quota_shard::members_env_override();
+    let store = Arc::new(store);
+    let instance_id = std::env::var("NEBULA_GATEWAY_INSTANCE_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("{}-{}", local_hostname(), args.listen_addr));
+    let (tenant_admission, member_registry) = match pinned_members {
+        Some(n) => {
+            tracing::info!(
+                quota_members = n,
+                "tenant quotas sharded across a pinned member count"
+            );
+            (nebula_common::TenantAdmission::with_members(n), None)
+        }
+        None => {
+            let view = Arc::new(nebula_common::quota_shard::MemberView::new(view_stale));
+            let registry = Arc::new(quota_members::MemberRegistry::new(
+                store.clone(),
+                instance_id.clone(),
+                quota_refresh,
+                view.clone(),
+            ));
+            let joined = registry.join_and_settle(quota_ttl).await;
+            match &joined {
+                Ok(n) => tracing::info!(
+                    instance_id = %instance_id,
+                    members = n,
+                    ttl_ms = quota_ttl.as_millis() as u64,
+                    refresh_ms = quota_refresh.as_millis() as u64,
+                    "gateway registered for cluster quota sharding"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    instance_id = %instance_id,
+                    "gateway registry join failed; tenant quota reads will degrade per policy"
+                ),
+            }
+            let admission = nebula_common::TenantAdmission::default()
+                .with_live_members(view.clone(), instance_id.clone())
+                .with_degrade_policy(degrade);
+            registry.clone().spawn_refresher();
+            let registry_for_shutdown = registry.clone();
+            tokio::spawn(async move {
+                shutdown_signal().await;
+                // Deregister first so survivors reclaim the shard immediately,
+                // then exit: SIGTERM must still terminate the process (before
+                // this, installing the handler kept the Gateway alive).
+                registry_for_shutdown.leave().await;
+                tracing::info!("gateway deregistered; exiting on shutdown signal");
+                std::process::exit(0);
+            });
+            (admission, Some(registry))
+        }
+    };
     // Engine-level bounded fair queue (off unless configured).
     let queues = if std::env::var("NEBULA_GATEWAY_QUEUE_MODE").is_ok()
         || std::env::var("NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY").is_ok()
@@ -179,7 +253,7 @@ async fn main() {
         };
         let cfg = nebula_common::queue::QueueConfig {
             mode,
-            max_concurrency: num("NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY", 32) as usize,
+            max_concurrency: num("NEBULA_GATEWAY_QUEUE_MAX_CONCURRENCY", 32).max(1) as usize,
             max_size: num("NEBULA_GATEWAY_QUEUE_MAX_SIZE", 500) as usize,
             max_wait: std::time::Duration::from_millis(num(
                 "NEBULA_GATEWAY_QUEUE_MAX_WAIT_MS",
@@ -217,7 +291,7 @@ async fn main() {
         queues,
         http,
         upstream,
-        store: Arc::new(store),
+        store,
         auth,
         metrics,
         dual_write,
@@ -227,8 +301,44 @@ async fn main() {
         xtrace_url: args.common.xtrace_url.clone(),
         xtrace_token: args.common.xtrace_token.clone(),
         bff_url: args.bff_url,
-        tenant_admission: nebula_common::TenantAdmission::new(),
+        tenant_admission,
+        member_registry,
     };
+
+    // Engine queue capacity is a cluster budget too: keep it divided by the live
+    // member count, so a join/leave re-scales it without a restart (issue #68).
+    if let Some(queues) = st.queues.clone() {
+        let initial = st
+            .tenant_admission
+            .live_member_count()
+            .or(pinned_members)
+            .unwrap_or(1);
+        queues.set_members(initial);
+        tracing::info!(
+            members = initial,
+            cap_per_replica = st
+                .queues
+                .as_ref()
+                .map(|q| q.config().max_concurrency)
+                .unwrap_or(0),
+            "engine queue capacity divided across Gateway members"
+        );
+        let admission = st.tenant_admission.clone();
+        let refresh = quota_refresh;
+        tokio::spawn(async move {
+            let mut last = initial;
+            loop {
+                if let Some(n) = admission.live_member_count() {
+                    if n != last {
+                        queues.set_members(n);
+                        tracing::info!(members = n, "engine queue divisor updated");
+                        last = n;
+                    }
+                }
+                tokio::time::sleep(refresh).await;
+            }
+        });
+    }
 
     let platform_routes = Router::new()
         .route(
@@ -332,5 +442,45 @@ async fn main() {
 
     if let Err(e) = axum::serve(listener, app).await {
         tracing::error!(error=%e, "gateway server exited");
+    }
+}
+
+fn env_num(key: &str, default: u64) -> u64 {
+    std::env::var(key)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+/// Registry id suffix. Unique per host so two Gateways on one host (different
+/// ports) and Gateways on different hosts never collide.
+fn local_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .map(|h| h.trim().trim_end_matches(['.']).to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "gateway".to_string())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut sig) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            sig.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
     }
 }

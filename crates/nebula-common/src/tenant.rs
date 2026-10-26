@@ -12,6 +12,8 @@ pub enum TenantDenyCode {
     TokenBudgetExceeded,
     ModelDenied,
     PinAdmissionExceeded,
+    /// Cluster quota cannot be verified (stale/unknown Gateway membership view).
+    QuotaUnavailable,
 }
 
 impl TenantDenyCode {
@@ -23,6 +25,7 @@ impl TenantDenyCode {
             Self::TokenBudgetExceeded => "tenant_token_budget_exceeded",
             Self::ModelDenied => "tenant_model_denied",
             Self::PinAdmissionExceeded => "tenant_pin_admission_exceeded",
+            Self::QuotaUnavailable => "tenant_quota_unavailable",
         }
     }
 
@@ -34,6 +37,7 @@ impl TenantDenyCode {
             Self::TokenBudgetExceeded => "tenant token budget exceeded",
             Self::ModelDenied => "model not allowed for tenant",
             Self::PinAdmissionExceeded => "tenant pin admission quota exceeded",
+            Self::QuotaUnavailable => "cluster quota cannot be verified right now",
         }
     }
 }

@@ -66,6 +66,8 @@ Control plane: 3-node etcd + PostgreSQL HA + multi-owner prefix index
 | ModelRecipe / Prompt/KV ABI | 与 Placement 同事务的 resolved snapshot | digest 和只读快照 | 禁止新旧 Recipe 与 Placement 混用 |
 | Endpoint / Capability | Node 写 etcd lease，Router 消费快照 | `/endpoints/` 只读快照 | 缺失 digest 是 Unknown，不视为同 ABI |
 | Tenant 配置 | BFF 写，Gateway 快照 | 禁止逐请求 etcd/PG | 热路径读取失败不能静默放行 |
+
+> 2026-10-26 多机演练发现：Gateway 至今仍是**逐请求**读 `/tenants/{id}`（表内目标是快照），且死 etcd 节点会让读失败后**静默放行**（配额可绕过）。已加一次重试 + `nebula_gateway_tenant_lookup_failed_total` 计数（见 [`../dev/ha/railway-drill.md`](../dev/ha/railway-drill.md)），后台租户快照仍属 HA-P1 未完成项。
 | Tenant 配额 | 集群一致配额视图 | 首版确定性配额分片，后续按证据优化 | 分片总和不超过全局限制，禁止 N× |
 | Tool-Pause lease | 共享租约记录，单写 Owner + CAS | 仅 Tool-Pause 提交/续接/过期等低频转移 | TTL、epoch、fencing、一次性消费 |
 | Session/pin | 共享租约与幂等键驱动引擎控制 API | 后台执行，响应不被 pin 阻塞 | 重复提交不重复 pin，失败只降级性能 |
@@ -83,6 +85,8 @@ Control plane: 3-node etcd + PostgreSQL HA + multi-owner prefix index
 4. 流式请求的 permit 覆盖整个生命周期，abort、错误和正常完成都准确释放。
 5. 预留故障接管余量；未使用分片是否动态再分配由后续真实负载决定，不在首版引入逐请求分布式锁。
 6. 对无法保证硬上限的降级状态必须显式标记，按资源选择 fail-open 或 fail-closed，并记录审计。
+
+**已落地（2026-10-26，#68 部分）**：第 1/2/4 条以**静态成员数**实现——每个 Gateway 强制执行 `limit / N`（`NEBULA_GATEWAY_QUOTA_MEMBERS`，默认 1 = 不分片），整数余数丢弃，所以任意时刻 Σ 分片 ≤ 全局上限，准入路径零 etcd/PG I/O；租户并发 guard 现已覆盖整个流式响应。第 3/5 条也已落地（2026-10-26 第二轮）：`/gateways/{instance_id}` lease 注册表 + 后台视图，成员变化自动重分片、故障副本的分片由存活副本接管、优雅退出立即注销；视图不可信时默认 `fail_closed`（`503 tenant_quota_unavailable`），逐请求无协调。仍未实现：全体 etcd 失联时逐请求读租户仍是 fail-open（HA-P1 租户快照才是根治），以及 LB 分发不均导致的容量浪费。多机实测见 [`../dev/ha/railway-drill-2.md`](../dev/ha/railway-drill-2.md)。因此扩缩 Gateway **必须**同步改该变量，`limit < N` 的租户被拒而不是超卖。详见 [`../dev/queue-admission.md`](../dev/queue-admission.md) §7.1；实测（真 etcd + 2 个真实 Gateway 进程，`members=1` 放行 20 / `members=2` 放行 10）见 [`../dev/ha/quota-drill.md`](../dev/ha/quota-drill.md)，复现脚本 `scripts/ha_quota_drill.sh`。
 
 ### 4.2 Tool-Pause 租约
 
@@ -173,7 +177,7 @@ Nebula 的稳定错误 envelope、Retry-After、abort 和上游 5xx 语义必须
 
 交付：
 
-- 确定性集群配额分片及成员版本、permit 生命周期和降级政策，对应 [#68](https://github.com/EeroEternal/nebula/issues/68)。
+- 确定性集群配额分片及成员版本、permit 生命周期和降级政策，对应 [#68](https://github.com/EeroEternal/nebula/issues/68)。（静态成员数分片已落地，见 §4.1；自动成员版本与再分配未完成）
 - 共享 Tool-Pause 租约、TTL/epoch/fencing、一次性消费和幂等 pin，对应 [#64](https://github.com/EeroEternal/nebula/issues/64)。
 - Session Governance 的配额、过期、释放、审计与低基数指标，对应 [#65](https://github.com/EeroEternal/nebula/issues/65)。
 - 租户 KV 哈希域隔离，对应 [#67](https://github.com/EeroEternal/nebula/issues/67)。

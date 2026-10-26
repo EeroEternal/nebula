@@ -288,10 +288,12 @@ pub fn quota_denied(code: &str, message: &str) -> Response {
 }
 
 pub fn tenant_denied(code: &str, message: &str) -> Response {
-    let status = if code == "tenant_model_denied" || code == "tenant_disabled" {
-        axum::http::StatusCode::FORBIDDEN
-    } else {
-        axum::http::StatusCode::TOO_MANY_REQUESTS
+    // 503 (not 429) when the Gateway cannot verify the quota: retrying this
+    // instance will not help, whereas 429 means "you are over your limit".
+    let status = match code {
+        "tenant_model_denied" | "tenant_disabled" => axum::http::StatusCode::FORBIDDEN,
+        "tenant_quota_unavailable" => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        _ => axum::http::StatusCode::TOO_MANY_REQUESTS,
     };
     (
         status,

@@ -19,6 +19,7 @@ pub mod node_status;
 pub mod placement;
 pub mod pool;
 pub mod queue;
+pub mod quota_shard;
 pub mod selection;
 pub mod slo;
 pub mod tenant;
