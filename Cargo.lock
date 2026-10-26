@@ -4658,7 +4658,8 @@ checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 [[package]]
 name = "xlite-transport"
 version = "0.1.0"
-source = "git+https://github.com/EeroEternal/xlite?rev=67abc190c89ed6f9b01907d32d1bdde5d6fa9172#67abc190c89ed6f9b01907d32d1bdde5d6fa9172"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a9cf97cd276a2bfc85101d429ab1337e98b15b4b96092d65c175aa81bb8917"
 dependencies = [
  "arc-swap",
  "bytes",

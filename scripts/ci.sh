@@ -9,6 +9,7 @@
 #   1. cargo fmt --check
 #   2. cargo clippy --all-targets -- -D warnings
 #   3. cargo test --workspace --all-targets
+#   3b. clippy+test -p nebula-common --features xlite (transport contract suite)
 #   4. ./scripts/check_openapi_control.sh
 #   5. bash scripts/check_ui_stack.sh && bash scripts/check_admin_nav.sh
 #   5b. ./scripts/check_agents_budget.sh (AGENTS.md 80-line cap)
@@ -36,6 +37,10 @@ cargo clippy --all-targets -- -D warnings
 
 echo "========== cargo test --workspace =========="
 cargo test --workspace --all-targets -- --nocapture
+
+echo "========== xlite transport contract (opt-in feature) =========="
+cargo clippy -p nebula-common --features xlite --all-targets -- -D warnings
+cargo test -p nebula-common --features xlite --all-targets
 
 echo "========== openapi-control =========="
 ./scripts/check_openapi_control.sh
