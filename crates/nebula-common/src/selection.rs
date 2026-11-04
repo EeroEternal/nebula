@@ -355,17 +355,22 @@ fn roofline_quantization_adjustment(
     (effective_bonus, reason)
 }
 
-/// Switching-cost penalty, identical for every preference.
-///
-/// Single definition shared by `score_candidate` and `build_score_breakdown` so
-/// the explainable breakdown always reconstructs the real `score`; the two drifted
-/// apart once (Cost used `* 0.01` while the breakdown printed `* 10.0`).
-fn switch_penalty(c: &BackendCandidate) -> f64 {
-    c.switching_cost * 10.0
+/// Shared by scoring and explanations. Cost uses a relative migration premium
+/// (issue #88): the 0..1 switching heuristic adds at most 10% of the candidate's
+/// measured cost, not a fixed surcharge in unrelated units. This is a ranking
+/// policy, not an estimate of actual migration expense.
+fn switch_penalty(pref: SelectionPreference, c: &BackendCandidate) -> f64 {
+    match pref {
+        SelectionPreference::Cost => c
+            .cost_per_1k_tokens
+            .map(|cost| cost * c.switching_cost * 0.1)
+            .unwrap_or(0.0),
+        SelectionPreference::Latency | SelectionPreference::Throughput => c.switching_cost * 10.0,
+    }
 }
 
 fn score_candidate(pref: SelectionPreference, c: &BackendCandidate, roofline_bonus: f64) -> f64 {
-    let switch_penalty = switch_penalty(c);
+    let switch_penalty = switch_penalty(pref, c);
     let base = match pref {
         SelectionPreference::Latency => {
             let ttft = c.ttft_p95_ms.unwrap_or(f64::MAX);
@@ -397,7 +402,7 @@ fn build_score_breakdown(
     roofline_bonus: f64,
     score: f64,
 ) -> Vec<String> {
-    let switch_penalty = switch_penalty(c);
+    let switch_penalty = switch_penalty(pref, c);
     let mut parts = vec![format!("preference={}", preference_label(pref))];
     match pref {
         SelectionPreference::Latency => {
@@ -420,7 +425,7 @@ fn build_score_breakdown(
             parts.push(format!(
                 "cost_per_1k={}",
                 c.cost_per_1k_tokens
-                    .map(|v| format!("{v:.4}"))
+                    .map(|v| v.to_string())
                     .unwrap_or_else(|| "missing".into())
             ));
         }
@@ -428,9 +433,9 @@ fn build_score_breakdown(
     if roofline_bonus.abs() > f64::EPSILON {
         parts.push(format!("roofline_bonus={roofline_bonus:.1}"));
     }
-    parts.push(format!("switch_penalty={switch_penalty:.1}"));
+    parts.push(format!("switch_penalty={switch_penalty}"));
     parts.push(format!("switching_cost={:.2}", c.switching_cost));
-    parts.push(format!("score={score:.2}"));
+    parts.push(format!("score={score}"));
     parts
 }
 
@@ -821,12 +826,8 @@ mod tests {
         assert_eq!(ok.engine_type, "vllm");
     }
 
-    #[test]
-    fn score_breakdown_terms_reconstruct_score_for_every_preference() {
-        // Regression: Cost used `switching_cost * 0.01` for scoring while the
-        // breakdown printed `* 10.0`, so the API's explainable `score_breakdown`
-        // did not add up for cost-preference responses.
-        let c = BackendCandidate {
+    fn sample_candidate() -> BackendCandidate {
+        BackendCandidate {
             engine_type: "vllm".into(),
             engine_version: None,
             image_id: None,
@@ -840,19 +841,136 @@ mod tests {
             throughput_tps: Some(42.0),
             cost_per_1k_tokens: Some(0.004),
             reasons: vec![],
+        }
+    }
+
+    fn breakdown_value(parts: &[String], key: &str) -> f64 {
+        parts
+            .iter()
+            .find_map(|part| part.strip_prefix(key))
+            .expect("component in breakdown")
+            .parse()
+            .expect("numeric component")
+    }
+
+    #[test]
+    fn cost_preference_savings_outweigh_image_and_engine_switches() {
+        let req = SelectionRequest {
+            model: ModelProfile {
+                model_name: sample_profile("vllm").profile_key.model_name,
+                ..Default::default()
+            },
+            workload: WorkloadHint::default(),
+            constraints: SelectionConstraints {
+                preference: SelectionPreference::Cost,
+                ..Default::default()
+            },
+            current: CurrentBackend {
+                engine_type: Some("vllm".into()),
+                image_id: Some("vllm-img".into()),
+                platform: Some("nvidia".into()),
+            },
         };
+        for engine in ["vllm", "sglang"] {
+            let current_profile = sample_profile("vllm");
+            let mut other_profile = sample_profile(engine);
+            other_profile.profile_key.param_fingerprint = Some("alternative".into());
+            other_profile.run_ids = vec!["r-alternative".into()];
+            let profiles = [current_profile, other_profile];
+            let mut current_run = sample_run("vllm");
+            current_run.cost_per_1k_tokens = Some(0.008);
+            let mut other_run = sample_run(engine);
+            other_run.run_id = "r-alternative".into();
+            other_run.profile_key = profiles[1].profile_key.clone();
+            // Isolate an image change, then an engine change with the same image.
+            other_run.image_id = Some(if engine == "vllm" {
+                "alternative-img".into()
+            } else {
+                "vllm-img".into()
+            });
+
+            let mut previous_margin = f64::NEG_INFINITY;
+            for cost in [0.008, 0.004, 0.002] {
+                other_run.cost_per_1k_tokens = Some(cost);
+                let response =
+                    select_backends(&req, &profiles, &[current_run.clone(), other_run.clone()]);
+                assert_eq!(response.candidates.len(), 2);
+                let current = response
+                    .candidates
+                    .iter()
+                    .find(|c| c.evidence_run_ids == ["r-vllm"])
+                    .unwrap();
+                let other = response
+                    .candidates
+                    .iter()
+                    .find(|c| c.evidence_run_ids == ["r-alternative"])
+                    .unwrap();
+                let margin = other.score - current.score;
+                assert!(margin > previous_margin);
+                previous_margin = margin;
+                let expected = if cost == 0.008 {
+                    // Equal costs still prefer avoiding a migration.
+                    "r-vllm"
+                } else {
+                    "r-alternative"
+                };
+                assert_eq!(response.candidates[0].evidence_run_ids, [expected]);
+            }
+        }
+    }
+
+    #[test]
+    fn cost_switch_penalty_is_relative_and_preserves_breakdown_precision() {
+        let mut candidate = sample_candidate();
+        for cost in [0.0, 1e-8, 0.004, 1.0, 1000.0] {
+            candidate.cost_per_1k_tokens = Some(cost);
+            for switching_cost in [0.0, 0.3, 0.5, 0.8, 1.0] {
+                candidate.switching_cost = switching_cost;
+                let score = score_candidate(SelectionPreference::Cost, &candidate, 0.0);
+                let parts =
+                    build_score_breakdown(SelectionPreference::Cost, &candidate, 0.0, score);
+                let penalty = breakdown_value(&parts, "switch_penalty=");
+                let expected = cost * switching_cost * 0.1;
+                let tolerance = cost * 1e-12;
+                assert!(
+                    (penalty - expected).abs() <= tolerance,
+                    "cost={cost}, switching_cost={switching_cost}, penalty={penalty}"
+                );
+                assert!(penalty <= cost * 0.1 + tolerance);
+                assert_eq!(breakdown_value(&parts, "cost_per_1k="), cost);
+                assert_eq!(breakdown_value(&parts, "score="), score);
+                assert_eq!(-(cost + penalty), score);
+            }
+        }
+    }
+
+    #[test]
+    fn cost_preference_missing_cost_stays_worse_than_measured_cost() {
+        let mut candidate = sample_candidate();
+        candidate.cost_per_1k_tokens = None;
+        let unknown = score_candidate(SelectionPreference::Cost, &candidate, 0.0);
+        assert!(unknown.is_finite());
+        candidate.cost_per_1k_tokens = Some(0.004);
+        let measured = score_candidate(SelectionPreference::Cost, &candidate, 0.0);
+        assert!(measured > unknown);
+    }
+
+    #[test]
+    fn score_breakdown_terms_reconstruct_score_for_every_preference() {
+        let c = sample_candidate();
         for pref in [
             SelectionPreference::Latency,
             SelectionPreference::Throughput,
             SelectionPreference::Cost,
         ] {
             let score = score_candidate(pref, &c, 0.0);
-            let printed_penalty = build_score_breakdown(pref, &c, 0.0, score)
-                .iter()
-                .find_map(|p| p.strip_prefix("switch_penalty=").map(str::to_string))
-                .expect("switch_penalty in breakdown")
-                .parse::<f64>()
-                .expect("numeric switch_penalty");
+            let parts = build_score_breakdown(pref, &c, 0.0, score);
+            let printed_penalty = breakdown_value(&parts, "switch_penalty=");
+            match pref {
+                SelectionPreference::Latency => assert_eq!(score, -802.5),
+                SelectionPreference::Throughput => assert_eq!(score, 39.5),
+                SelectionPreference::Cost => {}
+            }
             let reconstructed = match pref {
                 SelectionPreference::Latency => -(800.0 + printed_penalty),
                 SelectionPreference::Throughput => 42.0 - printed_penalty,

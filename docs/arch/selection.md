@@ -26,13 +26,13 @@
 
 ## 打分与可解释
 
-排序分数由偏好决定，并对 `switching_cost` 施加惩罚（`switch_penalty = switching_cost * 10`）：
+排序分数由偏好决定，并对 `switching_cost` 施加惩罚：
 
-- **latency**：`-(ttft_p95 + switch_penalty)`（越高越好）
-- **throughput**：`throughput_tps - switch_penalty`
-- **cost**：`-(cost_per_1k + switch_penalty)`
+- **latency**：`switch_penalty = switching_cost * 10`，分数为 `-(ttft_p95 + switch_penalty)`（越高越好）。
+- **throughput**：`switch_penalty = switching_cost * 10`，分数为 `throughput_tps - switch_penalty`。
+- **cost**：`switch_penalty = cost_per_1k * switching_cost * 0.1`，分数为 `-(cost_per_1k + switch_penalty)`。`switching_cost` 为 0–1 的启发式值，因此切换惩罚不超过候选成本的 10%，与主指标量纲一致；该比例是排序策略，不是实测迁移费用。缺失成本仍按最差分数处理，不以零成本替代。
 
-每个候选写回 `score` 与 `score_breakdown`（如 `preference=latency`、`ttft_p95=…`、`switch_penalty=…`、`score=…`）；`reasons` 含 preference 与 switching 说明。
+每个候选写回 `score` 与 `score_breakdown`（如 `preference=latency`、`ttft_p95=…`、`switch_penalty=…`、`score=…`）；`reasons` 含 preference 与 switching 说明。成本、切换惩罚与最终分数的明细保留浮点精度，不将小额成本或惩罚舍入成零。
 
 ## `current` 自动填充
 
