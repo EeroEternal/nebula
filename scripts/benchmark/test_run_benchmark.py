@@ -142,6 +142,41 @@ class BenchmarkTests(unittest.TestCase):
         self.assertAlmostEqual(run["evidence"]["goodput_rps"], 4 / metrics["wall_time_s"])
         self.assertAlmostEqual(run["cost_per_1k_tokens"], 2000 / run["throughput_tps"])
 
+    def test_capability_evidence_is_scoped_archived_and_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "capability.json"
+            capability = {
+                "engine_type": "vllm", "engine_version": "0.1", "source": "manual_override",
+                "quantization": "w4a4", "native_low_precision_paths": {"w4a4": "supported"},
+                "notes": "private notes are not archived",
+            }
+            path.write_text(json.dumps(capability))
+            options = ("--engine-version", "0.1", "--image-id", "test-image")
+            args, workload = self.args(*options, "--capability-file", str(path))
+            metrics = bench.run_requests(args, bench.request_plan(args, workload))
+            declared = bench.build_run(args, workload, metrics, "trace", "samples")
+            self.assertEqual(declared["evidence"]["engine_capability"]["quantization"], "w4a4")
+            self.assertNotIn("notes", declared["evidence"]["engine_capability"])
+            plain_args, _ = self.args(*options)
+            plain = bench.build_run(plain_args, workload, metrics, "trace", "samples")
+            self.assertNotEqual(declared["profile_key"]["param_fingerprint"], plain["profile_key"]["param_fingerprint"])
+            self.assertTrue(all("engine_capability" not in body for body in self.server.bodies))
+            # Validation occurs before any network I/O.
+            for field, value in [
+                ("engine_type", "sglang"), ("engine_version", "other"), ("source", "invented"),
+                ("quantization", "b200"), ("native_low_precision_paths", {"w4a4": False}),
+                ("native_low_precision_paths", {"unknown": "supported"}),
+            ]:
+                with self.subTest(field=field, value=value):
+                    path.write_text(json.dumps({**capability, field: value}))
+                    with patch.object(bench, "run_requests") as requests, contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit):
+                            bench.main(["--model", "test", *options, "--capability-file", str(path)])
+                    requests.assert_not_called()
+            path.write_text(json.dumps(capability))
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.args("--capability-file", str(path))
+
     def test_open_loop_overload_does_not_wait_and_change_arrival_rate(self):
         _, metrics, run = self.run_summary(
             "--concurrency", "1", "--arrival", "constant", "--arrival-rate", "1000",

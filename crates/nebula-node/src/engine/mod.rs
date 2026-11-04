@@ -83,6 +83,8 @@ pub trait Engine: Send + Sync {
             engine_type: self.engine_type().to_string(),
             engine_version: None,
             source: nebula_common::CapabilitySource::StaticTable,
+            quantization: None,
+            native_low_precision_paths: Default::default(),
             openai_compatible: None,
             tensor_parallel: None,
             data_parallel: None,

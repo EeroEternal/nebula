@@ -26,6 +26,8 @@ pub fn merge_runtime_capability(
         engine_type: engine_type.to_string(),
         engine_version: None,
         source: CapabilitySource::StaticTable,
+        quantization: None,
+        native_low_precision_paths: Default::default(),
         openai_compatible: None,
         tensor_parallel: None,
         data_parallel: None,

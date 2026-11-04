@@ -79,6 +79,35 @@ and evidence metadata in BFF Postgres JSONB. Archive raw files separately; the B
 does not upload them. Synthetic/failed runs are excluded from profiles, and stale
 profiles containing known synthetic evidence are sanitized before recommendation.
 
+## Optional low-precision declaration
+
+`--capability-file capability.json` archives a selection-related `EngineCapability`
+subset, for example:
+
+```json
+{
+  "engine_type": "vllm",
+  "engine_version": "0.19.0",
+  "source": "manual_override",
+  "quantization": "w4a4",
+  "native_low_precision_paths": {"w4a4": "supported"}
+}
+```
+
+This is an example assertion, not a claim that a particular GPU/engine supports
+W4A4. Only supply a declaration verified for this model and runtime. Also set
+nonempty `--engine-version`, `--image-id`, and `--platform`; the snapshot engine
+and version must match. The file is capped at 64 KiB and validated before network
+I/O. Accepted formats: `w4a4`, `w4a16`, `fp8`, `w8a8`, `int8`; path states:
+`supported`, `unsupported`, `unknown`. Absent paths are unknown, not unsupported.
+
+Only the five fields above are archived, never arbitrary notes. The declaration
+is included in the load fingerprint and is not sent to the inference engine.
+Selection applies it only within matching run evidence, not across platforms or
+images. There is no automatic hardware/semantic probe in this option. Unknown or
+conflicting declarations receive no Roofline adjustment; the remaining numeric
+rules are uncalibrated ranking heuristics, not measured speedups.
+
 ## Tests and exit codes
 
 ```bash

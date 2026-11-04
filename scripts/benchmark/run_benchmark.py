@@ -31,6 +31,7 @@ from urllib.request import Request, urlopen
 WORKLOAD_DIR = Path(__file__).resolve().parent / "workloads"
 MAX_EVENT_BYTES = 1024 * 1024
 MAX_REQUESTS = 100_000
+QUANT_FORMATS = {"w4a4", "w4a16", "fp8", "w8a8", "int8"}
 
 
 def percentile(values: list[float], p: float) -> float | None:
@@ -79,6 +80,36 @@ def hash_plan(plan: list[dict[str, Any]]) -> str:
         digest.update(encoded_json(row))
     digest.update(b"]")
     return digest.hexdigest()
+
+
+def load_engine_capability(args: argparse.Namespace) -> dict[str, Any] | None:
+    if not args.capability_file:
+        return None
+    if not all(value and value.strip() for value in (args.engine_version, args.image_id, args.platform)):
+        raise ValueError("capability evidence requires engine-version, image-id, and platform")
+    path = Path(args.capability_file)
+    if path.stat().st_size > 64 * 1024:
+        raise ValueError("capability file exceeds 64 KiB")
+    capability = json.loads(path.read_text())
+    if not isinstance(capability, dict):
+        raise ValueError("invalid capability snapshot")
+    paths = capability.get("native_low_precision_paths", {})
+    quantization = capability.get("quantization")
+    if (
+        capability.get("engine_type") != args.engine
+        or capability.get("engine_version") != args.engine_version
+        or capability.get("source") not in {"static_table", "runtime_discovery", "manual_override"}
+        or (quantization is not None and (not isinstance(quantization, str) or quantization not in QUANT_FORMATS))
+        or not isinstance(paths, dict)
+        or any(key not in QUANT_FORMATS or value not in {"supported", "unsupported", "unknown"} for key, value in paths.items())
+    ):
+        raise ValueError("invalid or mismatched low-precision declaration")
+    # Archive only the selection-related subset, never arbitrary notes/metadata.
+    return {
+        "engine_type": args.engine, "engine_version": args.engine_version,
+        "source": capability["source"], "quantization": quantization,
+        "native_low_precision_paths": paths,
+    }
 
 
 def remaining_budget(deadline: float) -> float:
@@ -448,6 +479,7 @@ def build_run(
         "comparison_group": args.comparison_group, "abba_position": args.abba_position,
         "variant": "ABBA"[args.abba_position] if args.abba_position is not None else None,
         "round": args.round,
+        "engine_capability": args.engine_capability,
     }
     return {
         "run_id": args.run_id,
@@ -463,6 +495,7 @@ def build_run(
                 "concurrency": args.concurrency, "arrival": evidence["arrival"],
                 "arrival_rate": args.arrival_rate, "gpu_count": args.gpu_count,
                 "cache_state": args.cache_state, "slo": targets,
+                "engine_capability": args.engine_capability,
             })).hexdigest(),
         },
         "workload": workload, "status": status, "base_url": args.base_url,
@@ -485,6 +518,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, dict[
     parser.add_argument("--model", required=True)
     parser.add_argument("--engine", default="vllm", choices=["vllm", "sglang", "tokenspeed"])
     parser.add_argument("--engine-version")
+    parser.add_argument("--capability-file", help="Run-scoped EngineCapability JSON, not an automatic probe")
     parser.add_argument("--platform", default="nvidia-cuda")
     parser.add_argument("--gpu-name")
     parser.add_argument("--gpu-count", type=int)
@@ -574,6 +608,7 @@ def parse_args(argv: list[str] | None = None) -> tuple[argparse.Namespace, dict[
             if not args.token:
                 raise ValueError("token environment variable is empty")
         args.run_id = args.run_id or f"bench-{uuid.uuid4().hex[:12]}"
+        args.engine_capability = load_engine_capability(args)
         return args, workload
     except (OSError, ValueError, KeyError, TypeError):
         parser.error("invalid benchmark configuration; check workload, URLs, counts, and arrival/SLO options")

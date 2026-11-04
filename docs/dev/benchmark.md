@@ -38,7 +38,7 @@ SSE event 有 1 MiB 上限；请求生成器最多接受 100000 条请求，计�
 - 回放：JSONL 显式指定相对到达时刻、prompt 与 token 上限；seed、temperature、
   规范化 trace 的 SHA-256 保存在证据中。原 trace 由操作者安全保存。
 - 比较域：profile fingerprint 包含引擎参数、镜像/软件标签、trace、seed、并发、到达方式、
-  到达速率、GPU 数、缓存状态与 SLO 门限，避免不同负载被聚成同一画像。
+  到达速率、GPU 数、缓存状态、SLO 门限与低精度能力声明，避免不同负载或声明被聚成同一画像。
 - ABBA：四次运行标记为 A/B/B/A，保存比较组、轮次、位置；端点切换由操作者完成。
   冷/暖状态须分开报告，`--cache-state` 仅记录声明，不自动预热或清空缓存。
 
@@ -59,7 +59,25 @@ usage、结束原因和错误分类，不保存生成正文、认证 header 或 
 - 无有效输出/usage：标为 `insufficient_data`，不提供乐观选型证据。
 - 只有真实成功运行才能进入画像。旧数据缺少 evidence 字段时保留兼容，但明确带
   `dry-run` / `dry_run` 标记的历史数据被排除。
-- 推荐时会重算包含已知无效样本的旧画像，防止只过滤成本而仍沿用合成 TTFT/吞吐。
+- 推荐时会重算包含已知无效样本或完整 profile key 已变化的旧画像，防止沿用合成性能，
+  或在覆盖同一 `run_id` 后借用另一个 workload/GPU/参数指纹的指标与能力。
+
+## 低精度能力声明
+
+`--capability-file` 接受现有 `EngineCapability` JSON 的选型相关子集：
+`engine_type`、`engine_version`、`source`、`quantization`、`native_low_precision_paths`。
+格式为 `w4a4/w4a16/fp8/w8a8/int8`，通路状态为 `supported/unsupported/unknown`。
+缺少活动格式或对应通路声明时，Roofline 修正为零；不能从镜像或芯片名称补猜。
+
+文件最多 64 KiB；必须提供非空 `--engine-version`、`--image-id`、`--platform`，
+且文件的引擎与版本匹配本轮参数。校验在联网前完成。只归档上述字段，不复制任意
+notes 或其他私有元数据；声明同时进入 profile fingerprint，不发送给推理引擎。
+手工声明使用 `source=manual_override`，操作者负责确认它适用于本次模型/硬件/运行时；
+本选项不探测通路、不把手工声明升级成实测能力，#87 的自动语义探针仍未实现。
+
+快照随这一次真实成功的 run 持久化到 `evidence.engine_capability`。Selection 仅使用
+自身候选 run ids 对应且作用域一致的快照；缺失、相互冲突或绑定信息未知时保持中性，
+不拿同模型的其他平台或其他镜像来补齐。规则与边界见 [`selection.md`](../arch/selection.md)。
 
 ## 验证
 

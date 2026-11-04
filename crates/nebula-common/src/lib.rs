@@ -36,8 +36,8 @@ pub use capability::{
     static_capability_sglang, static_capability_tokenspeed, static_capability_vllm,
     static_version_support, tool_calling_for_engine, validate_engine_and_config,
     validate_engine_type, validate_engine_version, validate_model_config, CapabilitySource,
-    EngineCapability, EngineVersionSupport, ObservabilityCapability, ReplicaCapability,
-    ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
+    EngineCapability, EngineVersionSupport, ObservabilityCapability, QuantFormat,
+    ReplicaCapability, ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
 };
 pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
 pub use cluster::ClusterStatus;

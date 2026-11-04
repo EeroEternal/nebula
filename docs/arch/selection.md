@@ -16,7 +16,7 @@
 
 ## 数据模型（v0）
 
-- **ModelProfile**：架构（dense/moe）、参数规模、量化、上下文、可选 `model_uid`
+- **ModelProfile**：架构（dense/moe）、参数规模、权重量化、上下文、可选 `model_uid`；另含 `sliding_window_tokens`、`linear_attention_layer_ratio`、`kv_lora_rank`。后三项仍驱动经验 KV 估算，尚非实测标定（#88 未完成部分）。
 - **WorkloadHint**：并发、QPS、长短上下文偏好、workload_id
 - **SelectionConstraints**：SLO、预算、允许引擎/平台、偏好（latency|throughput|cost）
 - **BackendCandidate**：引擎、版本、镜像、平台、预估 SLI、`confidence`、`switching_cost`、`score`、`score_breakdown`、`reasons`、证据 run ids
@@ -33,6 +33,29 @@
 - **cost**：`switch_penalty = cost_per_1k * switching_cost * 0.1`，分数为 `-(cost_per_1k + switch_penalty)`。`switching_cost` 为 0–1 的启发式值，因此切换惩罚不超过候选成本的 10%，与主指标量纲一致；该比例是排序策略，不是实测迁移费用。缺失成本仍按最差分数处理，不以零成本替代。
 
 每个候选写回 `score` 与 `score_breakdown`（如 `preference=latency`、`ttft_p95=…`、`switch_penalty=…`、`score=…`）；`reasons` 含 preference 与 switching 说明。成本、切换惩罚与最终分数的明细保留浮点精度，不将小额成本或惩罚舍入成零。
+
+### Roofline 声明门禁
+
+只消费候选证据 run 中的 `evidence.engine_capability`，复用现有 `EngineCapability`：
+`quantization` 声明该次运行的活动格式（`w4a4/w4a16/fp8/w8a8/int8`），
+`native_low_precision_paths` 按格式声明 `supported/unsupported/unknown`，缺项为未知。
+通用引擎静态表不声明硬件低精度能力；当前无自动探针，不把手工声明称为实测能力。
+
+候选的所有 run 必须真实成功、完整、声明一致，且模型、完整 profile key、引擎版本、
+平台和镜像作用域一致。召回阶段逐条对照所属画像的完整 key；覆盖同一 `run_id`
+导致 workload/GPU/fingerprint 变化时先重建旧画像，移除跨配置引用，再计算性能与声明。
+缺少版本/镜像/平台、声明缺失或冲突时，修正为零。
+不从芯片名、镜像名、`ModelProfile.quantization` 或理由文案推断原生能力。
+采集入口见 [`压测证据协议`](../dev/benchmark.md) 和 runner 的 `--capability-file`。
+
+以下保留为**未经真机校准的排序启发式**，不是百分比收益或容量准入依据：
+
+- 活动格式为 W4A4 且对应原生通路明确 supported：+15。
+- 活动 W4A16 原生通路 supported，并发 1–4：+15。
+- 活动 FP8/W8A8/INT8 原生通路 supported，并发 ≥16：+15。
+- 活动 W4A16 原生通路 supported，W4A4 **明确 unsupported**，并发 ≥16：−5；
+  仅缺少 W4A4 声明不能作为惩罚依据。
+- Cost 偏好始终不叠加这些常数，仅保留有声明依据的解释。
 
 ## `current` 自动填充
 

@@ -6,9 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::benchmark::{
-    recommend_from_profiles, PerformanceProfile, RecommendCandidate, RecommendConfidence,
-    RecommendRequest, RecommendResponse,
+    recommend_from_profiles, BenchmarkRun, PerformanceProfile, RecommendCandidate,
+    RecommendConfidence, RecommendRequest, RecommendResponse,
 };
+use crate::capability::{QuantFormat, SupportLevel};
 use crate::model_deployment::{DesiredState, ModelDeployment};
 use crate::model_request::ModelConfig;
 
@@ -216,11 +217,13 @@ pub fn switching_cost(current: &CurrentBackend, candidate: &RecommendCandidate) 
 }
 
 pub const ROOFLINE_COMPUTE_BOUND_FP8_REASON: &str =
-    "concurrency >= 16 enters compute-bound regime where FP8 matches 4-bit decode throughput without 4-bit prefill unpack penalty";
+    "uncalibrated Roofline heuristic: concurrency >= 16 favors a declared native 8-bit path";
 pub const ROOFLINE_MEMORY_BOUND_4BIT_REASON: &str =
-    "concurrency <= 4 is memory-bandwidth-bound where 4-bit quantization delivers ~20-27% decode speedup";
+    "uncalibrated Roofline heuristic: concurrency <= 4 favors a declared native weight-only 4-bit path";
 pub const ROOFLINE_NATIVE_W4A4_REASON: &str =
-    "native W4A4/NVFP4 hardware path preserves 4-bit speedup without register unpack penalty";
+    "uncalibrated Roofline heuristic: this run declares an active native W4A4 path";
+pub const ROOFLINE_UNPACK_REASON: &str =
+    "uncalibrated Roofline heuristic: concurrency >= 16, active W4A16 and explicitly unsupported W4A4";
 
 /// Estimate total KV-cache / recurrent-state working-set VRAM (MB) for `concurrency`
 /// active sequences at `context_len` tokens, modeling the three attention cache kinds
@@ -271,82 +274,85 @@ pub fn estimate_kv_cache_vram_mb(
     per_request_mb * (concurrency as f64)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum QuantBucket {
-    FourBit,
-    Fp8,
-    Other,
-}
-
-fn classify_quantization(
-    model_quant: Option<&str>,
+fn declared_quantization(
+    req: &SelectionRequest,
     candidate: &BackendCandidate,
-) -> (QuantBucket, bool) {
-    let combined = format!(
-        "{} {} {} {}",
-        model_quant.unwrap_or(""),
-        candidate.image_id.as_deref().unwrap_or(""),
-        candidate.platform.as_deref().unwrap_or(""),
-        candidate.reasons.join(" ")
-    )
-    .to_ascii_lowercase();
-
-    let native_w4a4 = combined.contains("nvfp4")
-        || combined.contains("w4a4")
-        || combined.contains("b200")
-        || combined.contains("gb200")
-        || combined.contains("gb300");
-
-    if combined.contains("fp8") || combined.contains("w8a8") || combined.contains("int8") {
-        (QuantBucket::Fp8, native_w4a4)
-    } else if combined.contains("4bit")
-        || combined.contains("4-bit")
-        || combined.contains("awq")
-        || combined.contains("gptq")
-        || combined.contains("int4")
-        || combined.contains("w4a16")
-        || combined.contains("nvfp4")
-        || combined.contains("fp4")
-    {
-        (QuantBucket::FourBit, native_w4a4)
-    } else {
-        (QuantBucket::Other, native_w4a4)
+    runs: &[BenchmarkRun],
+) -> Option<(QuantFormat, SupportLevel)> {
+    for scope in [
+        &candidate.image_id,
+        &candidate.platform,
+        &candidate.engine_version,
+    ] {
+        scope.as_deref().filter(|value| !value.trim().is_empty())?;
     }
+    let mut declaration = None;
+    let mut profile_key = None;
+    let by_id: std::collections::HashMap<_, _> =
+        runs.iter().map(|run| (run.run_id.as_str(), run)).collect();
+    if by_id.len() != runs.len() {
+        return None;
+    }
+    // Every evidence run must agree. Missing/contradictory declarations are unknown;
+    // never borrow one platform's declaration or a live replica's unrelated snapshot.
+    for id in &candidate.evidence_run_ids {
+        let run = by_id.get(id.as_str())?;
+        if !run.usable_for_selection()
+            || run.profile_key.model_name != req.model.model_name
+            || run.profile_key.engine_type != candidate.engine_type
+            || run.profile_key.engine_version != candidate.engine_version
+            || run.profile_key.platform != candidate.platform
+            || run.image_id != candidate.image_id
+            || profile_key.is_some_and(|key| key != &run.profile_key)
+        {
+            return None;
+        }
+        profile_key = Some(&run.profile_key);
+        let capability = run.evidence.as_ref()?.engine_capability.as_ref()?;
+        if capability.engine_type != run.profile_key.engine_type
+            || capability.engine_version != run.profile_key.engine_version
+        {
+            return None;
+        }
+        let format = capability.quantization?;
+        if capability.native_low_precision_paths.get(&format) != Some(&SupportLevel::Supported) {
+            return None;
+        }
+        let native_w4a4 = capability
+            .native_low_precision_paths
+            .get(&QuantFormat::W4A4)
+            .copied()
+            .unwrap_or(SupportLevel::Unknown);
+        let current = (format, native_w4a4);
+        if declaration.is_some_and(|previous| previous != current) {
+            return None;
+        }
+        declaration = Some(current);
+    }
+    declaration
 }
 
-/// Roofline quantization score bonus and explainable reason (Batch 5.5):
-/// - `concurrency <= 4` or native W4A4 (`NVFP4`): +15.0 bonus for 4-bit candidates under Latency/Throughput preference.
-/// - `concurrency >= 16` without native W4A4: +15.0 bonus for FP8 candidates (and -5.0 unpack
-///   penalty on non-native 4-bit candidates) under Latency/Throughput preference.
-/// - Under `SelectionPreference::Cost` (`$/1k tokens`), numeric bonus is `0.0` so cost ordering
-///   is never inverted by a latency/throughput constant, while the explainable Roofline reason
-///   is still attached.
+/// Uncalibrated ranking policy, gated on run-scoped declarations, never chip names.
+/// Unknown format/path is neutral; an absent W4A4 entry cannot prove an unpack penalty.
+/// Cost retains explanations but never adds a latency/throughput constant.
 fn roofline_quantization_adjustment(
     req: &SelectionRequest,
     candidate: &BackendCandidate,
+    runs: &[BenchmarkRun],
 ) -> (f64, Option<&'static str>) {
-    let (bucket, native_w4a4) = classify_quantization(req.model.quantization.as_deref(), candidate);
-    let (raw_bonus, reason) = match req.workload.concurrency {
-        None => {
-            if native_w4a4 && bucket == QuantBucket::FourBit {
-                (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON))
-            } else {
-                (0.0, None)
-            }
+    let Some((format, native_w4a4)) = declared_quantization(req, candidate, runs) else {
+        return (0.0, None);
+    };
+    let (raw_bonus, reason) = match (format, req.workload.concurrency) {
+        (QuantFormat::W4A4, _) => (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON)),
+        (QuantFormat::W4A16, Some(1..=4)) => (15.0, Some(ROOFLINE_MEMORY_BOUND_4BIT_REASON)),
+        (QuantFormat::Fp8 | QuantFormat::W8A8 | QuantFormat::Int8, Some(16..)) => {
+            (15.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON))
         }
-        Some(_) if native_w4a4 && bucket == QuantBucket::FourBit => {
-            (15.0, Some(ROOFLINE_NATIVE_W4A4_REASON))
+        (QuantFormat::W4A16, Some(16..)) if native_w4a4 == SupportLevel::Unsupported => {
+            (-5.0, Some(ROOFLINE_UNPACK_REASON))
         }
-        Some(conc) if conc <= 4 => match bucket {
-            QuantBucket::FourBit => (15.0, Some(ROOFLINE_MEMORY_BOUND_4BIT_REASON)),
-            _ => (0.0, None),
-        },
-        Some(conc) if conc >= 16 => match bucket {
-            QuantBucket::Fp8 => (15.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
-            QuantBucket::FourBit => (-5.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
-            QuantBucket::Other => (0.0, Some(ROOFLINE_COMPUTE_BOUND_FP8_REASON)),
-        },
-        Some(_) => (0.0, None),
+        _ => (0.0, None),
     };
     let effective_bonus = match req.constraints.preference {
         SelectionPreference::Cost => 0.0,
@@ -439,7 +445,11 @@ fn build_score_breakdown(
     parts
 }
 
-fn annotate_scores(req: &SelectionRequest, candidates: &mut [BackendCandidate]) {
+fn annotate_scores(
+    req: &SelectionRequest,
+    candidates: &mut [BackendCandidate],
+    runs: &[BenchmarkRun],
+) {
     let pref = req.constraints.preference;
     let has_hybrid_kv_geometry = req.model.sliding_window_tokens.is_some()
         || req.model.linear_attention_layer_ratio.is_some()
@@ -453,7 +463,7 @@ fn annotate_scores(req: &SelectionRequest, candidates: &mut [BackendCandidate]) 
         None
     };
     for c in candidates.iter_mut() {
-        let (roofline_bonus, roofline_reason) = roofline_quantization_adjustment(req, c);
+        let (roofline_bonus, roofline_reason) = roofline_quantization_adjustment(req, c, runs);
         let score = score_candidate(pref, c, roofline_bonus);
         c.score = score;
         c.score_breakdown = build_score_breakdown(pref, c, roofline_bonus, score);
@@ -531,12 +541,10 @@ pub fn select_backends(
         .map(|c| to_backend_candidate(&req.current, c))
         .collect();
 
-    let pref = req.constraints.preference;
+    annotate_scores(req, &mut out, runs);
     out.sort_by(|a, b| {
-        let (ba, _) = roofline_quantization_adjustment(req, a);
-        let (bb, _) = roofline_quantization_adjustment(req, b);
-        score_candidate(pref, b, bb)
-            .partial_cmp(&score_candidate(pref, a, ba))
+        b.score
+            .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
@@ -544,7 +552,6 @@ pub fn select_backends(
     if out.len() > max_k {
         out.truncate(max_k);
     }
-    annotate_scores(req, &mut out);
 
     let status = if out.is_empty() {
         RecommendConfidence::InsufficientData
@@ -984,6 +991,375 @@ mod tests {
         }
     }
 
+    fn roofline_request(concurrency: u32, preference: SelectionPreference) -> SelectionRequest {
+        SelectionRequest {
+            model: ModelProfile {
+                model_name: sample_profile("vllm").profile_key.model_name,
+                quantization: Some("awq".into()),
+                ..Default::default()
+            },
+            workload: WorkloadHint {
+                concurrency: Some(concurrency),
+                ..Default::default()
+            },
+            constraints: SelectionConstraints {
+                preference,
+                ..Default::default()
+            },
+            current: CurrentBackend::default(),
+        }
+    }
+
+    fn declare_quantization(run: &mut BenchmarkRun, format: QuantFormat) {
+        let mut capability =
+            crate::capability::static_capability(&run.profile_key.engine_type).unwrap();
+        capability.engine_version = run.profile_key.engine_version.clone();
+        capability.source = crate::capability::CapabilitySource::ManualOverride;
+        capability.quantization = Some(format);
+        capability
+            .native_low_precision_paths
+            .insert(format, SupportLevel::Supported);
+        run.evidence = Some(crate::benchmark::BenchmarkEvidence {
+            schema_version: 2,
+            wall_time_s: 1.0,
+            request_count: 1,
+            successful_requests: 1,
+            engine_capability: Some(capability),
+            ..Default::default()
+        });
+    }
+
+    fn select_roofline_runs(req: &SelectionRequest, runs: &[BenchmarkRun]) -> SelectionResponse {
+        let profile = crate::benchmark::build_profile_from_runs(&runs[0].profile_key, runs, 10);
+        select_backends(req, &[profile], runs)
+    }
+
+    #[test]
+    fn roofline_unknown_capabilities_ignore_platform_and_image_names() {
+        for platform in ["ascend-cann8", "nvidia-b200", "nvidia-gb300", "amd-rocm"] {
+            for concurrency in [1, 16] {
+                let mut run = sample_run("vllm");
+                run.profile_key.platform = Some(platform.into());
+                run.image_id = Some("vllm-nvfp4-awq-4bit".into());
+                let profile = crate::benchmark::build_profile_from_runs(
+                    &run.profile_key,
+                    std::slice::from_ref(&run),
+                    10,
+                );
+                let req = roofline_request(concurrency, SelectionPreference::Throughput);
+                let response = select_backends(&req, &[profile], &[run]);
+                let candidate = &response.candidates[0];
+                assert_eq!(
+                    candidate.score,
+                    score_candidate(req.constraints.preference, candidate, 0.0)
+                );
+                assert!(!candidate
+                    .score_breakdown
+                    .iter()
+                    .any(|part| part.starts_with("roofline_bonus=")));
+                assert!(!candidate.reasons.iter().any(|reason| [
+                    ROOFLINE_MEMORY_BOUND_4BIT_REASON,
+                    ROOFLINE_NATIVE_W4A4_REASON,
+                    ROOFLINE_COMPUTE_BOUND_FP8_REASON,
+                    ROOFLINE_UNPACK_REASON,
+                ]
+                .contains(&reason.as_str())));
+            }
+        }
+    }
+
+    #[test]
+    fn roofline_uses_declared_paths_not_hardware_or_quantization_names() {
+        for platform in ["ascend-cann8", "nvidia-b200", "amd-rocm"] {
+            let mut run = sample_run("vllm");
+            run.profile_key.platform = Some(platform.into());
+            // These labels intentionally disagree with the scoped declaration.
+            run.image_id = Some("image-with-fp8-awq-in-the-name".into());
+            declare_quantization(&mut run, QuantFormat::W4A4);
+            let req = roofline_request(16, SelectionPreference::Throughput);
+            let response = select_roofline_runs(&req, std::slice::from_ref(&run));
+            let candidate = &response.candidates[0];
+            assert_eq!(
+                candidate.score,
+                score_candidate(req.constraints.preference, candidate, 15.0)
+            );
+            assert!(candidate
+                .reasons
+                .iter()
+                .any(|reason| reason == ROOFLINE_NATIVE_W4A4_REASON));
+            let cost = roofline_request(16, SelectionPreference::Cost);
+            assert_eq!(
+                roofline_quantization_adjustment(&cost, candidate, &[run]),
+                (0.0, Some(ROOFLINE_NATIVE_W4A4_REASON))
+            );
+        }
+    }
+
+    #[test]
+    fn roofline_unknown_or_unsupported_is_neutral_and_unpack_requires_explicit_deny() {
+        let mut run = sample_run("vllm");
+        declare_quantization(&mut run, QuantFormat::W4A16);
+        let req = roofline_request(16, SelectionPreference::Latency);
+        for (state, expected) in [
+            (None, 0.0),
+            (Some(SupportLevel::Unknown), 0.0),
+            (Some(SupportLevel::Unsupported), -5.0),
+        ] {
+            let paths = &mut run
+                .evidence
+                .as_mut()
+                .unwrap()
+                .engine_capability
+                .as_mut()
+                .unwrap()
+                .native_low_precision_paths;
+            if let Some(state) = state {
+                paths.insert(QuantFormat::W4A4, state);
+            }
+            let response = select_roofline_runs(&req, std::slice::from_ref(&run));
+            assert_eq!(
+                roofline_quantization_adjustment(
+                    &req,
+                    &response.candidates[0],
+                    std::slice::from_ref(&run)
+                )
+                .0,
+                expected
+            );
+        }
+        for state in [SupportLevel::Unknown, SupportLevel::Unsupported] {
+            run.evidence
+                .as_mut()
+                .unwrap()
+                .engine_capability
+                .as_mut()
+                .unwrap()
+                .native_low_precision_paths
+                .insert(QuantFormat::W4A16, state);
+            let low = roofline_request(1, SelectionPreference::Throughput);
+            let response = select_roofline_runs(&low, std::slice::from_ref(&run));
+            assert_eq!(
+                roofline_quantization_adjustment(
+                    &low,
+                    &response.candidates[0],
+                    std::slice::from_ref(&run)
+                ),
+                (0.0, None)
+            );
+        }
+    }
+
+    #[test]
+    fn roofline_missing_conflicting_or_mismatched_evidence_is_neutral() {
+        let mut run = sample_run("vllm");
+        declare_quantization(&mut run, QuantFormat::W4A4);
+        let req = roofline_request(1, SelectionPreference::Throughput);
+        let candidate = select_roofline_runs(&req, std::slice::from_ref(&run))
+            .candidates
+            .remove(0);
+        for mismatch in [
+            "engine",
+            "version",
+            "platform",
+            "image",
+            "model",
+            "synthetic",
+            "missing",
+            "format",
+            "no_image",
+            "no_platform",
+        ] {
+            let mut invalid = run.clone();
+            match mismatch {
+                "engine" => {
+                    invalid
+                        .evidence
+                        .as_mut()
+                        .unwrap()
+                        .engine_capability
+                        .as_mut()
+                        .unwrap()
+                        .engine_type = "sglang".into()
+                }
+                "version" => {
+                    invalid
+                        .evidence
+                        .as_mut()
+                        .unwrap()
+                        .engine_capability
+                        .as_mut()
+                        .unwrap()
+                        .engine_version = Some("different".into())
+                }
+                "platform" => invalid.profile_key.platform = Some("different".into()),
+                "image" => invalid.image_id = Some("different".into()),
+                "model" => invalid.profile_key.model_name = "different".into(),
+                "synthetic" => invalid.evidence.as_mut().unwrap().synthetic = true,
+                "missing" => invalid.evidence = None,
+                "format" => {
+                    invalid
+                        .evidence
+                        .as_mut()
+                        .unwrap()
+                        .engine_capability
+                        .as_mut()
+                        .unwrap()
+                        .quantization = None
+                }
+                "no_image" => invalid.image_id = None,
+                "no_platform" => invalid.profile_key.platform = None,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                roofline_quantization_adjustment(&req, &candidate, &[invalid]),
+                (0.0, None),
+                "{mismatch}"
+            );
+        }
+        for scope in ["image", "platform", "version"] {
+            let mut unknown_run = run.clone();
+            let mut unknown_candidate = candidate.clone();
+            match scope {
+                "image" => {
+                    unknown_run.image_id = None;
+                    unknown_candidate.image_id = None;
+                }
+                "platform" => {
+                    unknown_run.profile_key.platform = None;
+                    unknown_candidate.platform = None;
+                }
+                "version" => {
+                    unknown_run.profile_key.engine_version = None;
+                    unknown_run
+                        .evidence
+                        .as_mut()
+                        .unwrap()
+                        .engine_capability
+                        .as_mut()
+                        .unwrap()
+                        .engine_version = None;
+                    unknown_candidate.engine_version = None;
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                roofline_quantization_adjustment(&req, &unknown_candidate, &[unknown_run]),
+                (0.0, None),
+                "{scope}"
+            );
+        }
+        let mut other = run.clone();
+        other.run_id = "conflicting".into();
+        declare_quantization(&mut other, QuantFormat::Fp8);
+        let mut both = candidate.clone();
+        both.evidence_run_ids.push(other.run_id.clone());
+        assert_eq!(
+            roofline_quantization_adjustment(&req, &both, &[run.clone(), other.clone()]),
+            (0.0, None)
+        );
+        other.evidence = None;
+        assert_eq!(
+            roofline_quantization_adjustment(&req, &both, &[run, other]),
+            (0.0, None)
+        );
+        both.evidence_run_ids.clear();
+        assert_eq!(
+            roofline_quantization_adjustment(&req, &both, &[]),
+            (0.0, None)
+        );
+    }
+
+    #[test]
+    fn roofline_cannot_borrow_another_platforms_declaration() {
+        let mut declared = sample_run("vllm");
+        declared.profile_key.platform = Some("declared".into());
+        declare_quantization(&mut declared, QuantFormat::W4A4);
+        let mut unknown = declared.clone();
+        unknown.run_id = "unknown".into();
+        unknown.profile_key.platform = Some("ascend-cann8".into());
+        unknown.evidence = None;
+        let runs = [declared, unknown];
+        let profiles: Vec<_> = runs
+            .iter()
+            .map(|run| crate::benchmark::build_profile_from_runs(&run.profile_key, &runs, 10))
+            .collect();
+        let req = roofline_request(1, SelectionPreference::Throughput);
+        let response = select_backends(&req, &profiles, &runs);
+        assert_eq!(response.candidates.len(), 2);
+        assert_eq!(response.candidates[0].platform.as_deref(), Some("declared"));
+        for candidate in response.candidates {
+            let expected = if candidate.platform.as_deref() == Some("declared") {
+                15.0
+            } else {
+                0.0
+            };
+            assert_eq!(
+                candidate.score,
+                score_candidate(req.constraints.preference, &candidate, expected)
+            );
+        }
+    }
+
+    #[test]
+    fn overwritten_run_cannot_lend_a_declaration_to_its_old_profile() {
+        for changed in ["workload", "gpu", "fingerprint"] {
+            let original = sample_run("vllm");
+            let stale_profile = crate::benchmark::build_profile_from_runs(
+                &original.profile_key,
+                std::slice::from_ref(&original),
+                10,
+            );
+            let mut retained = original.clone();
+            retained.run_id = "retained".into();
+            retained.throughput_tps = Some(10.0);
+            let mixed_profile = crate::benchmark::build_profile_from_runs(
+                &original.profile_key,
+                &[original.clone(), retained.clone()],
+                10,
+            );
+            let mut overwritten = original;
+            match changed {
+                "workload" => overwritten.profile_key.workload_id = "different-workload".into(),
+                "gpu" => overwritten.profile_key.gpu_name = Some("different-gpu".into()),
+                "fingerprint" => {
+                    overwritten.profile_key.param_fingerprint = Some("different-parameters".into())
+                }
+                _ => unreachable!(),
+            }
+            declare_quantization(&mut overwritten, QuantFormat::W4A4);
+            let req = roofline_request(1, SelectionPreference::Throughput);
+            let stale_only = select_backends(
+                &req,
+                std::slice::from_ref(&stale_profile),
+                std::slice::from_ref(&overwritten),
+            );
+            assert!(
+                stale_only.candidates.is_empty(),
+                "{changed}: old profile must not borrow overwritten evidence"
+            );
+            let current_profile = crate::benchmark::build_profile_from_runs(
+                &overwritten.profile_key,
+                std::slice::from_ref(&overwritten),
+                20,
+            );
+            let mixed = select_backends(&req, &[mixed_profile], &[overwritten.clone(), retained]);
+            assert_eq!(mixed.candidates.len(), 1);
+            assert_eq!(mixed.candidates[0].throughput_tps, Some(10.0));
+            assert_eq!(mixed.candidates[0].evidence_run_ids, ["retained"]);
+            assert_eq!(
+                mixed.candidates[0].score,
+                score_candidate(req.constraints.preference, &mixed.candidates[0], 0.0)
+            );
+            let response = select_backends(&req, &[stale_profile, current_profile], &[overwritten]);
+            assert_eq!(response.candidates.len(), 1, "{changed}");
+            let candidate = &response.candidates[0];
+            assert_eq!(
+                candidate.score,
+                score_candidate(req.constraints.preference, candidate, 15.0)
+            );
+        }
+    }
+
     #[test]
     fn roofline_prefers_4bit_at_low_concurrency_and_fp8_at_high_concurrency() {
         let mut p_4bit = sample_profile("vllm");
@@ -998,11 +1374,22 @@ mod tests {
         r_4bit.run_id = "r-4bit".into();
         r_4bit.profile_key.param_fingerprint = Some("awq-4bit".into());
         r_4bit.image_id = Some("vllm-awq-4bit".into());
+        declare_quantization(&mut r_4bit, QuantFormat::W4A16);
+        r_4bit
+            .evidence
+            .as_mut()
+            .unwrap()
+            .engine_capability
+            .as_mut()
+            .unwrap()
+            .native_low_precision_paths
+            .insert(QuantFormat::W4A4, SupportLevel::Unsupported);
 
         let mut r_fp8 = sample_run("sglang");
         r_fp8.run_id = "r-fp8".into();
         r_fp8.profile_key.param_fingerprint = Some("fp8".into());
         r_fp8.image_id = Some("sglang-fp8".into());
+        declare_quantization(&mut r_fp8, QuantFormat::Fp8);
 
         let profiles = vec![p_4bit, p_fp8];
         let runs = vec![r_4bit, r_fp8];

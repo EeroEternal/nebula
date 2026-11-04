@@ -78,6 +78,9 @@ pub struct BenchmarkEvidence {
     pub successful_requests: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_count: Option<u32>,
+    /// Snapshot for this run's model/engine/version/image/platform, not a global hardware claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_capability: Option<crate::capability::EngineCapability>,
     #[serde(flatten)]
     pub measurements: std::collections::BTreeMap<String, serde_json::Value>,
 }
@@ -128,7 +131,7 @@ pub struct BenchmarkRun {
 }
 
 impl BenchmarkRun {
-    fn usable_for_selection(&self) -> bool {
+    pub(crate) fn usable_for_selection(&self) -> bool {
         let legacy_synthetic = self
             .evidence_notes
             .as_deref()
@@ -321,13 +324,14 @@ pub fn recommend_from_profiles(
     let mut candidates: Vec<RecommendCandidate> = Vec::new();
 
     for profile in profiles {
-        // Old stored profiles may still contain synthetic/failed runs. Rebuild
-        // their aggregates before filters/ranking, not just their cost field.
+        // Also bind each run to this profile's complete key: upserting a run_id
+        // can move it to a new workload/GPU/fingerprint while old profiles retain
+        // that ID. Rebuild before any metrics, costs or capability claims escape.
         let sanitized;
-        let profile = if runs
-            .iter()
-            .any(|run| profile.run_ids.contains(&run.run_id) && !run.usable_for_selection())
-        {
+        let profile = if runs.iter().any(|run| {
+            profile.run_ids.contains(&run.run_id)
+                && (!run.usable_for_selection() || run.profile_key != profile.profile_key)
+        }) {
             sanitized = build_profile_from_runs(&profile.profile_key, runs, profile.updated_at_ms);
             &sanitized
         } else {
@@ -662,6 +666,15 @@ mod tests {
             "samples_sha256": "sample-hash", "cache_counter_delta": null,
             "abba_position": 1, "variant": "B", "round": 2
         });
+        let mut capability = crate::capability::static_capability_vllm();
+        capability.engine_version =
+            serde_json::from_value(value["profile_key"]["engine_version"].clone()).unwrap();
+        capability.quantization = Some(crate::capability::QuantFormat::W4A4);
+        capability.native_low_precision_paths.insert(
+            crate::capability::QuantFormat::W4A4,
+            crate::capability::SupportLevel::Supported,
+        );
+        value["evidence"]["engine_capability"] = serde_json::to_value(capability).unwrap();
         let decoded: BenchmarkRun = serde_json::from_value(value.clone()).unwrap();
         assert!(decoded.usable_for_selection());
         assert_eq!(

@@ -272,9 +272,10 @@ Dynamo / llm-d 偏底层算力基础设施，纯开源 LMCache / Mooncake 缺企
   | **16 并发** | **< 0.2%（几乎相同）** | **计算受限（Compute-bound）**：一次权重读取服务 16 条序列，权重字节数不再是瓶颈 |
   | **长上下文 Prefill** | **−7% ～ −9%（4-bit 反而更慢）** | 非原生 FP4 通路下，每次 GEMM 前需在寄存器解包（Unpack）4-bit 权重，增加额外计算开销 |
 
-- **Nebula L3 对应触点**：[`crates/nebula-common/src/selection.rs`](../../crates/nebula-common/src/selection.rs)（`WorkloadHint.concurrency`、`ModelProfile.quantization`、`roofline_quantization_adjustment`）。
-- **落地规则**：在 `Selection` 推荐打分与可解释 `reasons` 中编码该 Roofline 拐点：
-  - 在 `Latency` / `Throughput` 偏好下，当 `workload.concurrency <= 4` 或硬件平台具备原生 W4A4 通路（如 `NVFP4`）时，为 4-bit 量化候选加分；当 `workload.concurrency >= 16` 且非原生 W4A4 时，为原生 **FP8** 加分；
+- **Nebula L3 对应触点**：[`crates/nebula-common/src/selection.rs`](../../crates/nebula-common/src/selection.rs)（`WorkloadHint.concurrency`、run 级 `EngineCapability`、`roofline_quantization_adjustment`）。
+- **2026-11-04 修正（#88）**：原实现用芯片/镜像/理由字符串猜原生通路，对未声明能力的平台也加减分；现仅消费同候选压测 run 内一致且作用域匹配的 `quantization` 与 `native_low_precision_paths`。通用静态表默认未知，未知或冲突不加减分，不把上述外部百分比写成当前平台的收益。
+- **落地规则**：在 `Selection` 推荐打分与可解释 `reasons` 中保留**未经真机校准的启发式**，详细数值与采集门禁见 [`selection.md`](../arch/selection.md)：
+  - 在 `Latency` / `Throughput` 偏好下，只有活动低精度格式的原生通路明确 supported 才可加分；W4A16 的高并发解包惩罚还要求 W4A4 明确 unsupported，不能把缺失声明当作否定；
   - 在 `Cost`（`$/1k tokens`）偏好下，保持 `0.0` 数值加分以严格维护成本量纲排序，同时在 `candidate.reasons` 中保留可解释的 Roofline 提示。
 
 #### 2. L2 投机采样套件声明式装配与 Hybrid 模型 Prefix Cache 体检

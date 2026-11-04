@@ -4,6 +4,7 @@
 //! as ordinary replicas (standalone / replicated).
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Three-state support for a capability or metric field.
 ///
@@ -21,6 +22,17 @@ impl SupportLevel {
     pub fn is_supported(self) -> bool {
         matches!(self, Self::Supported)
     }
+}
+
+/// Declared compute format, not inferred from a chip or image name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum QuantFormat {
+    W4A4,
+    W4A16,
+    Fp8,
+    W8A8,
+    Int8,
 }
 
 /// How a model serving topology is owned and entered.
@@ -184,6 +196,13 @@ pub struct EngineCapability {
     pub engine_version: Option<String>,
     pub source: CapabilitySource,
 
+    /// Active format in a model-scoped snapshot; static engine tables leave it unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<QuantFormat>,
+    /// Platform/runtime-specific native paths. Missing entries are Unknown, not Unsupported.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub native_low_precision_paths: BTreeMap<QuantFormat, SupportLevel>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_compatible: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,6 +281,8 @@ pub fn static_capability_tokenspeed() -> EngineCapability {
         engine_type: "tokenspeed".into(),
         engine_version: None,
         source: CapabilitySource::StaticTable,
+        quantization: None,
+        native_low_precision_paths: BTreeMap::new(),
         openai_compatible: Some(true),
         tensor_parallel: Some(true),
         data_parallel: Some(true),
@@ -292,6 +313,8 @@ pub fn static_capability_vllm() -> EngineCapability {
         engine_type: "vllm".into(),
         engine_version: None,
         source: CapabilitySource::StaticTable,
+        quantization: None,
+        native_low_precision_paths: BTreeMap::new(),
         openai_compatible: Some(true),
         tensor_parallel: Some(true),
         data_parallel: Some(true),
@@ -322,6 +345,8 @@ pub fn static_capability_sglang() -> EngineCapability {
         engine_type: "sglang".into(),
         engine_version: None,
         source: CapabilitySource::StaticTable,
+        quantization: None,
+        native_low_precision_paths: BTreeMap::new(),
         openai_compatible: Some(true),
         tensor_parallel: Some(true),
         data_parallel: Some(true),
@@ -479,6 +504,34 @@ pub fn validate_engine_and_config(
 mod tests {
     use super::*;
     use crate::model_request::{ModelConfig, SpeculativeConfig, SpeculativeMethod};
+
+    #[test]
+    fn low_precision_declarations_roundtrip_and_legacy_defaults_are_unknown() {
+        let legacy = serde_json::to_value(static_capability_vllm()).unwrap();
+        assert!(legacy.get("native_low_precision_paths").is_none());
+        let mut capability: EngineCapability = serde_json::from_value(legacy).unwrap();
+        assert_eq!(capability.quantization, None);
+        assert!(capability.native_low_precision_paths.is_empty());
+        for (format, wire) in [
+            (QuantFormat::W4A4, "w4a4"),
+            (QuantFormat::W4A16, "w4a16"),
+            (QuantFormat::Fp8, "fp8"),
+            (QuantFormat::W8A8, "w8a8"),
+            (QuantFormat::Int8, "int8"),
+        ] {
+            capability.quantization = Some(format);
+            capability
+                .native_low_precision_paths
+                .insert(format, SupportLevel::Supported);
+            let json = serde_json::to_value(&capability).unwrap();
+            assert_eq!(json["quantization"], wire);
+            assert_eq!(json["native_low_precision_paths"][wire], "supported");
+            assert_eq!(
+                serde_json::from_value::<EngineCapability>(json).unwrap(),
+                capability
+            );
+        }
+    }
 
     #[test]
     fn support_level_roundtrip() {
