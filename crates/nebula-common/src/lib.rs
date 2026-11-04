@@ -27,9 +27,9 @@ pub mod tenant;
 pub use admission::{rate_limit_key, TenantAdmission};
 pub use benchmark::{
     build_profile_from_runs, builtin_workloads, canary_should_rollback, recommend_from_profiles,
-    BenchmarkRun, BenchmarkRunStatus, BenchmarkWorkload, CanaryRelease, CanaryState,
-    PerformanceProfile, ProfileKey, RecommendCandidate, RecommendConfidence, RecommendRequest,
-    RecommendResponse, WorkloadClass,
+    BenchmarkEvidence, BenchmarkRun, BenchmarkRunStatus, BenchmarkWorkload, CanaryRelease,
+    CanaryState, PerformanceProfile, ProfileKey, RecommendCandidate, RecommendConfidence,
+    RecommendRequest, RecommendResponse, WorkloadClass,
 };
 pub use capability::{
     parse_version_tuple, resolve_engine_type, score_api_for_engine, static_capability,

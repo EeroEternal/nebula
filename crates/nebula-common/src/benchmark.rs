@@ -65,9 +65,24 @@ pub enum BenchmarkRunStatus {
     InsufficientData,
 }
 
-/// One reproducible benchmark run.
-///
-/// etcd: `/benchmarks/runs/{run_id}`
+/// Versioned client-side evidence. Extra measurements (SLO goodput, percentiles,
+/// cache deltas, hashes, comparison labels) survive BFF JSONB ingest unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct BenchmarkEvidence {
+    pub schema_version: u32,
+    pub synthetic: bool,
+    pub seed: u64,
+    pub arrival: String,
+    pub wall_time_s: f64,
+    pub request_count: u32,
+    pub successful_requests: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_count: Option<u32>,
+    #[serde(flatten)]
+    pub measurements: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// One reproducible benchmark run, persisted by the BFF in Postgres JSONB.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchmarkRun {
     pub run_id: String,
@@ -108,6 +123,36 @@ pub struct BenchmarkRun {
     pub error_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<BenchmarkEvidence>,
+}
+
+impl BenchmarkRun {
+    fn usable_for_selection(&self) -> bool {
+        let legacy_synthetic = self
+            .evidence_notes
+            .as_deref()
+            .map(|notes| {
+                let notes = notes.to_ascii_lowercase();
+                notes.contains("dry-run") || notes.contains("dry_run")
+            })
+            .unwrap_or(false);
+        self.status == BenchmarkRunStatus::Succeeded
+            && !legacy_synthetic
+            && self
+                .evidence
+                .as_ref()
+                .map(|evidence| {
+                    evidence.schema_version == 2
+                        && !evidence.synthetic
+                        && evidence.wall_time_s.is_finite()
+                        && evidence.wall_time_s > 0.0
+                        && evidence.request_count > 0
+                        && evidence.successful_requests == evidence.request_count
+                })
+                // Historical real runs remain compatible.
+                .unwrap_or(true)
+    }
 }
 
 /// Aggregated performance profile for recommend.
@@ -276,6 +321,18 @@ pub fn recommend_from_profiles(
     let mut candidates: Vec<RecommendCandidate> = Vec::new();
 
     for profile in profiles {
+        // Old stored profiles may still contain synthetic/failed runs. Rebuild
+        // their aggregates before filters/ranking, not just their cost field.
+        let sanitized;
+        let profile = if runs
+            .iter()
+            .any(|run| profile.run_ids.contains(&run.run_id) && !run.usable_for_selection())
+        {
+            sanitized = build_profile_from_runs(&profile.profile_key, runs, profile.updated_at_ms);
+            &sanitized
+        } else {
+            profile
+        };
         if !profile_matches_request(&profile.profile_key, req) {
             continue;
         }
@@ -304,7 +361,7 @@ pub fn recommend_from_profiles(
 
         let related: Vec<&BenchmarkRun> = runs
             .iter()
-            .filter(|r| profile.run_ids.contains(&r.run_id))
+            .filter(|r| profile.run_ids.contains(&r.run_id) && r.usable_for_selection())
             .collect();
         let cost = related
             .iter()
@@ -384,7 +441,7 @@ pub fn recommend_from_profiles(
     }
 }
 
-/// Rebuild a profile from succeeded runs sharing the same ProfileKey.
+/// Rebuild a profile from usable real succeeded runs sharing the same ProfileKey.
 pub fn build_profile_from_runs(
     key: &ProfileKey,
     runs: &[BenchmarkRun],
@@ -392,7 +449,7 @@ pub fn build_profile_from_runs(
 ) -> PerformanceProfile {
     let matched: Vec<&BenchmarkRun> = runs
         .iter()
-        .filter(|r| r.profile_key == *key && r.status == BenchmarkRunStatus::Succeeded)
+        .filter(|r| r.profile_key == *key && r.usable_for_selection())
         .collect();
     let run_ids: Vec<String> = matched.iter().map(|r| r.run_id.clone()).collect();
     let best_ttft = matched
@@ -463,6 +520,7 @@ mod tests {
             finished_at_ms: 2,
             error_message: None,
             evidence_notes: None,
+            evidence: None,
         }
     }
 
@@ -506,6 +564,110 @@ mod tests {
         assert!(!resp.candidates.is_empty());
         assert_eq!(resp.candidates[0].engine_type, "vllm");
         assert!(!resp.candidates[0].evidence_run_ids.is_empty());
+    }
+
+    #[test]
+    fn synthetic_and_incomplete_evidence_cannot_build_profiles() {
+        let mut run = sample_run("vllm", 1.0, 10000.0);
+        let key = run.profile_key.clone();
+        run.evidence = Some(BenchmarkEvidence {
+            schema_version: 2,
+            synthetic: true,
+            arrival: "closed".into(),
+            wall_time_s: 1.0,
+            request_count: 10,
+            successful_requests: 10,
+            ..Default::default()
+        });
+        // Status and custom notes cannot disguise explicitly synthetic evidence.
+        run.evidence_notes = Some("custom note".into());
+        assert_eq!(
+            build_profile_from_runs(&key, &[run.clone()], 10).sample_count,
+            0
+        );
+        let evidence = run.evidence.as_mut().unwrap();
+        evidence.synthetic = false;
+        evidence.successful_requests = 9;
+        assert_eq!(
+            build_profile_from_runs(&key, &[run.clone()], 10).sample_count,
+            0
+        );
+        run.evidence.as_mut().unwrap().successful_requests = 10;
+        assert_eq!(
+            build_profile_from_runs(&key, &[run.clone()], 10).sample_count,
+            1
+        );
+        run.evidence.as_mut().unwrap().schema_version = 999;
+        assert_eq!(build_profile_from_runs(&key, &[run], 10).sample_count, 0);
+    }
+
+    #[test]
+    fn recommendation_rebuilds_stale_profiles_containing_synthetic_runs() {
+        let real = sample_run("vllm", 500.0, 35.0);
+        let mut synthetic = real.clone();
+        synthetic.run_id = "synthetic".into();
+        synthetic.ttft_p95_ms = Some(1.0);
+        synthetic.throughput_tps = Some(10000.0);
+        synthetic.cost_per_1k_tokens = Some(0.00001);
+        let runs = [real.clone(), synthetic.clone()];
+        let stale_profile = build_profile_from_runs(&real.profile_key, &runs, 10);
+        let mut req = RecommendRequest {
+            model_name: real.profile_key.model_name.clone(),
+            workload_id: None,
+            platform: None,
+            ttft_p95_ms_max: None,
+            throughput_tps_min: None,
+            budget_cost_per_1k: None,
+            max_candidates: None,
+        };
+        synthetic.evidence_notes = Some("dry-run synthetic metrics".into());
+        let response = recommend_from_profiles(
+            &req,
+            std::slice::from_ref(&stale_profile),
+            &[real.clone(), synthetic.clone()],
+        );
+        let candidate = &response.candidates[0];
+        assert_eq!(candidate.ttft_p95_ms, Some(500.0));
+        assert_eq!(candidate.throughput_tps, Some(35.0));
+        assert_eq!(candidate.cost_per_1k_tokens, Some(0.5));
+        assert_eq!(
+            candidate.evidence_run_ids,
+            std::slice::from_ref(&real.run_id)
+        );
+        req.ttft_p95_ms_max = Some(100.0);
+        assert!(recommend_from_profiles(
+            &req,
+            std::slice::from_ref(&stale_profile),
+            &[real.clone(), synthetic.clone()],
+        )
+        .candidates
+        .is_empty());
+        let synthetic_only = PerformanceProfile {
+            run_ids: vec![synthetic.run_id.clone()],
+            ..stale_profile
+        };
+        let response = recommend_from_profiles(&req, &[synthetic_only], &[synthetic]);
+        assert_eq!(response.status, RecommendConfidence::InsufficientData);
+        assert!(response.candidates.is_empty());
+    }
+
+    #[test]
+    fn benchmark_evidence_roundtrip_preserves_extended_measurements() {
+        let mut value = serde_json::to_value(sample_run("vllm", 50.0, 100.0)).unwrap();
+        value["evidence"] = serde_json::json!({
+            "schema_version": 2, "synthetic": false, "seed": 42,
+            "arrival": "poisson", "wall_time_s": 2.0, "request_count": 10,
+            "successful_requests": 10, "gpu_count": 2,
+            "goodput_tps": 75.0, "slo": {"ttft_ms": 100.0},
+            "samples_sha256": "sample-hash", "cache_counter_delta": null,
+            "abba_position": 1, "variant": "B", "round": 2
+        });
+        let decoded: BenchmarkRun = serde_json::from_value(value.clone()).unwrap();
+        assert!(decoded.usable_for_selection());
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["evidence"],
+            value["evidence"]
+        );
     }
 
     #[test]

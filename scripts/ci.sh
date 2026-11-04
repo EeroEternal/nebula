@@ -12,6 +12,7 @@
 #   4. ./scripts/check_openapi_control.sh
 #   5. bash scripts/check_ui_stack.sh && bash scripts/check_admin_nav.sh
 #   5b. ./scripts/check_agents_budget.sh (AGENTS.md 80-line cap)
+#   5c. Python benchmark protocol tests (standard library only)
 #   6. frontend gate: npx tsc -b --noEmit && npm run lint && npm run build
 #   7. (optional) release-build gateway/router/bff + ./scripts/ci_smoke.sh
 #
@@ -48,6 +49,9 @@ bash scripts/check_admin_nav.sh
 
 echo "========== AGENTS.md budget =========="
 ./scripts/check_agents_budget.sh
+
+echo "========== benchmark protocol tests =========="
+python3 -m unittest discover -s scripts/benchmark -p 'test_*.py'
 
 echo "========== frontend gate (tsc + lint + build) =========="
 if [ -f frontend/package.json ]; then

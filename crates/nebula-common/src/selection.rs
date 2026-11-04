@@ -682,6 +682,7 @@ mod tests {
             finished_at_ms: 2,
             error_message: None,
             evidence_notes: None,
+            evidence: None,
         }
     }
 
