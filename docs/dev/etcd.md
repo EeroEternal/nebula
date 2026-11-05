@@ -26,6 +26,7 @@ etcd 是 **声明式协调层的唯一权威**，不是通用数据库。本地�
 | `/operations/` | Gateway | Gateway（集成方 poll） | **短 TTL**（~24h）；异步部署/扩缩/停止追踪 |
 | `/idempotency/` | Gateway | Gateway | **短 TTL**（~24h）；Control POST 幂等键 |
 | `/nebula/election/…` | Scheduler | Scheduler | lease + CAS fencing |
+| `/autotune/permits/{uuid}` | BFF | 多 BFF 及 etcd CAS 事务 | **短 TTL** 写许可；原子拒绝迟到/已撤销意图，不存实验历史 |
 
 `/stats/` 只含实时控制字段，历史观测不进 etcd（见 [`stats.md`](./stats.md)）。
 

@@ -15,6 +15,7 @@
 | Router 健康/指标 | Router | `/healthz`, `/metrics` | 无 admin |
 | 控制台会话 / SSO | BFF | `/api/auth/*` | Postgres；Scheduler 不碰 |
 | 声明式模型管理 | BFF | `/api/v2/models/*` | 写 etcd Deployment/Spec；与 Gateway 共享 `nebula-control` |
+| 有界配置实验 | BFF | `/api/v2/models/{uid}/autotune`、`/api/v2/autotune/{id}` | PG 状态与历史；etcd TTL 许可 fencing；不写 Placement |
 | Control API v1（机机） | Gateway | `/platform/v1/*` | 集成主契约；Operation + API Key |
 | 治理读（SLO / Canary） | Gateway | `/platform/v1/models/…/slo`、`/canaries` | 只读；写仍 BFF |
 | 观测面板聚合 | BFF | `/api/v2/observability/*` | |

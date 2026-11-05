@@ -146,11 +146,31 @@ impl MetaStore for EtcdMetaStore {
         expected_revision: u64,
         value: Vec<u8>,
     ) -> Result<(bool, u64)> {
+        self.compare_and_swap_guarded(key, expected_revision, value, &[])
+            .await
+    }
+
+    async fn compare_and_swap_guarded(
+        &self,
+        key: &str,
+        expected_revision: u64,
+        value: Vec<u8>,
+        guards: &[(String, u64)],
+    ) -> Result<(bool, u64)> {
         let mut cli = self.client.lock().await;
 
-        let cmp = Compare::mod_revision(key, CompareOp::Equal, expected_revision as i64);
+        let mut comparisons = vec![Compare::mod_revision(
+            key,
+            CompareOp::Equal,
+            expected_revision as i64,
+        )];
+        comparisons.extend(
+            guards.iter().map(|(key, rev)| {
+                Compare::mod_revision(key.as_str(), CompareOp::Equal, *rev as i64)
+            }),
+        );
         let put = TxnOp::put(key, value, None);
-        let txn = Txn::new().when([cmp]).and_then([put]).or_else([]);
+        let txn = Txn::new().when(comparisons).and_then([put]).or_else([]);
         let resp = cli.txn(txn).await?;
 
         if resp.succeeded() {

@@ -399,6 +399,33 @@ pub fn validate_model_config(
     engine_type: &str,
     config: &crate::model_request::ModelConfig,
 ) -> Result<(), String> {
+    if config.max_num_seqs.is_some()
+        || config.max_num_batched_tokens.is_some()
+        || config.enable_chunked_prefill.is_some()
+    {
+        if engine_type != "vllm" {
+            return Err("scheduler tuning fields are currently supported only for vllm".into());
+        }
+        if config.max_num_seqs == Some(0) || config.max_num_batched_tokens == Some(0) {
+            return Err("max_num_seqs and max_num_batched_tokens must be positive".into());
+        }
+        if let (Some(seqs), Some(tokens)) = (config.max_num_seqs, config.max_num_batched_tokens) {
+            if tokens < seqs {
+                return Err("max_num_batched_tokens must be >= max_num_seqs".into());
+            }
+        }
+        if config.enable_chunked_prefill == Some(false) {
+            if let (Some(tokens), Some(context)) =
+                (config.max_num_batched_tokens, config.max_model_len)
+            {
+                if tokens < context {
+                    return Err(
+                        "without chunked prefill the token budget must cover max_model_len".into(),
+                    );
+                }
+            }
+        }
+    }
     let cap = static_capability(engine_type).ok_or_else(|| {
         format!(
             "unknown engine_type '{engine_type}'; supported: {}",

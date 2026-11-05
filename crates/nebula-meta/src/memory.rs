@@ -124,10 +124,25 @@ impl MetaStore for MemoryMetaStore {
         expected_revision: u64,
         value: Vec<u8>,
     ) -> Result<(bool, u64)> {
+        self.compare_and_swap_guarded(key, expected_revision, value, &[])
+            .await
+    }
+
+    async fn compare_and_swap_guarded(
+        &self,
+        key: &str,
+        expected_revision: u64,
+        value: Vec<u8>,
+        guards: &[(String, u64)],
+    ) -> Result<(bool, u64)> {
         let (ok, rev, event) = {
             let mut inner = self.inner.write().await;
             let current_rev = inner.kv.get(key).map(|(_, rev)| *rev).unwrap_or(0);
-            if current_rev != expected_revision {
+            if current_rev != expected_revision
+                || guards
+                    .iter()
+                    .any(|(key, rev)| inner.kv.get(key).map_or(0, |(_, current)| *current) != *rev)
+            {
                 return Ok((false, current_rev));
             }
             let rev = Self::next_revision(&mut inner);

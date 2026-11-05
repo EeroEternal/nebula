@@ -106,6 +106,7 @@ graph BT
 | `/nodes/{node_id}/status` | `NodeStatus` | A | 心跳（lease） |
 | `/models/{model_uid}/spec` | `ModelSpec` | A | 规格 |
 | `/deployments/{model_uid}` | `ModelDeployment` | A | 声明期望（主写：BFF） |
+| `/autotune/permits/{uuid}` | 写入 fencing 许可 | A | BFF 写；etcd CAS 比较；短 TTL，无实验历史 |
 | `/placements/{model_uid}` | `PlacementPlan` | A | CAS；`plan_version` |
 | `/endpoints/…` `/stats/…` `/capabilities/…` | 运行时 | A | Node 写（lease） |
 | `/images/{id}` | `EngineImage` | A | 镜像注册；Node watch |

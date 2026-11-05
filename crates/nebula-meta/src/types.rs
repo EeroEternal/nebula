@@ -39,6 +39,15 @@ pub trait MetaStore: Send + Sync {
         value: Vec<u8>,
     ) -> Result<(bool, u64)>;
 
+    /// Atomically fence a write on both its own revision and related snapshots.
+    async fn compare_and_swap_guarded(
+        &self,
+        key: &str,
+        expected_revision: u64,
+        value: Vec<u8>,
+        guards: &[(String, u64)],
+    ) -> Result<(bool, u64)>;
+
     async fn watch_prefix(
         &self,
         prefix: &str,

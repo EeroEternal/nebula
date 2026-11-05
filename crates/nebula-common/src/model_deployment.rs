@@ -493,6 +493,9 @@ pub fn merge_model_config(
             tensor_parallel_size: o.tensor_parallel_size.or(b.tensor_parallel_size),
             gpu_memory_utilization: o.gpu_memory_utilization.or(b.gpu_memory_utilization),
             max_model_len: o.max_model_len.or(b.max_model_len),
+            max_num_seqs: o.max_num_seqs.or(b.max_num_seqs),
+            max_num_batched_tokens: o.max_num_batched_tokens.or(b.max_num_batched_tokens),
+            enable_chunked_prefill: o.enable_chunked_prefill.or(b.enable_chunked_prefill),
             required_vram_mb: o.required_vram_mb.or(b.required_vram_mb),
             lora_modules: o.lora_modules.clone().or_else(|| b.lora_modules.clone()),
             served_model_name: o

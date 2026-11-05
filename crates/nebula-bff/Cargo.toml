@@ -27,3 +27,6 @@ nebula-meta = { path = "../nebula-meta" }
 nebula-common = { path = "../nebula-common" }
 nebula-control = { path = "../nebula-control" }
 thiserror.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true

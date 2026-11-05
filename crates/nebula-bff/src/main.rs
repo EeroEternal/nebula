@@ -1,6 +1,7 @@
 mod args;
 mod auth;
 mod auth_handlers;
+mod autotune;
 mod benchmark_svc;
 mod compat_slo;
 mod handlers;
@@ -73,6 +74,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     initialize_auth_schema(&st).await?;
+    autotune::initialize(&st.db).await?;
+    autotune::start_background_reconciler(st.clone())?;
 
     let protected_routes = Router::new()
         .route("/whoami", get(whoami))
@@ -103,6 +106,8 @@ async fn main() -> anyhow::Result<()> {
         .with_state(st.clone());
 
     let v2_routes = Router::new()
+        .route("/models/:model_uid/autotune", post(autotune::create))
+        .route("/autotune/:id", get(autotune::get).post(autotune::command))
         .route(
             "/observability/gateway/overview",
             get(handlers_v2::gateway_overview),

@@ -1,4 +1,5 @@
 pub mod admission;
+pub mod autotune;
 pub mod benchmark;
 pub mod capability;
 pub mod capacity;

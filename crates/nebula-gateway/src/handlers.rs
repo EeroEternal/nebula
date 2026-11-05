@@ -851,6 +851,25 @@ pub async fn list_models(State(st): State<AppState>) -> impl IntoResponse {
     models.sort();
     models.dedup();
 
+    // Catalog reads are off the routing hot path. Never advertise trial UIDs.
+    let specs = match st.store.list_prefix("/models/").await {
+        Ok(specs) => specs,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let experiments: std::collections::HashSet<_> = specs
+        .into_iter()
+        .filter(|(key, _, _)| key.ends_with("/spec"))
+        .filter_map(|(_, value, _)| serde_json::from_slice::<nebula_common::ModelSpec>(&value).ok())
+        .filter(|spec| {
+            spec.labels
+                .contains_key(nebula_common::autotune::EXPERIMENT_LABEL)
+        })
+        .map(|spec| spec.model_uid)
+        .collect();
+    models.retain(|uid| {
+        !nebula_common::autotune::is_experiment_uid(uid) && !experiments.contains(uid)
+    });
+
     let data: Vec<serde_json::Value> = models
         .into_iter()
         .map(|id| json!({"id": id, "object": "model", "owned_by": "nebula"}))

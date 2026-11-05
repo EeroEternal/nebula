@@ -355,6 +355,8 @@ pub struct Router {
     engine_model_ids: DashMap<String, String>,
     /// Registered alias strings per model_uid (for cleanup on spec update/delete).
     model_alias_keys: DashMap<String, Vec<String>>,
+    /// Rebuildable spec projection: experimental replicas accept privileged traffic only.
+    experiment_models: DashMap<String, ()>,
     /// model_uid → latest PlacementPlan.version
     plan_versions: DashMap<String, u64>,
     route_stale_stats_dropped_total: AtomicU64,
@@ -493,6 +495,7 @@ impl Router {
             model_uids_to_names: DashMap::new(),
             engine_model_ids: DashMap::new(),
             model_alias_keys: DashMap::new(),
+            experiment_models: DashMap::new(),
             plan_versions: DashMap::new(),
             route_stale_stats_dropped_total: AtomicU64::new(0),
             route_circuit_skipped_total: AtomicU64::new(0),
@@ -1381,8 +1384,12 @@ impl Router {
 
     /// Register a bidirectional model_uid ↔ model_name mapping.
     pub fn set_model_mapping(&self, model_uid: &str, model_name: &str) {
-        self.model_names
-            .insert(model_name.to_string(), model_uid.to_string());
+        if !nebula_common::autotune::is_experiment_uid(model_uid)
+            && !self.experiment_models.contains_key(model_uid)
+        {
+            self.model_names
+                .insert(model_name.to_string(), model_uid.to_string());
+        }
         self.model_uids_to_names
             .insert(model_uid.to_string(), model_name.to_string());
         if !self.engine_model_ids.contains_key(model_uid) {
@@ -1392,7 +1399,11 @@ impl Router {
     }
 
     fn register_model_alias(&self, model_uid: &str, alias: &str) {
-        if alias.is_empty() || alias == model_uid {
+        if alias.is_empty()
+            || alias == model_uid
+            || nebula_common::autotune::is_experiment_uid(model_uid)
+            || self.experiment_models.contains_key(model_uid)
+        {
             return;
         }
         self.model_names
@@ -1406,7 +1417,18 @@ impl Router {
     /// Sync aliases from `/models/{uid}/spec` (model_name, served_model_name, model_path).
     pub fn register_model_spec(&self, spec: &ModelSpec) {
         self.clear_model_mappings(&spec.model_uid);
-        self.set_model_mapping(&spec.model_uid, &spec.model_name);
+        let isolated = nebula_common::autotune::is_experiment_uid(&spec.model_uid)
+            || spec
+                .labels
+                .contains_key(nebula_common::autotune::EXPERIMENT_LABEL);
+        if isolated {
+            self.experiment_models.insert(spec.model_uid.clone(), ());
+            // Experimental replicas share weights, never production name aliases.
+            self.model_uids_to_names
+                .insert(spec.model_uid.clone(), spec.model_name.clone());
+        } else {
+            self.set_model_mapping(&spec.model_uid, &spec.model_name);
+        }
 
         let engine_id = spec
             .config
@@ -1415,7 +1437,7 @@ impl Router {
             .unwrap_or(spec.model_name.as_str());
         self.engine_model_ids
             .insert(spec.model_uid.clone(), engine_id.to_string());
-        if engine_id != spec.model_name {
+        if !isolated && engine_id != spec.model_name {
             self.register_model_alias(&spec.model_uid, engine_id);
         }
 
@@ -1429,7 +1451,7 @@ impl Router {
                 .set_model_block_size(&spec.model_uid, bs as usize);
         }
 
-        if let Some(path) = spec.model_path.as_deref() {
+        if let Some(path) = spec.model_path.as_deref().filter(|_| !isolated) {
             self.register_model_alias(&spec.model_uid, path);
             if let Some(base) = path.rsplit('/').next() {
                 if !base.is_empty() && base != path {
@@ -1441,6 +1463,7 @@ impl Router {
 
     /// Remove all name aliases registered for a model (spec deleted).
     pub fn clear_model_mappings(&self, model_uid: &str) {
+        self.experiment_models.remove(model_uid);
         if let Some((_, keys)) = self.model_alias_keys.remove(model_uid) {
             for key in keys {
                 // Compare via a cloned value so the read guard is dropped
@@ -1557,6 +1580,12 @@ impl Router {
         prefix_hashes: Option<&[[u8; 32]]>,
         pd_warm: bool,
     ) -> Result<EndpointInfo, RouteError> {
+        if (nebula_common::autotune::is_experiment_uid(model_uid)
+            || self.experiment_models.contains_key(model_uid))
+            && !ctx.hint_trusted
+        {
+            return Err(RouteError::NoEndpoint);
+        }
         if ctx.inference_hint.is_some() {
             self.hint_received_total.fetch_add(1, Ordering::Relaxed);
         }
@@ -3396,6 +3425,82 @@ mod model_alias_tests {
             router.get_engine_model_name("qwen15_moe_vllm").as_deref(),
             Some("qwen15-moe-vllm")
         );
+    }
+
+    #[test]
+    fn experiments_cannot_steal_production_aliases_or_accept_user_traffic() {
+        for trial_first in [false, true] {
+            let router = Router::new();
+            let stable = sample_spec(
+                "stable",
+                "Org/Weights",
+                Some("served"),
+                Some("/models/Weights"),
+            );
+            let mut trial = stable.clone();
+            trial.model_uid = "at-experiment".into();
+            trial.labels.insert(
+                nebula_common::autotune::EXPERIMENT_LABEL.into(),
+                "job".into(),
+            );
+            for spec in if trial_first {
+                [&trial, &stable]
+            } else {
+                [&stable, &trial]
+            } {
+                router.register_model_spec(spec);
+            }
+            for name in ["Org/Weights", "served", "/models/Weights", "Weights"] {
+                assert_eq!(router.resolve_model(name), "stable");
+            }
+            assert_eq!(
+                router.get_engine_model_name("at-experiment").as_deref(),
+                Some("served")
+            );
+            let ep: EndpointInfo = serde_json::from_value(serde_json::json!({
+                "model_uid":"at-experiment", "replica_id":0, "status":"ready",
+                "base_url":"http://127.0.0.1:8000", "engine_type":"vllm"
+            }))
+            .unwrap();
+            router.upsert_endpoint(ep);
+            assert!(matches!(
+                router.route(&ExecutionContext::default(), "at-experiment", None, false),
+                Err(RouteError::NoEndpoint)
+            ));
+            let privileged = ExecutionContext {
+                hint_trusted: true,
+                ..Default::default()
+            };
+            assert!(router
+                .route(&privileged, "at-experiment", None, false)
+                .is_ok());
+            router.clear_model_mappings("at-experiment");
+            assert_eq!(router.resolve_model("served"), "stable");
+            assert!(!router.experiment_models.contains_key("at-experiment"));
+        }
+    }
+
+    #[test]
+    fn placement_first_sync_and_resync_never_register_trial_aliases() {
+        let uid = "at-0123456789abcdef0123456789abcdef";
+        let router = Router::new();
+        // Exact entry point used by both placement snapshot and watch updates,
+        // before the independent spec watch has populated experiment labels.
+        router.set_model_mapping(uid, "Org/Weights");
+        assert_ne!(router.resolve_model("Org/Weights"), uid);
+        router.register_model_spec(&sample_spec("stable", "Org/Weights", Some("served"), None));
+        let mut trial = sample_spec(uid, "Org/Weights", Some("served"), None);
+        trial.labels.insert(
+            nebula_common::autotune::EXPERIMENT_LABEL.into(),
+            "job".into(),
+        );
+        router.register_model_spec(&trial);
+        for _ in 0..2 {
+            router.set_model_mapping(uid, "Org/Weights");
+            assert_eq!(router.resolve_model("Org/Weights"), "stable");
+            assert_eq!(router.resolve_model("served"), "stable");
+        }
+        assert_eq!(router.get_engine_model_name(uid).as_deref(), Some("served"));
     }
 
     #[test]

@@ -55,6 +55,17 @@ fn build_vllm_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
         args.push("--max-model-len".to_string());
         args.push(max_len.to_string());
     }
+    if let Some(seqs) = cfg.max_num_seqs {
+        args.extend(["--max-num-seqs".to_string(), seqs.to_string()]);
+    }
+    if let Some(tokens) = cfg.max_num_batched_tokens {
+        args.extend(["--max-num-batched-tokens".to_string(), tokens.to_string()]);
+    }
+    match cfg.enable_chunked_prefill {
+        Some(true) => args.push("--enable-chunked-prefill".to_string()),
+        Some(false) => args.push("--no-enable-chunked-prefill".to_string()),
+        None => {}
+    }
     if let Some(name) = cfg.served_model_name.as_deref() {
         args.push("--served-model-name".to_string());
         args.push(name.to_string());
@@ -271,7 +282,51 @@ mod tests {
             tokenizer_mode: None,
             enable_prefix_caching: None,
             speculative_config: None,
+            ..Default::default()
         }
+    }
+
+    #[test]
+    fn bounded_batch_fields_merge_and_project_without_changing_defaults() {
+        let base = ModelConfig {
+            max_num_seqs: Some(16),
+            max_num_batched_tokens: Some(2048),
+            enable_chunked_prefill: Some(true),
+            ..Default::default()
+        };
+        let override_config = ModelConfig {
+            max_num_seqs: Some(32),
+            ..Default::default()
+        };
+        let merged = crate::merge_model_config(Some(&base), Some(&override_config)).unwrap();
+        assert_eq!(merged.max_num_seqs, Some(32));
+        assert_eq!(merged.max_num_batched_tokens, Some(2048));
+        crate::validate_model_config("vllm", &merged).unwrap();
+        assert!(crate::validate_model_config("sglang", &merged).is_err());
+        let args = build_engine_extra_args(Some("vllm"), &merged)
+            .unwrap()
+            .unwrap();
+        assert!(args.windows(2).any(|w| w == ["--max-num-seqs", "32"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--max-num-batched-tokens", "2048"]));
+        assert!(args.iter().any(|a| a == "--enable-chunked-prefill"));
+        let disabled = ModelConfig {
+            enable_chunked_prefill: Some(false),
+            ..merged
+        };
+        assert!(build_engine_extra_args(Some("vllm"), &disabled)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .any(|a| a == "--no-enable-chunked-prefill"));
+        let invalid = ModelConfig {
+            max_num_batched_tokens: Some(1),
+            ..disabled
+        };
+        assert!(crate::validate_model_config("vllm", &invalid).is_err());
+        let defaults = build_engine_extra_args(Some("vllm"), &ModelConfig::default()).unwrap();
+        assert!(defaults.is_none());
     }
 
     #[test]

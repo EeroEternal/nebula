@@ -113,6 +113,14 @@ pub struct ModelConfig {
     pub tensor_parallel_size: Option<u32>,
     pub gpu_memory_utilization: Option<f32>,
     pub max_model_len: Option<u32>,
+    /// Engine scheduler concurrency, not the Gateway's hard admission ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_num_seqs: Option<u32>,
+    /// Per-iteration token budget (vLLM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_num_batched_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_chunked_prefill: Option<bool>,
 
     #[serde(default)]
     pub required_vram_mb: Option<u64>,
