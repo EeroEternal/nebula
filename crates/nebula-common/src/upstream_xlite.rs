@@ -1,6 +1,7 @@
 //! `xlite-transport` implementation of the engine data-plane seam (xlite#96).
 //!
-//! Built only with `--features xlite`, pinned to a commit rather than a branch. The
+//! Built only with `--features xlite`, against the pinned `xlite-transport =0.1.0`
+//! registry release (contract suite: `cargo test -p nebula-common --features xlite`). The
 //! adapter's whole job is translation; no policy lives here:
 //!
 //! - **One call = one attempt** on the xlite side too. The adapter deliberately uses
