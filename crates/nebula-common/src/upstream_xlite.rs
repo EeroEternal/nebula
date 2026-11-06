@@ -146,8 +146,31 @@ impl UpstreamTransport for XliteTransport {
             .execute_redial_once(attempt)
             .await
             .map_err(map_error)?;
-        if outcome.telemetry.redials > 0 {
+        // Per-attempt telemetry is the transport's only window onto what it did, and the
+        // seam's response type carries no place for it: surface it here rather than drop
+        // it, so "why was this attempt slow / rewritten / redialled" is answerable from
+        // logs without reading the transport's internals.
+        let telemetry = &outcome.telemetry;
+        if telemetry.redials > 0 {
             self.redials.fetch_add(1, Ordering::Relaxed);
+        }
+        if telemetry.dial.is_some()
+            || telemetry.pool_wait.is_some()
+            || telemetry.redials > 0
+            || !telemetry.headers_rewritten.is_empty()
+        {
+            tracing::debug!(
+                status = %outcome.status,
+                version = ?outcome.version,
+                reused = telemetry.reused,
+                dial_ms = telemetry.dial.map(|d| d.as_millis() as u64),
+                pool_wait_ms = telemetry.pool_wait.map(|d| d.as_millis() as u64),
+                in_flight_at_acquire = telemetry.in_flight_at_acquire,
+                redials = telemetry.redials,
+                redial_reason = ?telemetry.redial_reason,
+                headers_rewritten = ?telemetry.headers_rewritten,
+                "xlite upstream attempt"
+            );
         }
         let body = UpstreamBody::new(outcome.body.map(|chunk| chunk.map_err(map_error)));
         Ok(UpstreamResponse::new(outcome.status, outcome.headers, body))
