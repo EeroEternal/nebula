@@ -73,6 +73,7 @@
 | [`dev/ha/railway-drill-2.md`](dev/ha/railway-drill-2.md) | 多机第二轮：自动成员发现/重分片、分片回收、队列成员分片、真实引擎、LB 摘流 |
 | [`dev/hw/phase0-pro6000.md`](dev/hw/phase0-pro6000.md) | Phase 0 真机（pro6000 / RTX PRO 6000）验证摘要 |
 | [`dev/hw/vllm-serving-perf.md`](dev/hw/vllm-serving-perf.md) | vLLM 服务层（Rust 前端 vs Python）与 Nebula 数据面性能实验（RTX 5090） |
+| [`dev/hw/deepseek-v41-pro6000d.md`](dev/hw/deepseek-v41-pro6000d.md) | DeepSeek-V4.1-Flash 在 8× RTX 6000D（85.7 GiB）上的部署与实测：三处必须偏离上游配方的根因与证据 |
 | [`dev/landscape.md`](dev/landscape.md) | 推理编排框架五方对照（`llm-d` / `Dynamo` / `AIBrix` / `Mooncake` / `Nebula`）与能力演进 |
 | [`dev/heterogeneous-compute.md`](dev/heterogeneous-compute.md) | **异构算力高效利用与细粒度计算契约方案**：去容器虚拟化包装，聚焦阶段/子阶段计算抽象、Roofline 物理契约与无强耦合协同约定 |
 | [`dev/direction.md`](dev/direction.md) | **发展方向与编排边界备忘**：State- & Stage-Aware 定位、MapReduce 五原则、Zone A–C / S1–S3 边界与 2026 趋势映射 |
