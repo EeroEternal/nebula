@@ -85,3 +85,5 @@
 | [`dev/prefix-affinity.md`](dev/prefix-affinity.md) | **P1 多副本与前缀亲和**：ZMQ KV events、`sha256_cbor` 链式哈希、`chat_template` 对齐与 `nebula-indexd` 全局索引 |
 | [`dev/engines.md`](dev/engines.md) | 多引擎对齐（vLLM / SGLang）与 LMCache 共享 KV 选型实测 |
 | [`dev/tokenspeed.md`](dev/tokenspeed.md) | **TokenSpeed 架构剖析与 Nebula 演进对标**：Zone A/B 与 Zone C 对标、动态块粒度、远端 `/lookup` 收敛、三类注意力 KV 容量模型与持久化算子编译缓存 |
+| [`dev/zstep.md`](dev/zstep.md) | **zstep 引擎接入与跨仓接口契约**：Zone A/B vs Zone C 边界、`zs-server serve` CLI 映射、探针状态码矩阵（`/health`/`/ready`/Drain）、`429/503` 错误语义、`/metrics` 字段与 P2 KV 事件契约 |
+| [`dev/zstep-plan.md`](dev/zstep-plan.md) | **zstep 在线化与 Nebula 原生纳管开发计划**：零冲突模块边界、`Z1–Z4` / `N1–N2` / `ZN3` 7 切片拆解与真机合龙验收门禁 |
