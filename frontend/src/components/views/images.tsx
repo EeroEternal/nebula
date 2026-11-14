@@ -328,6 +328,7 @@ export function ImagesView() {
                             { value: "vllm", label: "vLLM" },
                             { value: "sglang", label: "SGLang" },
                             { value: "tokenspeed", label: "TokenSpeed" },
+                            { value: "zstep", label: "zstep" },
                             { value: "xllm", label: "xLLM" },
                         ]}
                     />

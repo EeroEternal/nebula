@@ -35,10 +35,11 @@ pub use benchmark::{
 pub use capability::{
     parse_version_tuple, resolve_engine_type, score_api_for_engine, static_capability,
     static_capability_sglang, static_capability_tokenspeed, static_capability_vllm,
-    static_version_support, tool_calling_for_engine, validate_engine_and_config,
-    validate_engine_type, validate_engine_version, validate_model_config, CapabilitySource,
-    EngineCapability, EngineVersionSupport, ObservabilityCapability, QuantFormat,
-    ReplicaCapability, ServingTopologyKind, SupportLevel, DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
+    static_capability_zstep, static_version_support, tool_calling_for_engine,
+    validate_engine_and_config, validate_engine_type, validate_engine_version,
+    validate_model_config, CapabilitySource, EngineCapability, EngineVersionSupport,
+    ObservabilityCapability, QuantFormat, ReplicaCapability, ServingTopologyKind, SupportLevel,
+    DEFAULT_ENGINE_TYPE, KNOWN_ENGINE_TYPES,
 };
 pub use capacity::{build_capacity_snapshot, CapacitySnapshot, ModelCapacityRow};
 pub use cluster::ClusterStatus;

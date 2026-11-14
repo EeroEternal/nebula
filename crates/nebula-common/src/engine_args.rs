@@ -18,6 +18,7 @@ pub fn build_engine_extra_args(
         "vllm" => build_vllm_extra_args(config),
         "sglang" => build_sglang_extra_args(config),
         "tokenspeed" => build_tokenspeed_extra_args(config),
+        "zstep" => build_zstep_extra_args(config),
         other => {
             return Err(format!(
                 "no CLI encoder for engine_type '{other}' (resolved from {:?})",
@@ -36,6 +37,7 @@ pub fn build_engine_extra_args_lenient(
     match engine.as_str() {
         "sglang" => build_sglang_extra_args(config),
         "tokenspeed" => build_tokenspeed_extra_args(config),
+        "zstep" => build_zstep_extra_args(config),
         _ => build_vllm_extra_args(config),
     }
 }
@@ -253,6 +255,63 @@ fn build_tokenspeed_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
             args.push("--speculative-num-draft-tokens".to_string());
             args.push(k.to_string());
         }
+    }
+
+    if args.is_empty() {
+        None
+    } else {
+        Some(args)
+    }
+}
+
+fn build_zstep_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+
+    if let Some(tp) = cfg.tensor_parallel_size {
+        args.push("--world-size".to_string());
+        args.push(tp.to_string());
+    }
+    if let Some(util) = cfg.gpu_memory_utilization {
+        args.push("--gpu-memory-utilization".to_string());
+        args.push(util.to_string());
+    }
+    if let Some(max_len) = cfg.max_model_len {
+        args.push("--max-model-len".to_string());
+        args.push(max_len.to_string());
+    }
+    if let Some(seqs) = cfg.max_num_seqs {
+        args.push("--max-seqs".to_string());
+        args.push(seqs.to_string());
+    }
+    if let Some(tokens) = cfg.max_num_batched_tokens {
+        args.push("--max-step-tokens".to_string());
+        args.push(tokens.to_string());
+    }
+    if cfg.enable_chunked_prefill == Some(false) {
+        let full_chunk = cfg.max_model_len.unwrap_or(32768);
+        args.push("--max-prefill-chunk".to_string());
+        args.push(full_chunk.to_string());
+    }
+    if let Some(name) = cfg.served_model_name.as_deref() {
+        args.push("--served-model-name".to_string());
+        args.push(name.to_string());
+    }
+    if let Some(dtype) = cfg.kv_cache_dtype.as_deref() {
+        args.push("--kv-cache-dtype".to_string());
+        args.push(dtype.to_string());
+    }
+    if let Some(block) = cfg.block_size {
+        args.push("--page-block-tokens".to_string());
+        args.push(block.to_string());
+    }
+    if let Some(mode) = cfg.tokenizer_mode.as_deref() {
+        args.push("--tokenizer-mode".to_string());
+        args.push(mode.to_string());
+    }
+    match cfg.enable_prefix_caching {
+        Some(true) => args.push("--enable-prefix-caching".to_string()),
+        Some(false) => args.push("--no-enable-prefix-caching".to_string()),
+        None => {}
     }
 
     if args.is_empty() {
@@ -513,5 +572,59 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|w| w[0] == "--speculative-num-draft-tokens" && w[1] == "3"));
+    }
+
+    #[test]
+    fn zstep_uses_native_serve_cli_flags_without_vllm_leakage() {
+        let cfg = ModelConfig {
+            tensor_parallel_size: Some(8),
+            gpu_memory_utilization: Some(0.9),
+            max_model_len: Some(32768),
+            max_num_seqs: Some(128),
+            max_num_batched_tokens: Some(32768),
+            enable_chunked_prefill: Some(false),
+            served_model_name: Some("deepseek-v4.1-flash".into()),
+            kv_cache_dtype: Some("bf16".into()),
+            trust_remote_code: Some(true),
+            enable_expert_parallel: Some(true),
+            block_size: Some(128),
+            tokenizer_mode: Some("deepseek_v41".into()),
+            enable_prefix_caching: Some(false),
+            ..Default::default()
+        };
+        let args = build_engine_extra_args(Some("zstep"), &cfg)
+            .unwrap()
+            .unwrap();
+        assert!(args.windows(2).any(|w| w == ["--world-size", "8"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--gpu-memory-utilization", "0.9"]));
+        assert!(args.windows(2).any(|w| w == ["--max-model-len", "32768"]));
+        assert!(args.windows(2).any(|w| w == ["--max-seqs", "128"]));
+        assert!(args.windows(2).any(|w| w == ["--max-step-tokens", "32768"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--max-prefill-chunk", "32768"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--served-model-name", "deepseek-v4.1-flash"]));
+        assert!(args.windows(2).any(|w| w == ["--kv-cache-dtype", "bf16"]));
+        assert!(args.windows(2).any(|w| w == ["--page-block-tokens", "128"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--tokenizer-mode", "deepseek_v41"]));
+        assert!(args.iter().any(|a| a == "--no-enable-prefix-caching"));
+        // Never leak vLLM/SGLang-specific flags to zstep.
+        for forbidden in [
+            "--tensor-parallel-size",
+            "--tp",
+            "--trust-remote-code",
+            "--enable-expert-parallel",
+            "--block-size",
+            "--max-num-seqs",
+            "--max-num-batched-tokens",
+        ] {
+            assert!(!args.iter().any(|a| a == forbidden), "leaked {forbidden}");
+        }
     }
 }

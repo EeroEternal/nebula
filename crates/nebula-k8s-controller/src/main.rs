@@ -587,11 +587,14 @@ async fn ensure_replica_running(
         let base_url = format!("http://{pod_ip}:{port}");
 
         // Probe health. Timeout is generous: SGLang's /health can take >800ms.
+        // Must check HTTP 2xx (`status().is_success()`): engines like `zstep`
+        // bind TCP immediately in `Starting` and return `503` during warmup
+        // and `Faulted` states (`docs/dev/zstep.md` §3).
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3))
             .build()?;
         let health_url = format!("{base_url}/health");
-        let is_ready = client.get(&health_url).send().await.is_ok();
+        let is_ready = probe_endpoint_health(&client, &health_url).await;
 
         let ep_key = format!("/endpoints/{model_uid}/{replica_id}");
         if is_ready {
@@ -689,6 +692,14 @@ async fn ensure_model_stopped(
     Ok(())
 }
 
+async fn probe_endpoint_health(client: &reqwest::Client, health_url: &str) -> bool {
+    client
+        .get(health_url)
+        .send()
+        .await
+        .is_ok_and(|resp| resp.status().is_success())
+}
+
 /// Engine-pod creation inputs (grouped — keeps the call site readable and
 /// carries the pd_split fields: role + kv_sharing).
 struct EnginePodSpec<'a> {
@@ -707,7 +718,7 @@ struct EnginePodSpec<'a> {
     config_hash: String,
 }
 
-fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
+fn build_engine_pod_manifest(p: &EnginePodSpec<'_>) -> serde_json::Value {
     let EnginePodSpec {
         namespace,
         gpu_node,
@@ -721,6 +732,13 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         kv_sharing,
         config_hash,
     } = p;
+    let replica_id = *replica_id;
+    let gpu_index = *gpu_index;
+    let role = *role;
+    let spec = *spec;
+    let resolved_image = *resolved_image;
+    let kv_sharing = *kv_sharing;
+
     let pod_name = replica_pod_name(model_uid, replica_id);
     let host_model_path = spec
         .and_then(|s| s.model_path.as_deref())
@@ -728,12 +746,15 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
 
     let is_sglang = engine_type.eq_ignore_ascii_case("sglang");
     let is_tokenspeed = engine_type.eq_ignore_ascii_case("tokenspeed");
+    let is_zstep = engine_type.eq_ignore_ascii_case("zstep");
     // Honour the resolved deployment/replica/spec pinned image
     // (compat-matrix/baked-digest discipline, review #4).
     let default_image = if is_sglang {
         "lmsysorg/sglang:latest"
     } else if is_tokenspeed {
         "lightseekorg/tokenspeed:latest"
+    } else if is_zstep {
+        "ghcr.io/eeroeternal/zstep:latest"
     } else {
         "vllm/vllm-openai:v0.23.0"
     };
@@ -768,6 +789,31 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
             "--trust-remote-code",
             "--enable-metrics"
         ])
+    } else if is_zstep {
+        let extra = spec
+            .and_then(|s| s.config.as_ref())
+            .and_then(|cfg| nebula_common::build_engine_extra_args_lenient(Some("zstep"), cfg))
+            .unwrap_or_default();
+        let mut zstep_args: Vec<serde_json::Value> = vec![
+            json!("--model-dir"),
+            json!("/models/weights"),
+            json!("--host"),
+            json!("0.0.0.0"),
+            json!("--port"),
+            json!("43537"),
+        ];
+        if !extra.iter().any(|a| a == "--served-model-name") {
+            zstep_args.push(json!("--served-model-name"));
+            zstep_args.push(json!(model_uid));
+        }
+        if !extra.iter().any(|a| a == "--world-size") {
+            zstep_args.push(json!("--world-size"));
+            zstep_args.push(json!("1"));
+        }
+        for flag in extra {
+            zstep_args.push(json!(flag));
+        }
+        serde_json::Value::Array(zstep_args)
     } else {
         json!([
             "--model",
@@ -787,7 +833,7 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
     // PYTHONHASHSEED is unset) and the algo pinned to sha256_cbor (default
     // "sha256" is pickle-based, not reproducible outside Python).
     let mut kv_hash_seed: Option<String> = None;
-    if !is_sglang && !is_tokenspeed {
+    if !is_sglang && !is_tokenspeed && !is_zstep {
         if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
             let seed = std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string());
             if let Some(arr) = args.as_array_mut() {
@@ -859,6 +905,15 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
             { "mountPath": "/dev/shm", "name": "dshm" }
         ]
     });
+    if is_zstep {
+        if let Some(envs) = container["env"].as_array_mut() {
+            envs.push(json!({ "name": "HF_HOME", "value": "/models/weights/.cache/huggingface" }));
+            envs.push(json!({
+                "name": "FLASHINFER_WORKSPACE_BASE",
+                "value": "/models/weights/.cache/flashinfer"
+            }));
+        }
+    }
     if let Some(seed) = kv_hash_seed.as_deref() {
         if let Some(envs) = container["env"].as_array_mut() {
             envs.push(json!({ "name": "PYTHONHASHSEED", "value": seed }));
@@ -875,9 +930,11 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
         container["command"] = json!(["python3"]);
     } else if is_tokenspeed {
         container["command"] = json!(["tokenspeed", "serve"]);
+    } else if is_zstep {
+        container["command"] = json!(["zs-server", "serve"]);
     }
 
-    let manifest = json!({
+    json!({
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
@@ -910,7 +967,11 @@ fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
                 }
             ]
         }
-    });
+    })
+}
+
+fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
+    let manifest = build_engine_pod_manifest(&p);
 
     let manifest_str = serde_json::to_string(&manifest)?;
     let mut child = Command::new("kubectl")
@@ -1238,5 +1299,105 @@ mod tests {
             ep_after_cap.last_heartbeat_ms, reset_marker,
             "endpoint heartbeat must stop being renewed once MAX_SPEC_ERROR_REFRESH_TICKS is exceeded"
         );
+    }
+
+    #[test]
+    fn zstep_pod_manifest_uses_zs_server_serve_and_flashinfer_cache() {
+        let spec = ModelSpec {
+            model_uid: "dsv41-flash".into(),
+            model_name: "DeepSeek-V4.1-Flash".into(),
+            model_source: nebula_common::ModelSource::Local,
+            model_path: Some("/models/DeepSeek-V4.1-Flash".into()),
+            engine_type: Some("zstep".into()),
+            docker_image: None,
+            config: Some(nebula_common::ModelConfig {
+                max_num_seqs: Some(64),
+                block_size: Some(128),
+                ..Default::default()
+            }),
+            labels: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            created_by: None,
+        };
+        let manifest = build_engine_pod_manifest(&EnginePodSpec {
+            namespace: "nebula",
+            gpu_node: "gpu-node-0",
+            model_uid: "dsv41-flash",
+            replica_id: 0,
+            gpu_index: 2,
+            engine_type: "zstep",
+            spec: Some(&spec),
+            resolved_image: None,
+            role: ReplicaRole::Mixed,
+            kv_sharing: None,
+            config_hash: "abc123".into(),
+        });
+        let container = &manifest["spec"]["containers"][0];
+        assert_eq!(container["image"], "ghcr.io/eeroeternal/zstep:latest");
+        assert_eq!(container["command"], json!(["zs-server", "serve"]));
+        let args: Vec<&str> = container["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--model-dir", "/models/weights"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--served-model-name", "dsv41-flash"]));
+        assert!(args.windows(2).any(|w| w == ["--host", "0.0.0.0"]));
+        assert!(args.windows(2).any(|w| w == ["--port", "43537"]));
+        assert!(args.windows(2).any(|w| w == ["--world-size", "1"]));
+        assert!(args.windows(2).any(|w| w == ["--max-seqs", "64"]));
+        assert!(args.windows(2).any(|w| w == ["--page-block-tokens", "128"]));
+        assert!(!args.contains(&"--kv-events-config"));
+        let envs = container["env"].as_array().unwrap();
+        assert!(envs.iter().any(|e| {
+            e["name"] == "FLASHINFER_WORKSPACE_BASE"
+                && e["value"] == "/models/weights/.cache/flashinfer"
+        }));
+        assert_eq!(
+            manifest["spec"]["volumes"][1]["emptyDir"]["sizeLimit"],
+            "16Gi"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_endpoint_health_rejects_503_and_accepts_200() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        async fn serve_once(status_line: &'static str) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut buf = [0u8; 512];
+                    let _ = stream.read(&mut buf).await;
+                    let resp = format!(
+                        "HTTP/1.1 {status_line}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            });
+            format!("http://{addr}/health")
+        }
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let starting_url = serve_once("503 Service Unavailable").await;
+        assert!(
+            !probe_endpoint_health(&client, &starting_url).await,
+            "503 Starting/Faulted must NOT be treated as Ready"
+        );
+
+        let ready_url = serve_once("200 OK").await;
+        assert!(probe_endpoint_health(&client, &ready_url).await);
     }
 }

@@ -91,6 +91,14 @@ pub fn static_version_support(engine_type: &str) -> Vec<EngineVersionSupport> {
             max_exclusive: None,
             known_issues: Vec::new(),
         }],
+        "zstep" => vec![EngineVersionSupport {
+            engine_type: "zstep".into(),
+            min_inclusive: Some("0.1.0".into()),
+            max_exclusive: None,
+            known_issues: vec![
+                "online Radix prefix cache and tool_calling are disabled in P0/P1".into(),
+            ],
+        }],
         _ => Vec::new(),
     }
 }
@@ -240,7 +248,7 @@ pub struct EngineCapability {
 }
 
 /// Engine types Nebula can launch as ordinary replicas today.
-pub const KNOWN_ENGINE_TYPES: &[&str] = &["vllm", "sglang", "tokenspeed"];
+pub const KNOWN_ENGINE_TYPES: &[&str] = &["vllm", "sglang", "tokenspeed", "zstep"];
 
 /// Default engine when `engine_type` is omitted (backward compatible).
 pub const DEFAULT_ENGINE_TYPE: &str = "vllm";
@@ -272,7 +280,43 @@ pub fn static_capability(engine_type: &str) -> Option<EngineCapability> {
         "vllm" => Some(static_capability_vllm()),
         "sglang" => Some(static_capability_sglang()),
         "tokenspeed" => Some(static_capability_tokenspeed()),
+        "zstep" => Some(static_capability_zstep()),
         _ => None,
+    }
+}
+
+pub fn static_capability_zstep() -> EngineCapability {
+    EngineCapability {
+        engine_type: "zstep".into(),
+        engine_version: None,
+        source: CapabilitySource::StaticTable,
+        quantization: None,
+        native_low_precision_paths: BTreeMap::from([
+            (QuantFormat::Fp8, SupportLevel::Supported),
+            (QuantFormat::W4A4, SupportLevel::Supported),
+        ]),
+        openai_compatible: Some(true),
+        tensor_parallel: Some(true),
+        data_parallel: Some(false),
+        lora: Some(false),
+        structured_output: Some(false),
+        kv_connector: Some(false),
+        grpc: Some(false),
+        tool_calling: SupportLevel::Unsupported,
+        score_api: SupportLevel::Unsupported,
+        topologies: vec![
+            ServingTopologyKind::Standalone,
+            ServingTopologyKind::Replicated,
+        ],
+        observability: ObservabilityCapability {
+            pending_requests: SupportLevel::Supported,
+            kv_cache_usage: SupportLevel::Supported,
+            prefix_cache_hit_rate: SupportLevel::Unsupported,
+            prompt_cache_hit_rate: SupportLevel::Unsupported,
+            ttft: SupportLevel::Supported,
+            tpot: SupportLevel::Supported,
+        },
+        notes: Some("zstep native Rust/CUDA inference engine replicas".into()),
     }
 }
 
@@ -403,25 +447,50 @@ pub fn validate_model_config(
         || config.max_num_batched_tokens.is_some()
         || config.enable_chunked_prefill.is_some()
     {
-        if engine_type != "vllm" {
-            return Err("scheduler tuning fields are currently supported only for vllm".into());
+        if !matches!(engine_type, "vllm" | "zstep") {
+            return Err(
+                "scheduler tuning fields are currently supported only for vllm and zstep".into(),
+            );
         }
         if config.max_num_seqs == Some(0) || config.max_num_batched_tokens == Some(0) {
             return Err("max_num_seqs and max_num_batched_tokens must be positive".into());
         }
-        if let (Some(seqs), Some(tokens)) = (config.max_num_seqs, config.max_num_batched_tokens) {
-            if tokens < seqs {
-                return Err("max_num_batched_tokens must be >= max_num_seqs".into());
-            }
+        if engine_type == "zstep" && config.max_num_seqs.is_some_and(|s| s > 128) {
+            return Err("zstep max_num_seqs must be in 1..=128 (decode CUDA Graph ceiling)".into());
         }
-        if config.enable_chunked_prefill == Some(false) {
-            if let (Some(tokens), Some(context)) =
-                (config.max_num_batched_tokens, config.max_model_len)
-            {
-                if tokens < context {
+        if engine_type == "zstep" {
+            let effective_seqs = config.max_num_seqs.unwrap_or(128);
+            if let Some(tokens) = config.max_num_batched_tokens {
+                if tokens < effective_seqs {
+                    return Err("max_num_batched_tokens must be >= max_num_seqs".into());
+                }
+            }
+            if config.enable_chunked_prefill == Some(false) {
+                let effective_tokens = config.max_num_batched_tokens.unwrap_or(4096);
+                let effective_context = config.max_model_len.unwrap_or(32768);
+                if effective_tokens < effective_context {
                     return Err(
                         "without chunked prefill the token budget must cover max_model_len".into(),
                     );
+                }
+            }
+        } else {
+            if let (Some(seqs), Some(tokens)) = (config.max_num_seqs, config.max_num_batched_tokens)
+            {
+                if tokens < seqs {
+                    return Err("max_num_batched_tokens must be >= max_num_seqs".into());
+                }
+            }
+            if config.enable_chunked_prefill == Some(false) {
+                if let (Some(tokens), Some(context)) =
+                    (config.max_num_batched_tokens, config.max_model_len)
+                {
+                    if tokens < context {
+                        return Err(
+                            "without chunked prefill the token budget must cover max_model_len"
+                                .into(),
+                        );
+                    }
                 }
             }
         }
@@ -450,11 +519,45 @@ pub fn validate_model_config(
                 "engine '{engine_type}' does not support tensor parallelism"
             ));
         }
+        if engine_type == "zstep" && tp > 8 {
+            return Err("zstep tensor_parallel_size must be in 1..=8".into());
+        }
+    }
+
+    if engine_type == "zstep" && config.enable_prefix_caching == Some(true) {
+        return Err(
+            "engine 'zstep' does not yet wire online Radix prefix caching; omit enable_prefix_caching or set false"
+                .into(),
+        );
     }
 
     if let Some(max_len) = config.max_model_len {
         if max_len == 0 {
             return Err("max_model_len must be >= 1".into());
+        }
+    }
+
+    if config.block_size == Some(0) {
+        return Err("block_size must be >= 1".into());
+    }
+
+    if engine_type == "zstep" {
+        if let Some(ref dtype) = config.kv_cache_dtype {
+            if !matches!(
+                dtype.as_str(),
+                "auto" | "fp8" | "fp8_e4m3" | "bf16" | "bfloat16"
+            ) {
+                return Err(format!(
+                    "unsupported zstep kv_cache_dtype '{dtype}'; supported: auto, fp8, fp8_e4m3, bf16, bfloat16"
+                ));
+            }
+        }
+        if let Some(ref mode) = config.tokenizer_mode {
+            if !matches!(mode.as_str(), "auto" | "deepseek_v41" | "chatml") {
+                return Err(format!(
+                    "unsupported zstep tokenizer_mode '{mode}'; supported: auto, deepseek_v41, chatml"
+                ));
+            }
         }
     }
 
@@ -467,6 +570,11 @@ pub fn validate_model_config(
     }
 
     if let Some(ref spec) = config.speculative_config {
+        if engine_type == "zstep" {
+            return Err(
+                "engine 'zstep' does not yet support speculative_config in online serving".into(),
+            );
+        }
         if matches!(
             spec.method,
             Some(
@@ -693,6 +801,123 @@ mod tests {
             tool_calling_for_engine(Some("tokenspeed")),
             SupportLevel::Supported
         );
+
+        let zs = static_capability_zstep();
+        assert_eq!(zs.source, CapabilitySource::StaticTable);
+        assert_eq!(
+            zs.observability.prefix_cache_hit_rate,
+            SupportLevel::Unsupported
+        );
+        assert_eq!(zs.observability.ttft, SupportLevel::Supported);
+        assert_eq!(zs.observability.tpot, SupportLevel::Supported);
+        assert_eq!(zs.tool_calling, SupportLevel::Unsupported);
+        assert_eq!(
+            tool_calling_for_engine(Some("zstep")),
+            SupportLevel::Unsupported
+        );
+        assert_eq!(
+            zs.native_low_precision_paths.get(&QuantFormat::Fp8),
+            Some(&SupportLevel::Supported)
+        );
+        assert_eq!(
+            zs.native_low_precision_paths.get(&QuantFormat::W4A4),
+            Some(&SupportLevel::Supported)
+        );
+    }
+
+    #[test]
+    fn zstep_validates_scheduler_bounds_and_rejects_unsupported_knobs() {
+        assert_eq!(validate_engine_type(Some("zstep")).unwrap(), "zstep");
+        assert!(validate_engine_version("zstep", Some("0.1.0")).is_ok());
+
+        let valid = ModelConfig {
+            tensor_parallel_size: Some(8),
+            gpu_memory_utilization: Some(0.9),
+            max_model_len: Some(32768),
+            max_num_seqs: Some(128),
+            max_num_batched_tokens: Some(4096),
+            enable_chunked_prefill: Some(true),
+            enable_prefix_caching: Some(false),
+            ..Default::default()
+        };
+        validate_model_config("zstep", &valid).unwrap();
+
+        let too_many_seqs = ModelConfig {
+            max_num_seqs: Some(129),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &too_many_seqs)
+            .unwrap_err()
+            .contains("1..=128"));
+
+        let tp_too_large = ModelConfig {
+            tensor_parallel_size: Some(16),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &tp_too_large)
+            .unwrap_err()
+            .contains("1..=8"));
+
+        let prefix_on = ModelConfig {
+            enable_prefix_caching: Some(true),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &prefix_on)
+            .unwrap_err()
+            .contains("Radix prefix caching"));
+
+        let with_spec = ModelConfig {
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Mtp),
+                num_speculative_tokens: Some(2),
+                ..Default::default()
+            }),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &with_spec)
+            .unwrap_err()
+            .contains("speculative_config"));
+
+        // Effective defaults for zstep: max_num_seqs=128, max_num_batched_tokens=4096, max_model_len=32768.
+        let batch_below_default_seqs = ModelConfig {
+            max_num_batched_tokens: Some(64),
+            ..Default::default()
+        };
+        assert!(validate_model_config("zstep", &batch_below_default_seqs)
+            .unwrap_err()
+            .contains("max_num_batched_tokens must be >= max_num_seqs"));
+
+        let unchunked_without_budget = ModelConfig {
+            enable_chunked_prefill: Some(false),
+            ..Default::default()
+        };
+        assert!(validate_model_config("zstep", &unchunked_without_budget)
+            .unwrap_err()
+            .contains("without chunked prefill"));
+
+        let zero_block = ModelConfig {
+            block_size: Some(0),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &zero_block)
+            .unwrap_err()
+            .contains("block_size"));
+
+        let bad_dtype = ModelConfig {
+            kv_cache_dtype: Some("int4".into()),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &bad_dtype)
+            .unwrap_err()
+            .contains("kv_cache_dtype"));
+
+        let bad_tok_mode = ModelConfig {
+            tokenizer_mode: Some("mistral".into()),
+            ..valid
+        };
+        assert!(validate_model_config("zstep", &bad_tok_mode)
+            .unwrap_err()
+            .contains("tokenizer_mode"));
     }
 
     #[test]

@@ -232,7 +232,65 @@ pub fn parse_tokenspeed_metrics_text(
     }
 }
 
-/// Dispatch `/metrics` parsing by engine type (`sglang` / `tokenspeed` vs vLLM default),
+/// Parse zstep `/metrics` into `EndpointStats`.
+///
+/// zstep exposes `zstep:num_requests_waiting`, `zstep:num_requests_running`,
+/// `zstep:kv_cache_usage_perc`, `zstep:num_preemptions_total`, and (only when
+/// online Radix prefix cache is enabled) `zstep:prefix_cache_{queries,hits}_total`.
+pub fn parse_zstep_metrics_text(
+    text: &str,
+    model_uid: &str,
+    replica_id: u32,
+    last_updated_ms: u64,
+) -> EndpointStats {
+    let mut waiting_requests: Option<u64> = None;
+    let mut running_requests: Option<u64> = None;
+    let mut kv_cache_usage: Option<f64> = None;
+    let mut prefix_cache_hit_rate: Option<f64> = None;
+
+    for line in text.lines() {
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(val) = extract_ns_metric(line, "zstep", "num_requests_waiting") {
+            waiting_requests = Some(val as u64);
+        } else if let Some(val) = extract_ns_metric(line, "zstep", "num_requests_running") {
+            running_requests = Some(val as u64);
+        } else if let Some(val) = extract_ns_metric(line, "zstep", "kv_cache_usage_perc") {
+            kv_cache_usage = Some(val);
+        } else if let Some(val) = extract_ns_metric(line, "zstep", "prefix_cache_hit_rate") {
+            prefix_cache_hit_rate = Some(val);
+        }
+    }
+
+    let diag = parse_engine_scrape_diagnostics(Some("zstep"), text);
+    if prefix_cache_hit_rate.is_none() {
+        if let (Some(hits), Some(queries)) = (
+            diag.prefix_cache_hits_total,
+            diag.prefix_cache_queries_total,
+        ) {
+            if queries > 0.0 {
+                prefix_cache_hit_rate = Some(hits / queries);
+            }
+        }
+    }
+
+    EndpointStats {
+        model_uid: model_uid.to_string(),
+        replica_id,
+        last_updated_ms,
+        pending_requests: waiting_requests.unwrap_or(0) + running_requests.unwrap_or(0),
+        waiting_requests,
+        running_requests,
+        prefix_cache_hit_rate,
+        prompt_cache_hit_rate: None,
+        kv_cache_usage,
+        prefix_cache_queries_total: diag.prefix_cache_queries_total,
+        num_preemptions_total: diag.num_preemptions_total.map(|v| v as u64),
+    }
+}
+
+/// Dispatch `/metrics` parsing by engine type (`sglang` / `tokenspeed` / `zstep` vs vLLM default),
 /// so both execution planes (node / k8s-controller) treat engines uniformly.
 pub fn parse_engine_metrics(
     engine_type: Option<&str>,
@@ -246,6 +304,7 @@ pub fn parse_engine_metrics(
         Some("tokenspeed") => {
             parse_tokenspeed_metrics_text(text, model_uid, replica_id, last_updated_ms)
         }
+        Some("zstep") => parse_zstep_metrics_text(text, model_uid, replica_id, last_updated_ms),
         _ => parse_vllm_metrics_text(text, model_uid, replica_id, last_updated_ms),
     }
 }
@@ -274,6 +333,7 @@ pub fn parse_engine_scrape_diagnostics(
     let ns = match engine_type.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("sglang") => "sglang",
         Some("tokenspeed") => "tokenspeed",
+        Some("zstep") => "zstep",
         _ => "vllm",
     };
 
@@ -465,6 +525,29 @@ tokenspeed:num_retractions_total{model=\"deepseek-r1\"} 2\n";
         assert_eq!(ts_stats.prefix_cache_hit_rate, Some(0.8));
         let ts_diag = parse_engine_scrape_diagnostics(Some("tokenspeed"), ts);
         assert_eq!(ts_diag.num_preemptions_total, Some(2.0));
+        let zs = "\
+zstep:num_requests_waiting 2\n\
+zstep:num_requests_running 5\n\
+zstep:kv_cache_usage_perc 0.35\n\
+zstep:num_preemptions_total 0\n";
+        let zs_stats = parse_engine_metrics(Some("zstep"), zs, "m", 0, 1);
+        assert_eq!(zs_stats.pending_requests, 7);
+        assert_eq!(zs_stats.waiting_requests, Some(2));
+        assert_eq!(zs_stats.running_requests, Some(5));
+        assert_eq!(zs_stats.kv_cache_usage, Some(0.35));
+        // P0 tri-state: no prefix_cache_* lines -> None (never fake 0.0).
+        assert_eq!(zs_stats.prefix_cache_hit_rate, None);
+        assert_eq!(zs_stats.prefix_cache_queries_total, None);
+        assert_eq!(zs_stats.num_preemptions_total, Some(0));
+
+        let zs_radix = "\
+zstep:num_requests_waiting 0\n\
+zstep:num_requests_running 1\n\
+zstep:kv_cache_usage_perc 0.125\n\
+zstep:prefix_cache_queries_total 40\n\
+zstep:prefix_cache_hits_total 30\n";
+        let zs_radix_stats = parse_engine_metrics(Some("zstep"), zs_radix, "m", 0, 1);
+        assert_eq!(zs_radix_stats.prefix_cache_hit_rate, Some(0.75));
         // Unknown engine falls back to vLLM.
         assert_eq!(parse_engine_metrics(None, v, "m", 0, 1).pending_requests, 2);
     }
