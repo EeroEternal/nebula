@@ -18,7 +18,7 @@
    - Nebula 只通过 CLI 参数、HTTP/SSE、`/health`、`/metrics` 与可选 ZMQ KV 事件管理 `zstep` 黑盒，绝不触碰 SHM 或 KV 字节。
    - Nebula 任何代码提交 push 前必须在本地跑过 `./scripts/ci.sh` + `cargo fmt --check` + `cargo clippy` + 前端检查（不得新增 GitHub Actions 测试流）。
 3. **禁止幻觉能力与静默忽略**：
-   - 未实现的 OpenAI 参数或 `ModelConfig` 字段必须显式返回 `400` 拒绝；未接入在线 Radix 前严禁在 `/metrics` 输出 `zstep:prefix_cache_* = 0`。
+   - 未实现的 OpenAI 参数或 `ModelConfig` 字段必须显式返回 `400` 拒绝；关闭在线 APC（`--no-enable-prefix-caching`）或未接入在线 APC 前严禁在 `/metrics` 输出 `zstep:prefix_cache_* = 0`。
 
 ---
 
@@ -36,7 +36,7 @@ flowchart TD
     N1["Slice N1 (Nebula): nebula-common 能力/参数/指标解析契约"]
     N2["Slice N2 (Nebula): nebula-node & k8s ZstepEngine + Admin UI"]
     E2E["Stage 2 真机合龙验收: Gateway -> 多副本 zstep -> Drain -> 故障恢复"]
-    ZN3["Slice ZN3 (P2 联合): GPU 采样 + 在线 Radix + NEBULA_KV_HASH_SEED 前缀亲和"]
+    ZN3["Slice ZN3 (P2 联合): GPU 采样 + 在线 APC + NEBULA_KV_HASH_SEED 前缀亲和"]
 
     Contract --> Z1
     Contract --> Z2
@@ -123,11 +123,11 @@ flowchart TD
     3. 触发副本缩容（`2 -> 1`），确认走完 `Draining -> pending_requests == 0 -> SIGTERM -> /dev/shm 零残留` 闭环；
     4. `kill -9` 某副本单个 GPU Worker，确认 `zstep` `/health` 变 `503` $\rightarrow$ Nebula 自动摘流重启恢复。
 
-### Slice ZN3（P2 跨仓增强）：采样扩展、在线 Radix 与 `nebula-indexd` 前缀亲和
+### Slice ZN3（P2 跨仓增强）：采样扩展、在线 APC 与 `nebula-indexd` 前缀亲和
 
 - **范围**：
   - `zstep` 在 `zs-wire` `StepPlan` 增加 per-slot `(temperature, top_p, top_k, seed)` 并在 Worker GPU 侧完成采样；
-  - `zstep` `ServeLoop` 接入 `zs_kv::KvCacheManager`（Radix Prefix Cache），开启 `zstep:prefix_cache_{hits,queries}_total` 指标；
+  - `zstep` `ServeLoop` 接入 `zs_kv::PrefixTree`（Automatic Prefix Caching，已落地单实例在线 APC），开启 `zstep:prefix_cache_{hits,queries,evictions}_total` 指标；
   - `zstep` 实现 [`zstep.md` §6](./zstep.md#6-p2-跨副本前缀亲和事件契约nebula_kv_hash_seed) 的 `NEBULA_KV_HASH_SEED` 16-token `sha256_cbor` 块哈希与 ZMQ `BlockStored`/`BlockRemoved` 事件发布；`nebula-node` / `nebula-k8s-controller` 在配置 `NEBULA_KV_EVENTS_ENDPOINT` 时为 `zstep` 自动注入 `--kv-events-endpoint` 与 `--kv-events-topic`。
 - **门禁**：
   - 单元校准测试验证 `zstep` 产出的 8 字节块哈希与 [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs) 在相同 Token 序列和种子下 100% 逐字节相等；

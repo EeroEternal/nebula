@@ -1,6 +1,6 @@
 # zstep 引擎接入与跨仓接口契约
 
-> **状态**：**阶段 1（契约）与阶段 2（Slice N1/N2 运行时接入）已实现；P2 在线 Radix 前缀事件待接线**。[`KNOWN_ENGINE_TYPES`](../../crates/nebula-common/src/capability.rs) 已纳管 `zstep`（与 `vllm`、`sglang`、`tokenspeed` 并列）；`zstep` 侧在线 `serve` 子命令实现于 `EeroEternal/zstep#9`（跟踪于 `EeroEternal/zstep#7`）。本文钉死双仓在 CLI 参数、探针状态码、HTTP/SSE 错误语义、Prometheus `/metrics` 与 P2 KV 事件上的精确契约，作为两边实现与联调的唯一依据。
+> **状态**：**阶段 1（契约）、阶段 2（Slice N1/N2 运行时接入）与阶段 3（在线 Automatic Prefix Caching / APC）已实现；P2 跨副本 ZMQ 前缀事件待接线**。[`KNOWN_ENGINE_TYPES`](../../crates/nebula-common/src/capability.rs) 已纳管 `zstep`（与 `vllm`、`sglang`、`tokenspeed` 并列）；`zstep` 侧在线 `serve` 子命令实现于 `EeroEternal/zstep#9`（跟踪于 `EeroEternal/zstep#7`）。本文钉死双仓在 CLI 参数、探针状态码、HTTP/SSE 错误语义、Prometheus `/metrics` 与 P2 KV 事件上的精确契约，作为两边实现与联调的唯一依据。
 
 ---
 
@@ -8,7 +8,7 @@
 
 遵循 [`AGENTS.md`](../../AGENTS.md) 第 13/14 条与 [`direction.md`](./direction.md) §10.2：
 
-- **`zstep`（Zone A/B / S1，单节点引擎黑盒）**：Rust Master 独占单实例 HTTP/SSE、Tokenizer/Chat Template、请求状态机、有界等待队列、`SlotLease`/`BlockLease` RAII、Radix Prefix Cache 与 Mode B `SHM + eventfd`（`in_flight_depth = 1`）双槽流水线，驱动本机多卡 GPU Worker（CUDA Graph / `b12x` / SM120 算子）。不实现多机网关或跨副本路由。
+- **`zstep`（Zone A/B / S1，单节点引擎黑盒）**：Rust Master 独占单实例 HTTP/SSE、Tokenizer/Chat Template、请求状态机、有界等待队列、`SlotLease`/`BlockLease`/`PrefixLease` RAII、Automatic Prefix Caching（APC，`PrefixTree`）与 Mode B `SHM + eventfd`（`in_flight_depth = 1`）双槽流水线，驱动本机多卡 GPU Worker（CUDA Graph / `b12x` / SM120 算子）。不实现多机网关或跨副本路由。
 - **`Nebula`（Zone C / S2，跨副本编排与治理面）**：把每个完整 `zstep` TP 实例作为独立普通副本（`Standalone` / `Replicated`）纳管，负责租户鉴权与配额、网关有界公平准入、跨副本 `PrefixAffinity` / `LeastPending` 选路、健康探测、优雅排空（Drain）与故障重启。**绝不读写 `zstep` 的 POSIX SHM、不触碰 KV 字节、不介入逐 Step 调度**。
 
 ```mermaid
@@ -21,7 +21,7 @@ flowchart LR
 
     subgraph ZstepPlane["zstep Replica (Zone A/B / S1)"]
         HTTP["zs-server serve (axum HTTP/SSE)"]
-        Loop["ServeLoop (SlotPool + KvCacheManager)"]
+        Loop["ServeLoop (SlotPool + PrefixTree APC)"]
         SHM["POSIX SHM + eventfd (in_flight_depth=1)"]
         Workers["GPU Workers (TP Ranks 0..N-1)"]
     end
@@ -61,10 +61,10 @@ flowchart LR
 | `max_num_seqs` | `--max-seqs <N>` | [`capability.rs:450`](../../crates/nebula-common/src/capability.rs#L450) 允许 `vllm` 与 `zstep`；`zstep` 要求 `1..=128`（对齐 `MAX_DECODE_GRAPH_SEQS`） |
 | `max_num_batched_tokens` | `--max-step-tokens <N>` | `>= max_num_seqs`，映射至 `ShmGeometry.max_step_tokens` 与混合步预算 |
 | `enable_chunked_prefill` | `false` 时传 `--max-prefill-chunk <max_model_len>` | 默认开启（`2048`）；显式 `false` 时要求 `max_num_batched_tokens >= max_model_len` |
-| `block_size` | `--page-block-tokens <N>` | 默认 `16`；配置后同步至 Router `PromptHasher` 动态块粒度表 |
+| `block_size` | `--page-block-tokens <N>` | 默认 `16`（`deepseek_v41` 默认 `128`）；配置后同步至 Router `PromptHasher` 动态块粒度表 |
 | `kv_cache_dtype` | `--kv-cache-dtype <DTYPE>` | 如 `bf16` / `fp8` |
 | `tokenizer_mode` | `--tokenizer-mode <MODE>` | 如 `auto` / `deepseek_v41`（强制启用专用 `encode_messages` 而非通用 Jinja） |
-| `enable_prefix_caching` | `--enable-prefix-caching` / `--no-enable-prefix-caching` | P0/P1 若尚未接线 Radix，传 `true` 时在启动期明确报错拒绝，禁止静默忽略 |
+| `enable_prefix_caching` | `--enable-prefix-caching` / `--no-enable-prefix-caching` | 默认开启（`true`）：`DeepSeek-V4.1-Flash` 按 `128`-token 页缓存，`Qwen3.5-35B-A3B` 按 `64`-token 节点（`4 × 16`-token KV 页 + 30 层 `GatedDeltaNet` 循环状态快照）缓存；显式传 `false` 关闭并隐去 `zstep:prefix_cache_*` 指标 |
 | `lora_modules` | 无 | `static_capability_zstep().lora = Some(false)`，非空时在控制面直接 `400` 拒绝 |
 | `speculative_config` | P0/P1 暂不映射 | 未支持的方法在 `validate_model_config` 显式拒绝 |
 | `trust_remote_code` / `enable_expert_parallel` | 忽略（不报错） | `zstep` 模型路由与 MoE EP 由原生算子内建，无需 Python `trust_remote_code` |
@@ -149,37 +149,38 @@ Gateway 在 [`proxy_common.rs:672-684`](../../crates/nebula-gateway/src/proxy_co
 | :--- | :--- | :--- | :--- |
 | `zstep:num_requests_waiting` | Gauge | 已通过 HTTP 校验并在 `ServeLoop` 等待队列中尚未分配 `SlotLease` 的请求数 | `waiting_requests`；计入 `pending_requests`（高权重 HoL 惩罚） |
 | `zstep:num_requests_running` | Gauge | 当前持有 `SlotLease`（处于 `Prefilling` + `Decoding`）的活跃序列数 | `running_requests`；`pending_requests = waiting + running` |
-| `zstep:kv_cache_usage_perc` | Gauge | `[0.0, 1.0]`：`1.0 - (kv_pool.available() as f64 / kv_pool.capacity() as f64)` | `kv_cache_usage`（驱动 `0.95` 过载保护与 `0.85` 扩容建议） |
+| `zstep:kv_cache_usage_perc` | Gauge | `[0.0, 1.0]`：`1.0 - (reclaimable_kv_pages as f64 / kv_pool.capacity() as f64)`（含空闲页 + `PrefixTree` 中 `ref_count == 0` 的可驱逐缓存页） | `kv_cache_usage`（驱动 `0.95` 过载保护与 `0.85` 扩容建议） |
 | `zstep:num_preemptions_total` | Counter | 因 Decode 页耗尽触发的序列撤回/重算累计次数（无抢占实现前恒为 `0`） | `num_preemptions_total`（驱动路由抢占避让与容量告警） |
-| `zstep:prefix_cache_queries_total` | Counter | **仅当在线启用 `KvCacheManager` Radix 时暴露**：前缀树查询累计请求数 | `prefix_cache_queries_total` |
-| `zstep:prefix_cache_hits_total` | Counter | **仅当在线启用 `KvCacheManager` Radix 时暴露**：命中的前缀 Token（或块）累计数，同单位相除得命中率 | 与 `queries_total` 计算 `prefix_cache_hit_rate` |
+| `zstep:prefix_cache_queries_total` | Counter | **仅当启用 Automatic Prefix Caching（APC）时暴露**：准入查询累计 Prompt Token 数（`prompt_tokens.len()` 累加） | `prefix_cache_queries_total` |
+| `zstep:prefix_cache_hits_total` | Counter | **仅当启用 Automatic Prefix Caching（APC）时暴露**：命中的前缀 Token 累计数，与 `queries_total` 同单位相除得命中率 | 与 `queries_total` 计算 `prefix_cache_hit_rate` |
+| `zstep:prefix_cache_evictions_total` | Counter | **仅当启用 Automatic Prefix Caching（APC）时暴露**：`PrefixTree` 因 KV/循环状态槽位紧缺触发 LRU 驱逐所释放的物理 KV 页累计数（`evicted_nodes * pages_per_node`） | 实例级缓存压力诊断 |
 | `zstep:time_to_first_token_seconds` | Histogram | 从请求进入引擎至首 Token 产出的耗时直方图 | Prometheus / 观测面板抓取 |
 | `zstep:time_per_output_token_seconds` | Histogram | Decode 阶段逐 Token 间隔耗时直方图 | Prometheus / 观测面板抓取 |
 | `zstep:request_outcomes_total{outcome=...}` | Counter | `outcome` $\in$ `{"finished","cancelled","rejected_overloaded","failed"}` | 实例级 SLO 与取消率核对 |
 | `zstep:triton_recompilations_total` | Gauge/Counter | 运行期算子 JIT 重编译次数（稳态期望恒为 `0`） | 运行期性能退化诊断 |
 
-> **三态铁律（[`stats.md`](./stats.md)）**：P0/P1 尚未在线启用 Radix Prefix Cache 时，`zstep` **不得输出** `zstep:prefix_cache_*` 行，使 `parse_zstep_metrics_text` 解析出 `prefix_cache_hit_rate = None`（UI 显示 `n/a`），严禁输出 `0` 伪装已支持但零命中。
+> **三态铁律（[`stats.md`](./stats.md)）**：显式传入 `--no-enable-prefix-caching` 关闭 APC 时，`zstep` **不得输出** `zstep:prefix_cache_*` 行，使 `parse_zstep_metrics_text` 解析出 `prefix_cache_hit_rate = None`（UI 显示 `n/a`），严禁输出 `0` 伪装已启用但零命中。
 
 ---
 
 ## 6. P2 跨副本前缀亲和事件契约（`NEBULA_KV_HASH_SEED`）
 
-当 `zstep` 在 P2 在线启用 [`zs-kv`](https://github.com/EeroEternal/zstep) Radix Prefix Cache 时，无需任何网关侧定制即可直接接入 Nebula 现成的 [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs)、[`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs) 与 [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs)：
+当 `zstep` 在 P2 将 [`zs-kv`](https://github.com/EeroEternal/zstep) `PrefixTree`（Automatic Prefix Caching）事件外发至网关索引层时，无需任何网关侧定制即可直接接入 Nebula 现成的 [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs)、[`kv_events.rs`](../../crates/nebula-router/src/kv_events.rs) 与 [`nebula-indexd`](../../crates/nebula-router/src/bin/indexd.rs)：
 
 1. **块哈希同源公式**：
    - 读取环境变量 `NEBULA_KV_HASH_SEED`（缺省 `"42"`），计算根种子哈希 `NONE_HASH = sha256_cbor_text(seed)`。
    - 按 `page_block_tokens`（默认 `16`）切分完整 Token 块（忽略末尾不足一整块的余数），逐块链式计算 `h_i = sha256(cbor_canonical([parent_bytes_32, [tok_0, ..., tok_{B-1}], null]))`，取末尾 8 字节大端 `h_i[24..32]` 作为外部块键。
 2. **ZMQ 事件帧格式**：
    - 当传入 `--kv-events-endpoint <zmq_addr>` 与 `--kv-events-topic "{model_uid}/{replica_id}"` 时，`zstep` 通过 ZMQ `PUB`/`PUSH` 发送两帧消息：`frame[0] = topic.as_bytes()`，`frame[1] = msgpack([timestamp_f64, [event, ...]])`：
-     - 块提交进 Radix 树：`{"type": "BlockStored", "block_hashes": [bin_8_or_32, ...], "medium": "GPU"}`
-     - LRU 驱逐出 Radix 树：`{"type": "BlockRemoved", "block_hashes": [bin_8_or_32, ...]}`
+     - 块提交进 `PrefixTree`：`{"type": "BlockStored", "block_hashes": [bin_8_or_32, ...], "medium": "GPU"}`
+     - LRU 驱逐出 `PrefixTree`：`{"type": "BlockRemoved", "block_hashes": [bin_8_or_32, ...]}`
      - 实例重置清空：`{"type": "AllBlocksCleared"}`
 
 ---
 
 ## 7. Nebula 侧代码落点清单（阶段 2 实施范围）
 
-Postgres（`nebula-bff`）中 `engine_type` 均为无约束 `TEXT` 列并统一委托 [`validate_engine_and_config`](../../crates/nebula-common/src/capability.rs#L627) 校验，**无需任何 SQL 迁移**。接入 `engine_type = "zstep"` 的完整改动范围固定为：
+Postgres（`nebula-bff`）中 `engine_type` 均为无约束 `TEXT` 列并统一委托 [`validate_engine_and_config`](../../crates/nebula-common/src/capability.rs#L620) 校验，**无需任何 SQL 迁移**。接入 `engine_type = "zstep"` 的完整改动范围固定为：
 
 1. [`crates/nebula-common/src/capability.rs`](../../crates/nebula-common/src/capability.rs)：`KNOWN_ENGINE_TYPES` 加入 `"zstep"`，实现 `static_capability_zstep()`、`static_version_support("zstep")`，并在 `validate_model_config` 允许 `"zstep"` 使用 `max_num_seqs` / `max_num_batched_tokens` / `enable_chunked_prefill`。
 2. [`crates/nebula-common/src/engine_args.rs`](../../crates/nebula-common/src/engine_args.rs)：实现 `build_zstep_extra_args` 及单测。
