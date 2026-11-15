@@ -236,7 +236,7 @@ pub fn parse_tokenspeed_metrics_text(
 ///
 /// zstep exposes `zstep:num_requests_waiting`, `zstep:num_requests_running`,
 /// `zstep:kv_cache_usage_perc`, `zstep:num_preemptions_total`, and (only when
-/// online Radix prefix cache is enabled) `zstep:prefix_cache_{queries,hits}_total`.
+/// Automatic Prefix Caching (APC) is enabled) `zstep:prefix_cache_{queries,hits}_total`.
 pub fn parse_zstep_metrics_text(
     text: &str,
     model_uid: &str,
@@ -540,14 +540,14 @@ zstep:num_preemptions_total 0\n";
         assert_eq!(zs_stats.prefix_cache_queries_total, None);
         assert_eq!(zs_stats.num_preemptions_total, Some(0));
 
-        let zs_radix = "\
+        let zs_apc = "\
 zstep:num_requests_waiting 0\n\
 zstep:num_requests_running 1\n\
 zstep:kv_cache_usage_perc 0.125\n\
 zstep:prefix_cache_queries_total 40\n\
 zstep:prefix_cache_hits_total 30\n";
-        let zs_radix_stats = parse_engine_metrics(Some("zstep"), zs_radix, "m", 0, 1);
-        assert_eq!(zs_radix_stats.prefix_cache_hit_rate, Some(0.75));
+        let zs_apc_stats = parse_engine_metrics(Some("zstep"), zs_apc, "m", 0, 1);
+        assert_eq!(zs_apc_stats.prefix_cache_hit_rate, Some(0.75));
         // Unknown engine falls back to vLLM.
         assert_eq!(parse_engine_metrics(None, v, "m", 0, 1).pending_requests, 2);
     }

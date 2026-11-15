@@ -96,7 +96,7 @@ pub fn static_version_support(engine_type: &str) -> Vec<EngineVersionSupport> {
             min_inclusive: Some("0.1.0".into()),
             max_exclusive: None,
             known_issues: vec![
-                "online Radix prefix cache and tool_calling are disabled in P0/P1".into(),
+                "tool_calling and speculative_config are not yet enabled in online serving".into(),
             ],
         }],
         _ => Vec::new(),
@@ -311,7 +311,7 @@ pub fn static_capability_zstep() -> EngineCapability {
         observability: ObservabilityCapability {
             pending_requests: SupportLevel::Supported,
             kv_cache_usage: SupportLevel::Supported,
-            prefix_cache_hit_rate: SupportLevel::Unsupported,
+            prefix_cache_hit_rate: SupportLevel::Supported,
             prompt_cache_hit_rate: SupportLevel::Unsupported,
             ttft: SupportLevel::Supported,
             tpot: SupportLevel::Supported,
@@ -522,13 +522,6 @@ pub fn validate_model_config(
         if engine_type == "zstep" && tp > 8 {
             return Err("zstep tensor_parallel_size must be in 1..=8".into());
         }
-    }
-
-    if engine_type == "zstep" && config.enable_prefix_caching == Some(true) {
-        return Err(
-            "engine 'zstep' does not yet wire online Radix prefix caching; omit enable_prefix_caching or set false"
-                .into(),
-        );
     }
 
     if let Some(max_len) = config.max_model_len {
@@ -806,7 +799,7 @@ mod tests {
         assert_eq!(zs.source, CapabilitySource::StaticTable);
         assert_eq!(
             zs.observability.prefix_cache_hit_rate,
-            SupportLevel::Unsupported
+            SupportLevel::Supported
         );
         assert_eq!(zs.observability.ttft, SupportLevel::Supported);
         assert_eq!(zs.observability.tpot, SupportLevel::Supported);
@@ -862,9 +855,7 @@ mod tests {
             enable_prefix_caching: Some(true),
             ..valid.clone()
         };
-        assert!(validate_model_config("zstep", &prefix_on)
-            .unwrap_err()
-            .contains("Radix prefix caching"));
+        validate_model_config("zstep", &prefix_on).unwrap();
 
         let with_spec = ModelConfig {
             speculative_config: Some(SpeculativeConfig {

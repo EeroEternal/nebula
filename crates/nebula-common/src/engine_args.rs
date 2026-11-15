@@ -614,6 +614,7 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--tokenizer-mode", "deepseek_v41"]));
         assert!(args.iter().any(|a| a == "--no-enable-prefix-caching"));
+        assert!(!args.iter().any(|a| a == "--enable-prefix-caching"));
         // Never leak vLLM/SGLang-specific flags to zstep.
         for forbidden in [
             "--tensor-parallel-size",
@@ -626,5 +627,27 @@ mod tests {
         ] {
             assert!(!args.iter().any(|a| a == forbidden), "leaked {forbidden}");
         }
+
+        let cfg_apc_on = ModelConfig {
+            enable_prefix_caching: Some(true),
+            ..cfg.clone()
+        };
+        let args_on = build_engine_extra_args(Some("zstep"), &cfg_apc_on)
+            .unwrap()
+            .unwrap();
+        assert!(args_on.iter().any(|a| a == "--enable-prefix-caching"));
+        assert!(!args_on.iter().any(|a| a == "--no-enable-prefix-caching"));
+
+        let cfg_apc_default = ModelConfig {
+            enable_prefix_caching: None,
+            ..cfg
+        };
+        let args_default = build_engine_extra_args(Some("zstep"), &cfg_apc_default)
+            .unwrap()
+            .unwrap();
+        assert!(!args_default.iter().any(|a| a == "--enable-prefix-caching"));
+        assert!(!args_default
+            .iter()
+            .any(|a| a == "--no-enable-prefix-caching"));
     }
 }
