@@ -95,9 +95,7 @@ pub fn static_version_support(engine_type: &str) -> Vec<EngineVersionSupport> {
             engine_type: "zstep".into(),
             min_inclusive: Some("0.1.0".into()),
             max_exclusive: None,
-            known_issues: vec![
-                "tool_calling and speculative_config are not yet enabled in online serving".into(),
-            ],
+            known_issues: vec!["tool_calling is not enabled in online serving".into()],
         }],
         _ => Vec::new(),
     }
@@ -563,17 +561,37 @@ pub fn validate_model_config(
     }
 
     if let Some(ref spec) = config.speculative_config {
+        use crate::model_request::SpeculativeMethod;
+
         if engine_type == "zstep" {
-            return Err(
-                "engine 'zstep' does not yet support speculative_config in online serving".into(),
-            );
-        }
-        if matches!(
+            if !matches!(
+                spec.method,
+                Some(SpeculativeMethod::Dspark | SpeculativeMethod::Mtp | SpeculativeMethod::Ngram)
+            ) {
+                return Err(
+                    "engine 'zstep' supports speculative_config.method 'dspark', 'mtp', or 'ngram'"
+                        .into(),
+                );
+            }
+            if spec.num_speculative_tokens.is_some_and(|k| k > 7) {
+                return Err(
+                    "zstep speculative_config.num_speculative_tokens must be in 1..=7 (spec_verify_width <= 8)"
+                        .into(),
+                );
+            }
+            if spec
+                .draft_model
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+            {
+                return Err(
+                    "zstep loads built-in DSpark/MTP weights from model_dir and does not accept speculative_config.draft_model"
+                        .into(),
+                );
+            }
+        } else if matches!(
             spec.method,
-            Some(
-                crate::model_request::SpeculativeMethod::Dspark
-                    | crate::model_request::SpeculativeMethod::Dflash2
-            )
+            Some(SpeculativeMethod::Dspark | SpeculativeMethod::Dflash2)
         ) {
             return Err(
                 "speculative_config.method 'dspark' / 'dflash2' is rejected until verified on live engines; use 'draft_model', 'mtp', or 'ngram'"
@@ -583,8 +601,17 @@ pub fn validate_model_config(
         if spec.num_speculative_tokens == Some(0) {
             return Err("speculative_config.num_speculative_tokens must be >= 1".into());
         }
-        if spec.prompt_lookup_max == Some(0) {
-            return Err("speculative_config.prompt_lookup_max must be >= 1".into());
+        if spec.prompt_lookup_max == Some(0) || spec.prompt_lookup_min == Some(0) {
+            return Err(
+                "speculative_config.prompt_lookup_max / prompt_lookup_min must be >= 1".into(),
+            );
+        }
+        if let (Some(min), Some(max)) = (spec.prompt_lookup_min, spec.prompt_lookup_max) {
+            if min > max {
+                return Err(
+                    "speculative_config.prompt_lookup_min must be <= prompt_lookup_max".into(),
+                );
+            }
         }
         if (spec.prompt_lookup_max.is_some() || spec.prompt_lookup_min.is_some())
             && spec.method != Some(crate::model_request::SpeculativeMethod::Ngram)
@@ -865,9 +892,65 @@ mod tests {
             }),
             ..valid.clone()
         };
-        assert!(validate_model_config("zstep", &with_spec)
+        validate_model_config("zstep", &with_spec).unwrap();
+
+        for method in [SpeculativeMethod::Dspark, SpeculativeMethod::Ngram] {
+            let supported = ModelConfig {
+                speculative_config: Some(SpeculativeConfig {
+                    method: Some(method),
+                    num_speculative_tokens: Some(5),
+                    ..Default::default()
+                }),
+                ..valid.clone()
+            };
+            validate_model_config("zstep", &supported).unwrap();
+        }
+
+        let too_many_drafts = ModelConfig {
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Mtp),
+                num_speculative_tokens: Some(8),
+                ..Default::default()
+            }),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &too_many_drafts)
             .unwrap_err()
-            .contains("speculative_config"));
+            .contains("1..=7"));
+
+        for method in [SpeculativeMethod::DraftModel, SpeculativeMethod::Dflash2] {
+            let rejected = ModelConfig {
+                speculative_config: Some(SpeculativeConfig {
+                    method: Some(method),
+                    ..Default::default()
+                }),
+                ..valid.clone()
+            };
+            assert!(validate_model_config("zstep", &rejected)
+                .unwrap_err()
+                .contains("dspark', 'mtp', or 'ngram"));
+        }
+
+        let missing_method = ModelConfig {
+            speculative_config: Some(SpeculativeConfig::default()),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &missing_method)
+            .unwrap_err()
+            .contains("dspark', 'mtp', or 'ngram"));
+
+        let unexpected_draft_model = ModelConfig {
+            speculative_config: Some(SpeculativeConfig {
+                method: Some(SpeculativeMethod::Dspark),
+                draft_model: Some("/models/custom-draft".into()),
+                num_speculative_tokens: Some(5),
+                ..Default::default()
+            }),
+            ..valid.clone()
+        };
+        assert!(validate_model_config("zstep", &unexpected_draft_model)
+            .unwrap_err()
+            .contains("draft_model"));
 
         // Effective defaults for zstep: max_num_seqs=128, max_num_batched_tokens=4096, max_model_len=32768.
         let batch_below_default_seqs = ModelConfig {
