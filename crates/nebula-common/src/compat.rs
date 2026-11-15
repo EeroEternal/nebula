@@ -330,6 +330,19 @@ pub fn default_compatibility_rules(now_ms: u64) -> Vec<CompatibilityRule> {
             updated_at_ms: now_ms,
         },
         CompatibilityRule {
+            id: "zstep-nvidia-cuda".into(),
+            engine_type: "zstep".into(),
+            engine_version_min: Some("0.1.0".into()),
+            engine_version_max: None,
+            platforms: vec!["nvidia-cuda".into()],
+            min_driver_version: Some("550.0".into()),
+            min_cuda_version: Some("12.8".into()),
+            verdict: CompatVerdict::Allow,
+            known_issues: vec![],
+            notes: Some("Default NVIDIA SM120/Blackwell path for zstep".into()),
+            updated_at_ms: now_ms,
+        },
+        CompatibilityRule {
             id: "deny-vllm-on-ascend-until-adapter".into(),
             engine_type: "vllm".into(),
             engine_version_min: None,
@@ -468,5 +481,38 @@ mod tests {
         };
         let err = evaluate_compatibility(&rules, &input).unwrap_err();
         assert_eq!(err.code, "driver_too_old");
+    }
+
+    #[test]
+    fn zstep_requires_cuda_12_8_and_driver_550() {
+        let rules = default_compatibility_rules(0);
+        let plats = vec!["nvidia-cuda".into()];
+        let ok_node = node("nvidia-cuda", "570.124", "12.8");
+        let ids = evaluate_compatibility(
+            &rules,
+            &CompatCheckInput {
+                engine_type: "zstep",
+                engine_version: Some("0.1.0"),
+                platforms: &plats,
+                node: Some(&ok_node),
+                image_id: Some("zstep-sm120"),
+            },
+        )
+        .unwrap();
+        assert!(ids.iter().any(|id| id == "zstep-nvidia-cuda"));
+
+        let old_cuda_node = node("nvidia-cuda", "570.124", "12.4");
+        let err = evaluate_compatibility(
+            &rules,
+            &CompatCheckInput {
+                engine_type: "zstep",
+                engine_version: Some("0.1.0"),
+                platforms: &plats,
+                node: Some(&old_cuda_node),
+                image_id: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.code, "cuda_too_old");
     }
 }

@@ -288,6 +288,7 @@ fn is_engine_image(image_ref: &str) -> bool {
     lower.contains("vllm")
         || lower.contains("sglang")
         || lower.contains("tokenspeed")
+        || lower.contains("zstep")
         || lower.contains("xllm")
 }
 
@@ -339,6 +340,7 @@ mod tests {
     fn test_is_engine_image() {
         assert!(is_engine_image("vllm/vllm-openai:v0.8.3"));
         assert!(is_engine_image("registry.example.com/sglang:latest"));
+        assert!(is_engine_image("ghcr.io/eeroeternal/zstep:latest"));
         assert!(is_engine_image("my-xllm-image:v1"));
         assert!(!is_engine_image("nginx:latest"));
         assert!(!is_engine_image("postgres:14"));

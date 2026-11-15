@@ -141,6 +141,39 @@ pub struct Args {
     #[arg(long)]
     pub tokenspeed_max_num_seqs: Option<u32>,
 
+    // ---- zstep engine parameters ----
+    /// zstep launch command (used in local binary and container modes).
+    #[arg(long, default_value = "zs-server serve")]
+    pub zstep_bin: String,
+
+    /// Working directory for zstep local binary mode.
+    #[arg(long, default_value = ".")]
+    pub zstep_cwd: String,
+
+    /// Host for zstep to bind to.
+    #[arg(long, default_value = "0.0.0.0")]
+    pub zstep_host: String,
+
+    /// If set, launch zstep via `docker run` using this image.
+    #[arg(long)]
+    pub zstep_docker_image: Option<String>,
+
+    /// Host path to mount as /model inside the zstep container.
+    #[arg(long, default_value = "/DATA/Model")]
+    pub zstep_model_dir: String,
+
+    /// Tensor parallel world size for zstep (1..=8).
+    #[arg(long)]
+    pub zstep_tensor_parallel_size: Option<u32>,
+
+    /// GPU memory utilization for zstep.
+    #[arg(long)]
+    pub zstep_gpu_memory_utilization: Option<f32>,
+
+    /// Max number of concurrent sequences for zstep (1..=128).
+    #[arg(long)]
+    pub zstep_max_num_seqs: Option<u32>,
+
     /// Port for the Node HTTP API (containers, images, etc.).
     #[arg(long, default_value_t = 9090)]
     pub api_port: u16,

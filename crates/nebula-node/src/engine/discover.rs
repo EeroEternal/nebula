@@ -205,6 +205,32 @@ pub async fn discover_runtime_capability(
                             },
                         );
                     }
+                    "zstep" => {
+                        hints.pending_requests = Some(
+                            if text.contains("zstep:num_requests_waiting")
+                                || text.contains("zstep:num_requests_running")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
+                        hints.kv_cache_usage =
+                            Some(if text.contains("zstep:kv_cache_usage_perc") {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            });
+                        hints.prefix_cache_hit_rate = Some(
+                            if text.contains("zstep:prefix_cache_queries_total")
+                                || text.contains("zstep:prefix_cache_hit_rate")
+                            {
+                                SupportLevel::Supported
+                            } else {
+                                SupportLevel::Unsupported
+                            },
+                        );
+                    }
                     _ => {}
                 }
             }

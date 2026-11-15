@@ -3,6 +3,7 @@ pub mod discover;
 pub mod sglang;
 pub mod tokenspeed;
 pub mod vllm;
+pub mod zstep;
 
 use std::path::Path;
 use std::time::Duration;
@@ -325,6 +326,13 @@ pub fn create_engine(
             }
             Ok(Box::new(engine))
         }
+        "zstep" => {
+            let mut engine = zstep::ZstepEngine::new(args);
+            if let Some(img) = docker_image_override {
+                engine.config.docker_image = Some(img.to_string());
+            }
+            Ok(Box::new(engine))
+        }
         other => {
             // validate_engine_type should have rejected this; keep a hard error.
             anyhow::bail!(
@@ -375,6 +383,12 @@ mod create_engine_tests {
                 .unwrap()
                 .engine_type(),
             "tokenspeed"
+        );
+        assert_eq!(
+            create_engine(&test_args(), Some("zstep"), None)
+                .unwrap()
+                .engine_type(),
+            "zstep"
         );
     }
 }

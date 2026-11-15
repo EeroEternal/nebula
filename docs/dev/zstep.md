@@ -1,6 +1,6 @@
 # zstep 引擎接入与跨仓接口契约
 
-> **状态**：**设计契约（未合入运行时代码）**。当前 [`KNOWN_ENGINE_TYPES`](../../crates/nebula-common/src/capability.rs) 仅含 `vllm`、`sglang`、`tokenspeed`；`zstep` 侧在线 `serve` 子命令跟踪于 `EeroEternal/zstep#7`。本文钉死双仓在 CLI 参数、探针状态码、HTTP/SSE 错误语义、Prometheus `/metrics` 与 P2 KV 事件上的精确契约，作为两边独立实现与联调的唯一依据。
+> **状态**：**阶段 1（契约）与阶段 2（Slice N1/N2 运行时接入）已实现；P2 在线 Radix 前缀事件待接线**。[`KNOWN_ENGINE_TYPES`](../../crates/nebula-common/src/capability.rs) 已纳管 `zstep`（与 `vllm`、`sglang`、`tokenspeed` 并列）；`zstep` 侧在线 `serve` 子命令实现于 `EeroEternal/zstep#9`（跟踪于 `EeroEternal/zstep#7`）。本文钉死双仓在 CLI 参数、探针状态码、HTTP/SSE 错误语义、Prometheus `/metrics` 与 P2 KV 事件上的精确契约，作为两边实现与联调的唯一依据。
 
 ---
 
@@ -58,7 +58,7 @@ flowchart LR
 | `tensor_parallel_size` | `--world-size <N>` | 支持 `1..=8`；若 `gpu_indices.len() > 1` 且未显式指定，由 `nebula-node` 按卡数自动推导 |
 | `gpu_memory_utilization` | `--gpu-memory-utilization <F>` | `(0.0, 1.0]`，由 `zstep` 启动期换算物理 `--num-kv-pages` |
 | `max_model_len` | `--max-model-len <N>` | `>= 1`，`zstep` 据此换算 `--max-pages-per-seq = ceil(max_model_len / page_block_tokens)` 并校验 Prompt 上限 |
-| `max_num_seqs` | `--max-seqs <N>` | 放开 [`capability.rs:406`](../../crates/nebula-common/src/capability.rs#L406) 仅限 `vllm` 的限制；`zstep` 要求 `1..=128`（对齐 `MAX_DECODE_GRAPH_SEQS`） |
+| `max_num_seqs` | `--max-seqs <N>` | [`capability.rs:450`](../../crates/nebula-common/src/capability.rs#L450) 允许 `vllm` 与 `zstep`；`zstep` 要求 `1..=128`（对齐 `MAX_DECODE_GRAPH_SEQS`） |
 | `max_num_batched_tokens` | `--max-step-tokens <N>` | `>= max_num_seqs`，映射至 `ShmGeometry.max_step_tokens` 与混合步预算 |
 | `enable_chunked_prefill` | `false` 时传 `--max-prefill-chunk <max_model_len>` | 默认开启（`2048`）；显式 `false` 时要求 `max_num_batched_tokens >= max_model_len` |
 | `block_size` | `--page-block-tokens <N>` | 默认 `16`；配置后同步至 Router `PromptHasher` 动态块粒度表 |
@@ -73,7 +73,7 @@ flowchart LR
 
 1. **POSIX 共享内存容量**：
    - `zstep` Mode B 在 `/dev/shm` 中分配双槽 `StepPlan`、KV 页表与跨卡 AllReduce 缓冲区。
-   - `nebula-node` Docker 模式必须携带 `--ipc=host`（与 [`tokenspeed.rs:194`](../../crates/nebula-node/src/engine/tokenspeed.rs#L194) 一致）；K8s Pod 继续挂载 `emptyDir: { medium: "Memory", sizeLimit: "16Gi" }` 到 `/dev/shm`（[`nebula-k8s-controller/src/main.rs:905`](../../crates/nebula-k8s-controller/src/main.rs#L905) 已具备）。
+   - `nebula-node` Docker 模式必须携带 `--ipc=host`（与 [`tokenspeed.rs:194`](../../crates/nebula-node/src/engine/tokenspeed.rs#L194) 一致）；K8s Pod 继续挂载 `emptyDir: { medium: "Memory", sizeLimit: "16Gi" }` 到 `/dev/shm`（[`nebula-k8s-controller/src/main.rs:962`](../../crates/nebula-k8s-controller/src/main.rs#L962) 已具备）。
 2. **持久化编译与产物缓存**：
    - 容器与 Pod 默认注入持久化卷下的环境变量，避免重建时重复触发 Triton / `b12x` 编译卡顿：
      - `HF_HOME`、`TRITON_CACHE_DIR`、`TORCHINDUCTOR_CACHE_DIR`
@@ -179,7 +179,7 @@ Gateway 在 [`proxy_common.rs:672-684`](../../crates/nebula-gateway/src/proxy_co
 
 ## 7. Nebula 侧代码落点清单（阶段 2 实施范围）
 
-Postgres（`nebula-bff`）中 `engine_type` 均为无约束 `TEXT` 列并统一委托 [`validate_engine_and_config`](../../crates/nebula-common/src/capability.rs#L519) 校验，**无需任何 SQL 迁移**。接入 `engine_type = "zstep"` 的完整改动范围固定为：
+Postgres（`nebula-bff`）中 `engine_type` 均为无约束 `TEXT` 列并统一委托 [`validate_engine_and_config`](../../crates/nebula-common/src/capability.rs#L627) 校验，**无需任何 SQL 迁移**。接入 `engine_type = "zstep"` 的完整改动范围固定为：
 
 1. [`crates/nebula-common/src/capability.rs`](../../crates/nebula-common/src/capability.rs)：`KNOWN_ENGINE_TYPES` 加入 `"zstep"`，实现 `static_capability_zstep()`、`static_version_support("zstep")`，并在 `validate_model_config` 允许 `"zstep"` 使用 `max_num_seqs` / `max_num_batched_tokens` / `enable_chunked_prefill`。
 2. [`crates/nebula-common/src/engine_args.rs`](../../crates/nebula-common/src/engine_args.rs)：实现 `build_zstep_extra_args` 及单测。
@@ -187,4 +187,4 @@ Postgres（`nebula-bff`）中 `engine_type` 均为无约束 `TEXT` 列并统一�
 4. [`crates/nebula-common/src/compat.rs`](../../crates/nebula-common/src/compat.rs)：新增 `zstep-nvidia-cuda` 默认兼容矩阵规则。
 5. [`crates/nebula-node/src/engine/`](../../crates/nebula-node/src/engine/mod.rs) + [`args.rs`](../../crates/nebula-node/src/args.rs) + [`discover.rs`](../../crates/nebula-node/src/engine/discover.rs) + [`image_manager.rs`](../../crates/nebula-node/src/image_manager.rs)：新增 `zstep.rs`（`ZstepEngine`，含 `--ipc=host` 与 `FLASHINFER_WORKSPACE_BASE` 缓存挂载）。
 6. [`crates/nebula-k8s-controller/src/main.rs`](../../crates/nebula-k8s-controller/src/main.rs)：`create_engine_pod` 增加 `is_zstep` 镜像、入口 `["zs-server", "serve"]` 与环境变量分支。
-7. [`frontend/src/components/LoadModelDialog.tsx`](../../frontend/src/components/LoadModelDialog.tsx)、[`frontend/src/components/views/images.tsx`](../../frontend/src/components/views/images.tsx) 与 [`frontend/src/lib/i18n.tsx`](../../frontend/src/lib/i18n.tsx)：补齐 `zstep` 引擎下拉项与双语词条。
+7. [`frontend/src/components/LoadModelDialog.tsx`](../../frontend/src/components/LoadModelDialog.tsx) 与 [`frontend/src/components/views/images.tsx`](../../frontend/src/components/views/images.tsx)：补齐 `zstep` 引擎选择项与下拉项。
