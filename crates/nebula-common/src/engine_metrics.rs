@@ -325,7 +325,7 @@ pub struct EngineScrapeDiagnostics {
 }
 
 /// Parse speculative-decoding $\tau$, prefix-cache query counters, and preemption
-/// counters from a vLLM, SGLang, or TokenSpeed `/metrics` body.
+/// counters from a vLLM, SGLang, TokenSpeed, or zstep `/metrics` body.
 pub fn parse_engine_scrape_diagnostics(
     engine_type: Option<&str>,
     text: &str,
@@ -563,6 +563,12 @@ vllm:spec_decode_num_drafts_total{model=\"qwen3.8\"} 100\n";
         assert_eq!(diag.prefix_cache_queries_total, Some(0.0));
         // tau = 1 + 1400/100 = 15.0 tokens per verification pass
         assert_eq!(diag.spec_decode_mean_acceptance_length, Some(15.0));
+
+        let zstep_text = "\
+zstep:spec_decode_num_accepted_tokens_total 240\n\
+zstep:spec_decode_num_drafts_total 80\n";
+        let zstep_diag = parse_engine_scrape_diagnostics(Some("zstep"), zstep_text);
+        assert_eq!(zstep_diag.spec_decode_mean_acceptance_length, Some(4.0));
 
         let ev = diagnose_hybrid_prefix_cache(
             "qwen3.8-27b",

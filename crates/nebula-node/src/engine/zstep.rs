@@ -21,6 +21,7 @@ pub struct ZstepConfig {
     pub tensor_parallel_size: Option<u32>,
     pub gpu_memory_utilization: Option<f32>,
     pub max_num_seqs: Option<u32>,
+    pub worker_root: Option<String>,
 }
 
 pub struct ZstepEngine {
@@ -39,6 +40,7 @@ impl ZstepEngine {
                 tensor_parallel_size: args.zstep_tensor_parallel_size,
                 gpu_memory_utilization: args.zstep_gpu_memory_utilization,
                 max_num_seqs: args.zstep_max_num_seqs,
+                worker_root: args.zstep_worker_root.clone(),
             },
         }
     }
@@ -100,6 +102,12 @@ fn build_launch_args(
         if !zs_args.iter().any(|a| a == "--max-seqs") {
             zs_args.push("--max-seqs".into());
             zs_args.push(v.to_string());
+        }
+    }
+    if let Some(root) = cfg.worker_root.as_deref() {
+        if !zs_args.iter().any(|a| a == "--worker-root") {
+            zs_args.push("--worker-root".into());
+            zs_args.push(root.to_string());
         }
     }
     zs_args
@@ -206,10 +214,8 @@ impl Engine for ZstepEngine {
             cmd.arg("-e")
                 .arg("FLASHINFER_WORKSPACE_BASE=/model/.cache/flashinfer");
 
-            cmd.arg(image);
-
             let (program, prefix_args) = self.split_bin();
-            cmd.arg(&program);
+            cmd.arg("--entrypoint").arg(&program).arg(image);
             for a in &prefix_args {
                 cmd.arg(a);
             }
@@ -490,12 +496,18 @@ pub async fn scrape_zstep_stats(
         }
     };
 
-    Ok(parse_zstep_metrics_text(
-        &text,
-        model_uid,
-        replica_id,
-        now_ms(),
-    ))
+    let ts_ms = now_ms();
+    let stats = parse_zstep_metrics_text(&text, model_uid, replica_id, ts_ms);
+    let diag = nebula_common::parse_engine_scrape_diagnostics(Some("zstep"), &text);
+    if let Some(tau) = diag.spec_decode_mean_acceptance_length {
+        tracing::debug!(
+            model_uid = %model_uid,
+            replica_id,
+            spec_decode_mean_acceptance_length = tau,
+            "scraped speculative decoding acceptance length"
+        );
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]
@@ -513,6 +525,7 @@ mod tests {
             tensor_parallel_size: None,
             gpu_memory_utilization: Some(0.9),
             max_num_seqs: Some(64),
+            worker_root: Some("/model/zstep/worker".into()),
         };
         let ctx = EngineStartContext {
             model_uid: "qwen3.5-35b".into(),
@@ -535,6 +548,21 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--gpu-memory-utilization", "0.9"]));
         assert!(args.windows(2).any(|w| w == ["--max-seqs", "64"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--worker-root", "/model/zstep/worker"]));
         assert!(!args.iter().any(|a| a == "--enable-metrics"));
+    }
+
+    #[test]
+    fn zstep_worker_root_cli_flag_parses_cleanly() {
+        use clap::Parser;
+        let parsed = crate::args::Args::try_parse_from([
+            "nebula-node",
+            "--zstep-worker-root",
+            "/opt/worker",
+        ])
+        .unwrap();
+        assert_eq!(parsed.zstep_worker_root.as_deref(), Some("/opt/worker"));
     }
 }

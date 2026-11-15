@@ -313,6 +313,30 @@ fn build_zstep_extra_args(cfg: &ModelConfig) -> Option<Vec<String>> {
         Some(false) => args.push("--no-enable-prefix-caching".to_string()),
         None => {}
     }
+    if let Some(spec) = cfg.speculative_config.as_ref() {
+        use crate::model_request::SpeculativeMethod;
+
+        let method = match spec.method {
+            Some(SpeculativeMethod::Dspark) => "dspark",
+            Some(SpeculativeMethod::Mtp) => "mtp",
+            Some(SpeculativeMethod::Ngram) => "ngram",
+            _ => "",
+        };
+        if !method.is_empty() {
+            args.extend(["--speculative-method".to_string(), method.to_string()]);
+        }
+        if let Some(k) = spec.num_speculative_tokens {
+            args.extend(["--num-speculative-tokens".to_string(), k.to_string()]);
+        }
+        if spec.method == Some(SpeculativeMethod::Ngram) {
+            if let Some(max) = spec.prompt_lookup_max {
+                args.extend(["--prompt-lookup-max".to_string(), max.to_string()]);
+            }
+            if let Some(min) = spec.prompt_lookup_min {
+                args.extend(["--prompt-lookup-min".to_string(), min.to_string()]);
+            }
+        }
+    }
 
     if args.is_empty() {
         None
@@ -649,5 +673,42 @@ mod tests {
         assert!(!args_default
             .iter()
             .any(|a| a == "--no-enable-prefix-caching"));
+    }
+
+    #[test]
+    fn zstep_encodes_native_speculative_methods_without_vllm_json() {
+        for (method, expected) in [
+            (SpeculativeMethod::Dspark, "dspark"),
+            (SpeculativeMethod::Mtp, "mtp"),
+            (SpeculativeMethod::Ngram, "ngram"),
+        ] {
+            let cfg = ModelConfig {
+                speculative_config: Some(SpeculativeConfig {
+                    method: Some(method),
+                    num_speculative_tokens: Some(5),
+                    prompt_lookup_max: Some(6),
+                    prompt_lookup_min: Some(2),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let args = build_engine_extra_args(Some("zstep"), &cfg)
+                .unwrap()
+                .unwrap();
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["--speculative-method", expected]));
+            assert!(args
+                .windows(2)
+                .any(|w| w == ["--num-speculative-tokens", "5"]));
+            assert!(!args.iter().any(|a| a == "--speculative-config"));
+            if method == SpeculativeMethod::Ngram {
+                assert!(args.windows(2).any(|w| w == ["--prompt-lookup-max", "6"]));
+                assert!(args.windows(2).any(|w| w == ["--prompt-lookup-min", "2"]));
+            } else {
+                assert!(!args.iter().any(|a| a == "--prompt-lookup-max"));
+                assert!(!args.iter().any(|a| a == "--prompt-lookup-min"));
+            }
+        }
     }
 }

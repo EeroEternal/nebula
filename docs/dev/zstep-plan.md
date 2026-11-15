@@ -1,6 +1,6 @@
 # zstep 在线化与 Nebula 原生纳管联合开发计划
 
-> **状态**：待执行（供独立编码 Agent / DeepSeek 按切片交付）  
+> **状态**：Slice Z1–Z4、Slice N1–N2、在线 APC 及 Slice ZN4（投机解码 `dspark` / `mtp` / `ngram`）已实现并完成真机合龙；P2 跨副本 ZMQ 前缀事件待接线  
 > **绑定契约**：[`zstep.md`](./zstep.md)（CLI 参数表、四态探针状态码、`429/503` 错误语义、`/metrics` 字段、P2 KV 事件）  
 > **关联需求**：`EeroEternal/zstep#7`（引擎侧在线化）与 `EeroEternal/nebula#92`（平台侧 `engine_type = "zstep"` 纳管）
 
@@ -102,8 +102,8 @@ flowchart TD
 ### Slice N1（`nebula` 仓）：`nebula-common` 控制面与指标解析契约
 
 - **范围**：
-  - [`capability.rs`](../../crates/nebula-common/src/capability.rs)：`KNOWN_ENGINE_TYPES` 加入 `"zstep"`，实现 `static_capability_zstep()`（P0/P1：`tool_calling = Unsupported`, `score_api = Unsupported`, `lora = Some(false)`, `pending_requests = Supported`, `kv_cache_usage = Supported`, `prefix_cache_hit_rate = Unsupported`），放开 [`capability.rs:406`](../../crates/nebula-common/src/capability.rs#L406) 使 `"zstep"` 支持 `max_num_seqs`（`1..=128`）、`max_num_batched_tokens`、`enable_chunked_prefill`。
-  - [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs)：实现 `build_zstep_extra_args`（按 [`zstep.md` §2.2](./zstep.md#22-modelconfig-rightarrow-build_zstep_extra_args-编码映射) 编码）。
+  - [`capability.rs`](../../crates/nebula-common/src/capability.rs)：`KNOWN_ENGINE_TYPES` 加入 `"zstep"`，实现 `static_capability_zstep()`（P0/P1：`tool_calling = Unsupported`, `score_api = Unsupported`, `lora = Some(false)`, `pending_requests = Supported`, `kv_cache_usage = Supported`, `prefix_cache_hit_rate = Unsupported`），放开 [`capability.rs:448`](../../crates/nebula-common/src/capability.rs#L448) 使 `"zstep"` 支持 `max_num_seqs`（`1..=128`）、`max_num_batched_tokens`、`enable_chunked_prefill`。
+  - [`engine_args.rs`](../../crates/nebula-common/src/engine_args.rs)：实现 `build_zstep_extra_args`（按 [`zstep.md` §2.2](./zstep.md#22-modelconfig-rightarrow-build_zstep_extra_args-编码映射) 编码），包括原生 `dspark` / `mtp` / `ngram` 投机解码参数，不透传 vLLM JSON。
   - [`engine_metrics.rs`](../../crates/nebula-common/src/engine_metrics.rs)：实现 `parse_zstep_metrics_text` 并接入 `parse_engine_metrics` 与 `parse_engine_scrape_diagnostics`。
   - [`compat.rs`](../../crates/nebula-common/src/compat.rs)：新增 `zstep-nvidia-cuda` 默认兼容规则。
 - **门禁**：
@@ -132,3 +132,10 @@ flowchart TD
 - **门禁**：
   - 单元校准测试验证 `zstep` 产出的 8 字节块哈希与 [`kv_hash.rs`](../../crates/nebula-router/src/kv_hash.rs) 在相同 Token 序列和种子下 100% 逐字节相等；
   - 多副本 `PrefixAffinity` 压测验证共享前缀命中路由与 Goodput 提升。
+
+### Slice ZN4（投机解码 `dspark` / `mtp` / `ngram` 真机验收，已完成）
+
+- **`Qwen3.5-35B-A3B`（8× RTX 6000D, TP=8）**：`M=1` 基线 `309.3–314.3 tok/s` 零退化；`mtp K=3` 实测 **`583.6–762.5 tok/s`**（**`1.87×–2.45×`**，其中 187-token `json` 含约 35 次拒绝回滚与 `ngram` 均与 `none` 100% 逐字符一致）；`ngram K=3` 实测 `674.2 tok/s`（`2.16×`）；MTP + APC 命中 `+10,880` Token，中途断连后 `kv_cache_usage_perc = 0.0` 且后续请求与断连前 100% 逐位一致。
+- **`DeepSeek-V4.1-Flash-1017`（8× RTX 6000D, TP=8）**：`M=1` 基线 `117.9–118.6 tok/s` 零退化；`dspark K=5` 实测 **`168.9–395.1 tok/s`**（`code` **`263.1 tok/s` `2.22×`**、`json` **`288.3 tok/s` `2.43×`**、`text` **`168.9 tok/s` `1.42×`**、`ngram` **`395.1 tok/s` `3.35×`** 100% 一致）；`ngram K=5` 实测 `343.8 tok/s`（`2.92×`）；DSpark + APC 命中 `+10,624` Token，断连后 `kv_cache_usage_perc = 0.0`。
+- **Nebula 全栈合龙**：`etcd` + `scheduler` + `node` + `router` + `gateway` 部署 `zstep` `dspark K=5`，经 Gateway 流式实测 `code` `235.5 tok/s`、`ngram` `396.5 tok/s`，`/stats/` 正常上报 `prefix_cache_hit_rate = 0.4927`、`kv_cache_usage = 0.0`，引擎 `spec_decode_mean_acceptance_length = 3.994`。
+- **已知物理边界**：`M=1` GEMV/Decode Attention 与 `M=K+1` Tensor Core/varlen Attention 在 `< 1 ULP` BF16/FP8 平局词处存在形状级浮点归约差异，详见 [`zstep.md` §8](./zstep.md#8-8-rtx-6000dsm120-blackwell-tp8投机解码实测2026-11-15)。

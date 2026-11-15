@@ -174,6 +174,10 @@ pub struct Args {
     #[arg(long)]
     pub zstep_max_num_seqs: Option<u32>,
 
+    /// Python zstep_worker package root inside the zstep container or host.
+    #[arg(long, env = "ZSTEP_WORKER_ROOT")]
+    pub zstep_worker_root: Option<String>,
+
     /// Port for the Node HTTP API (containers, images, etc.).
     #[arg(long, default_value_t = 9090)]
     pub api_port: u16,
