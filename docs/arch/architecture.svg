@@ -1,0 +1,211 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" width="1120" height="600" role="img" aria-labelledby="nebula-arch-title nebula-arch-desc">
+  <title id="nebula-arch-title">Nebula Architecture</title>
+  <desc id="nebula-arch-desc">Simplified architecture diagram of Nebula showing Data Plane (Gateway and Router), Control Plane (Console, BFF, PostgreSQL, etcd, Scheduler, Observe), and Execution Plane with Zone C inference engines (vLLM, SGLang, TokenSpeed, zstep).</desc>
+
+  <defs>
+    <style>
+      .sans { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .mono { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .hdr { font-size: 18px; font-weight: 800; fill: #0f172a; letter-spacing: -0.2px; }
+      .sub { font-size: 12px; font-weight: 500; fill: #64748b; }
+      .lane-lbl { font-size: 11.5px; font-weight: 800; letter-spacing: 0.5px; }
+      .box-title { font-size: 13.5px; font-weight: 700; }
+      .box-port { font-size: 11px; font-weight: 600; }
+      .box-sub { font-size: 11.5px; font-weight: 450; fill: #475569; }
+      .box-code { font-size: 10.8px; font-weight: 500; fill: #334155; }
+      .edge-lbl { font-size: 10.5px; font-weight: 600; }
+      .chip { font-size: 11.5px; font-weight: 700; fill: #0f172a; }
+      .chip-sub { font-size: 10px; font-weight: 500; fill: #64748b; }
+    </style>
+
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#f1f5f9" stroke-width="1"/>
+    </pattern>
+
+    <filter id="shadow" x="-3%" y="-4%" width="106%" height="110%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.05"/>
+    </filter>
+
+    <marker id="arr-sky" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#0284c7"/>
+    </marker>
+    <marker id="arr-indigo" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#4f46e5"/>
+    </marker>
+    <marker id="arr-emerald" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#059669"/>
+    </marker>
+    <marker id="arr-amber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill="#d97706"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect x="0" y="0" width="1120" height="600" rx="14" fill="#f8fafc"/>
+  <rect x="0" y="0" width="1120" height="600" rx="14" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1118" height="598" rx="14" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+
+  <!-- Title -->
+  <text x="36" y="40" class="sans hdr">Nebula Architecture</text>
+  <text x="232" y="40" class="sans sub">Data Plane · Control Plane · Zone C Black-Box Execution</text>
+
+  <!-- Legend -->
+  <g transform="translate(760, 26)">
+    <line x1="0" y1="9" x2="26" y2="9" stroke="#0284c7" stroke-width="2.4" marker-end="url(#arr-sky)"/>
+    <text x="33" y="13" class="sans edge-lbl" fill="#0369a1">Inference Hot Path</text>
+
+    <line x1="158" y1="9" x2="184" y2="9" stroke="#4f46e5" stroke-width="2" stroke-dasharray="4,3" marker-end="url(#arr-indigo)"/>
+    <text x="191" y="13" class="sans edge-lbl" fill="#4338ca">Control / State Watch</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 1: DATA PLANE                                                    -->
+  <!-- ===================================================================== -->
+  <rect x="28" y="60" width="1064" height="142" rx="12" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.5"/>
+  <text x="46" y="82" class="sans lane-lbl" fill="#0369a1">DATA PLANE (HOT PATH)</text>
+
+  <!-- Clients -->
+  <g transform="translate(46, 94)" filter="url(#shadow)">
+    <rect x="0" y="0" width="196" height="92" rx="9" fill="#ffffff" stroke="#bae6fd" stroke-width="1.4"/>
+    <text x="16" y="28" class="sans box-title" fill="#0f172a">Clients &amp; CLI</text>
+    <text x="16" y="50" class="sans box-sub">OpenAI &amp; Anthropic API</text>
+    <text x="16" y="70" class="mono box-code">/v1/* · /platform/v1</text>
+  </g>
+
+  <line x1="242" y1="140" x2="286" y2="140" stroke="#0284c7" stroke-width="2.2" marker-end="url(#arr-sky)"/>
+
+  <!-- Gateway -->
+  <g transform="translate(290, 94)" filter="url(#shadow)">
+    <rect x="0" y="0" width="294" height="92" rx="9" fill="#ffffff" stroke="#38bdf8" stroke-width="1.6"/>
+    <text x="16" y="28" class="mono box-title" fill="#075985">nebula-gateway</text>
+    <text x="236" y="28" class="mono box-port" fill="#0284c7">:8081</text>
+    <text x="16" y="50" class="sans box-sub">Auth · Audit · Tenant Quotas</text>
+    <text x="16" y="70" class="sans box-sub">Bounded Fair Queue Admission</text>
+  </g>
+
+  <line x1="584" y1="140" x2="652" y2="140" stroke="#0284c7" stroke-width="2.2" marker-end="url(#arr-sky)"/>
+  <text x="618" y="130" text-anchor="middle" class="sans chip-sub">or embedded</text>
+
+  <!-- Router -->
+  <g transform="translate(656, 94)" filter="url(#shadow)">
+    <rect x="0" y="0" width="418" height="92" rx="9" fill="#ffffff" stroke="#0284c7" stroke-width="1.6"/>
+    <text x="16" y="28" class="mono box-title" fill="#075985">nebula-router</text>
+    <text x="142" y="28" class="sans box-sub">(+ indexd)</text>
+    <text x="358" y="28" class="mono box-port" fill="#0284c7">:18081</text>
+    <text x="16" y="50" class="sans box-sub">Prefix &amp; Session Affinity · pd_split · Retry · Breaker</text>
+    <text x="16" y="70" class="mono box-code">least_pending · prefix_affinity · UpstreamTransport</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 2: CONTROL PLANE & CONSOLE                                       -->
+  <!-- ===================================================================== -->
+  <rect x="28" y="242" width="942" height="148" rx="12" fill="#eef2ff" stroke="#a5b4fc" stroke-width="1.5"/>
+  <text x="46" y="264" class="sans lane-lbl" fill="#3730a3">CONTROL PLANE &amp; CONSOLE</text>
+
+  <!-- Console + BFF + PostgreSQL -->
+  <g transform="translate(46, 276)" filter="url(#shadow)">
+    <rect x="0" y="0" width="318" height="98" rx="9" fill="#ffffff" stroke="#c7d2fe" stroke-width="1.4"/>
+    <text x="16" y="26" class="mono box-title" fill="#312e81">Console -&gt; nebula-bff</text>
+    <text x="258" y="26" class="mono box-port" fill="#4f46e5">:18090</text>
+    <text x="16" y="48" class="sans box-sub">Models · Governance · Autotune · KV API</text>
+    <rect x="14" y="58" width="290" height="28" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.1"/>
+    <text x="24" y="76" class="mono box-code">PostgreSQL :5432 (CRUD, Tenants, Evidence)</text>
+  </g>
+
+  <line x1="364" y1="325" x2="398" y2="325" stroke="#4f46e5" stroke-width="1.8" stroke-dasharray="4,3" marker-start="url(#arr-indigo)" marker-end="url(#arr-indigo)"/>
+
+  <!-- etcd -->
+  <g transform="translate(402, 276)" filter="url(#shadow)">
+    <rect x="0" y="0" width="296" height="98" rx="9" fill="#ffffff" stroke="#6366f1" stroke-width="1.8"/>
+    <text x="16" y="26" class="mono box-title" fill="#312e81">etcd (Authority)</text>
+    <text x="238" y="26" class="mono box-port" fill="#4f46e5">:2379</text>
+    <text x="16" y="49" class="mono box-code">/models · /deployments · /pools</text>
+    <text x="16" y="68" class="mono box-code">/placements (CAS) · /endpoints</text>
+    <text x="16" y="86" class="mono chip-sub">/stats · leases · /gateways</text>
+  </g>
+
+  <line x1="698" y1="325" x2="732" y2="325" stroke="#4f46e5" stroke-width="1.8" stroke-dasharray="4,3" marker-start="url(#arr-indigo)" marker-end="url(#arr-indigo)"/>
+
+  <!-- Scheduler & Observe -->
+  <g transform="translate(736, 276)" filter="url(#shadow)">
+    <rect x="0" y="0" width="216" height="98" rx="9" fill="#ffffff" stroke="#c7d2fe" stroke-width="1.4"/>
+    <text x="16" y="26" class="mono box-title" fill="#312e81">nebula-scheduler</text>
+    <text x="16" y="45" class="sans box-sub">Placement CAS &amp; Election</text>
+    <line x1="14" y1="56" x2="202" y2="56" stroke="#e2e8f0" stroke-width="1"/>
+    <text x="16" y="75" class="mono box-code" fill="#312e81">nebula-observe :8742</text>
+    <text x="16" y="90" class="sans chip-sub">xtrace OTLP · Prometheus</text>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- LANE 3: EXECUTION PLANE & ENGINES                                     -->
+  <!-- ===================================================================== -->
+  <rect x="28" y="430" width="1064" height="146" rx="12" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+  <text x="46" y="452" class="sans lane-lbl" fill="#047857">EXECUTION PLANE &amp; BLACK-BOX ENGINES (ZONE C)</text>
+
+  <!-- Node / K8s Controller -->
+  <g transform="translate(46, 464)" filter="url(#shadow)">
+    <rect x="0" y="0" width="380" height="96" rx="9" fill="#ffffff" stroke="#34d399" stroke-width="1.5"/>
+    <text x="16" y="28" class="mono box-title" fill="#065f46">nebula-node | k8s-controller</text>
+    <text x="322" y="28" class="mono box-port" fill="#059669">:9090</text>
+    <text x="16" y="50" class="sans box-sub">Container / Pod Lifecycle · GPU Pinning · Drain</text>
+    <text x="16" y="70" class="sans box-sub">Health Probes &amp; /metrics Scrape</text>
+  </g>
+
+  <line x1="426" y1="512" x2="476" y2="512" stroke="#059669" stroke-width="2" marker-end="url(#arr-emerald)"/>
+  <text x="451" y="503" text-anchor="middle" class="sans chip-sub">manage</text>
+
+  <!-- Engine Replicas -->
+  <g transform="translate(480, 464)" filter="url(#shadow)">
+    <rect x="0" y="0" width="594" height="96" rx="9" fill="#ffffff" stroke="#10b981" stroke-width="1.6"/>
+    <text x="16" y="25" class="sans box-title" fill="#065f46">Engine Replicas</text>
+    <text x="140" y="25" class="sans chip-sub">(Native HTTP / SSE · Optional LMCache Shared KV)</text>
+
+    <g transform="translate(16, 38)">
+      <rect x="0" y="0" width="132" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+      <text x="66" y="20" text-anchor="middle" class="mono chip">vLLM</text>
+      <text x="66" y="35" text-anchor="middle" class="sans chip-sub">APC · kv-events · PD</text>
+
+      <rect x="143" y="0" width="132" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+      <text x="209" y="20" text-anchor="middle" class="mono chip">SGLang</text>
+      <text x="209" y="35" text-anchor="middle" class="sans chip-sub">RadixAttention</text>
+
+      <rect x="286" y="0" width="132" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+      <text x="352" y="20" text-anchor="middle" class="mono chip">TokenSpeed</text>
+      <text x="352" y="35" text-anchor="middle" class="sans chip-sub">MTP Speculation</text>
+
+      <rect x="429" y="0" width="133" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+      <text x="495" y="20" text-anchor="middle" class="mono chip">zstep</text>
+      <text x="495" y="35" text-anchor="middle" class="sans chip-sub">Rust + SHM TP</text>
+    </g>
+  </g>
+
+  <!-- ===================================================================== -->
+  <!-- INTER-LANE VERTICAL ARROWS                                            -->
+  <!-- ===================================================================== -->
+  <!-- Gateway <-> etcd -->
+  <line x1="480" y1="186" x2="480" y2="276" stroke="#4f46e5" stroke-width="1.8" stroke-dasharray="4,3" marker-start="url(#arr-indigo)" marker-end="url(#arr-indigo)"/>
+  <rect x="418" y="211" width="124" height="20" rx="5" fill="#ffffff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="480" y="225" text-anchor="middle" class="mono edge-lbl" fill="#4338ca">quotas &amp; leases</text>
+
+  <!-- Router <- etcd -->
+  <line x1="676" y1="276" x2="676" y2="186" stroke="#4f46e5" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arr-indigo)"/>
+  <rect x="610" y="211" width="132" height="20" rx="5" fill="#ffffff" stroke="#a5b4fc" stroke-width="1"/>
+  <text x="676" y="225" text-anchor="middle" class="mono edge-lbl" fill="#4338ca">watch /endpoints</text>
+
+  <!-- Node <-> etcd (clean orthogonal connector or aligned vertical) -->
+  <path d="M 412 464 L 412 374" fill="none" stroke="#059669" stroke-width="1.8" stroke-dasharray="4,3" marker-start="url(#arr-emerald)" marker-end="url(#arr-emerald)"/>
+  <rect x="330" y="399" width="164" height="20" rx="5" fill="#ffffff" stroke="#6ee7b7" stroke-width="1"/>
+  <text x="412" y="413" text-anchor="middle" class="mono edge-lbl" fill="#047857">placements &amp; endpoints</text>
+
+  <!-- Right Highway: Router -> Engine Replicas (HTTP/SSE) & KV Events -->
+  <line x1="1008" y1="464" x2="1008" y2="186" stroke="#d97706" stroke-width="1.8" stroke-dasharray="4,3" marker-end="url(#arr-amber)"/>
+  <rect x="974" y="334" width="68" height="34" rx="6" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.1"/>
+  <text x="1008" y="349" text-anchor="middle" class="mono chip-sub" fill="#b45309">KV Events</text>
+  <text x="1008" y="362" text-anchor="middle" class="sans chip-sub" fill="#92400e">ZMQ / Pin</text>
+
+  <line x1="1054" y1="186" x2="1054" y2="464" stroke="#0284c7" stroke-width="2.6" marker-end="url(#arr-sky)"/>
+  <rect x="1020" y="272" width="68" height="34" rx="6" fill="#e0f2fe" stroke="#38bdf8" stroke-width="1.2"/>
+  <text x="1054" y="287" text-anchor="middle" class="mono chip-sub" fill="#0369a1">HTTP/SSE</text>
+  <text x="1054" y="300" text-anchor="middle" class="sans chip-sub" fill="#075985">Inference</text>
+</svg>
