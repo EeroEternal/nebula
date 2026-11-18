@@ -126,7 +126,3 @@ Targeted checks: `scripts/ha_quota_drill.sh`, `scripts/check_lmcache_compat.sh` 
 | [docs/dev/etcd.md](docs/dev/etcd.md) | key spaces, ownership, leases |
 | [docs/dev/zstep.md](docs/dev/zstep.md) | zstep cross-repo contract (CLI, probes, SSE, metrics, KV events) |
 | [docs/versions/](docs/versions/) | release notes per version |
-
-## Replit development workflow
-
-The Replit `Project` runs the console frontend and BFF backend in parallel: Vite binds `0.0.0.0:5000`; `nebula-bff` binds `0.0.0.0:18090` with health at `/api/healthz`; `bin/replit-backend.sh` starts a local etcd under `/tmp/nebula-replit-etcd`; PostgreSQL comes from the workspace `DATABASE_URL` (a separate `nebula` database is created, credentials are never written to the repo). Set `DATABASE_URL` before pressing **Run**; the console needs no xtrace credentials (`OBSERVE_AUTH_MODE=internal`). Real vLLM inference still requires an external GPU host.
