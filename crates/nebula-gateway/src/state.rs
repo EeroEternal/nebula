@@ -42,6 +42,7 @@ pub struct AppState {
     /// `/gateways/` lease registry, present unless the divisor is pinned
     /// (`NEBULA_GATEWAY_QUOTA_MEMBERS`). Used for shutdown deregistration.
     pub member_registry: Option<Arc<crate::quota_members::MemberRegistry>>,
+    pub session_extract: nebula_common::SessionExtractConfig,
 }
 
 impl AsRef<nebula_common::auth::AuthConfig> for AppState {

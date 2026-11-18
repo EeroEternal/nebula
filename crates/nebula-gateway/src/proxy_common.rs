@@ -44,7 +44,20 @@ pub async fn prepare_upstream(
             .hint_received_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
-    let ctx = build_execution_context(headers, auth.tenant_id.as_deref(), None);
+    let mut ctx = build_execution_context(headers, auth.tenant_id.as_deref(), None);
+    if ctx.session_id.is_some() {
+        st.metrics
+            .record_session_extracted(nebula_common::SessionIdSource::PrimaryHeader);
+    } else if st.session_extract.is_fallback_enabled() {
+        if let Some((sid, src)) = nebula_common::extract_session_id_with_config(
+            headers,
+            Some(body_bytes),
+            &st.session_extract,
+        ) {
+            ctx.session_id = Some(sid);
+            st.metrics.record_session_extracted(src);
+        }
+    }
 
     let _conc_guard = if st.auth.env.multi_tenant {
         if let Some(ref tenant_id) = ctx.tenant_id {
@@ -170,9 +183,30 @@ pub async fn prepare_upstream_from_json(
     auth: &AuthContext,
     headers: &HeaderMap,
     chat_body: &Value,
+    original_payload: Option<&Value>,
 ) -> Result<PreparedUpstream, Response> {
     let bytes = serde_json::to_vec(chat_body).unwrap_or_default();
-    prepare_upstream(st, auth, headers, &bytes).await
+    let mut prepared = prepare_upstream(st, auth, headers, &bytes).await?;
+    // Protocol adapters (`/v1/responses`, `/v1/messages`) reshape `payload` into `chat_body`
+    // and may drop top-level `metadata` / `user` fields; check `original_payload` when still empty.
+    if prepared.ctx.session_id.is_none() && st.session_extract.is_fallback_enabled() {
+        if let Some(orig) = original_payload {
+            if let Some(sid) =
+                nebula_common::extract_session_id_from_json(orig, &st.session_extract)
+            {
+                if let Ok(hv) = reqwest::header::HeaderValue::from_str(&sid) {
+                    prepared.headers.insert(
+                        reqwest::header::HeaderName::from_static(nebula_common::HEADER_SESSION_ID),
+                        hv,
+                    );
+                }
+                prepared.ctx.session_id = Some(sid);
+                st.metrics
+                    .record_session_extracted(nebula_common::SessionIdSource::BodyField);
+            }
+        }
+    }
+    Ok(prepared)
 }
 
 pub async fn post_router_path(

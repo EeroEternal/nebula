@@ -2,6 +2,213 @@ use serde::{Deserialize, Serialize};
 
 const MAX_HINT_HEADER_LEN: usize = 1024;
 const MAX_HINT_PREFIX_KEY_LEN: usize = 128;
+pub const MAX_SESSION_ID_LEN: usize = 128;
+
+/// Source from which a request's `session_id` was resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIdSource {
+    /// Standard `x-session-id` request header.
+    PrimaryHeader,
+    /// Operator-configured fallback header (`NEBULA_SESSION_ID_HEADERS` or `auto` preset).
+    FallbackHeader,
+    /// Operator-configured JSON body dot-path (`NEBULA_SESSION_ID_BODY_FIELDS` or `auto` preset).
+    BodyField,
+}
+
+impl SessionIdSource {
+    pub fn as_metric_label(self) -> &'static str {
+        match self {
+            Self::PrimaryHeader => "header",
+            Self::FallbackHeader => "fallback_header",
+            Self::BodyField => "body",
+        }
+    }
+}
+
+/// Generic, opt-in Session ID extraction policy for callers that cannot set `x-session-id`.
+///
+/// Off by default (`fallback_headers` and `body_fields` empty) so only `x-session-id` is read
+/// unless the operator enables `NEBULA_SESSION_ID_EXTRACT=auto` or specifies explicit
+/// `NEBULA_SESSION_ID_HEADERS` / `NEBULA_SESSION_ID_BODY_FIELDS`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionExtractConfig {
+    pub fallback_headers: Vec<String>,
+    pub body_fields: Vec<Vec<String>>,
+}
+
+impl SessionExtractConfig {
+    pub const AUTO_HEADERS: &'static [&'static str] =
+        &["x-conversation-id", "x-thread-id", "openai-conversation-id"];
+    pub const AUTO_BODY_FIELDS: &'static [&'static str] = &[
+        "session_id",
+        "conversation_id",
+        "metadata.session_id",
+        "extra_body.session_id",
+        "user",
+    ];
+
+    pub fn auto_preset() -> Self {
+        Self::from_lists(
+            Self::AUTO_HEADERS.iter().copied(),
+            Self::AUTO_BODY_FIELDS.iter().copied(),
+        )
+    }
+
+    pub fn from_lists<'a>(
+        headers: impl IntoIterator<Item = &'a str>,
+        body_paths: impl IntoIterator<Item = &'a str>,
+    ) -> Self {
+        let mut fallback_headers = Vec::new();
+        for raw in headers {
+            let name = raw.trim().to_ascii_lowercase();
+            if !name.is_empty() && name != HEADER_SESSION_ID && !fallback_headers.contains(&name) {
+                fallback_headers.push(name);
+            }
+        }
+        let mut body_fields = Vec::new();
+        for raw in body_paths {
+            let segs: Vec<String> = raw
+                .trim()
+                .split('.')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            if !segs.is_empty() && !body_fields.contains(&segs) {
+                body_fields.push(segs);
+            }
+        }
+        Self {
+            fallback_headers,
+            body_fields,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let mode = std::env::var("NEBULA_SESSION_ID_EXTRACT")
+            .ok()
+            .map(|v| v.trim().to_ascii_lowercase());
+        if matches!(mode.as_deref(), Some("0" | "false" | "off" | "none")) {
+            return Self::default();
+        }
+        let auto = matches!(mode.as_deref(), Some("auto" | "1" | "true" | "on"));
+        let mut headers: Vec<String> = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
+
+        if let Ok(raw_h) = std::env::var("NEBULA_SESSION_ID_HEADERS") {
+            headers.extend(
+                raw_h
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            );
+        } else if auto {
+            headers.extend(Self::AUTO_HEADERS.iter().map(|s| (*s).to_string()));
+        }
+
+        if let Ok(raw_b) = std::env::var("NEBULA_SESSION_ID_BODY_FIELDS") {
+            paths.extend(
+                raw_b
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            );
+        } else if auto {
+            paths.extend(Self::AUTO_BODY_FIELDS.iter().map(|s| (*s).to_string()));
+        }
+
+        Self::from_lists(
+            headers.iter().map(String::as_str),
+            paths.iter().map(String::as_str),
+        )
+    }
+
+    pub fn is_fallback_enabled(&self) -> bool {
+        !self.fallback_headers.is_empty() || !self.body_fields.is_empty()
+    }
+}
+
+fn sanitize_session_id(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > MAX_SESSION_ID_LEN
+        || trimmed.chars().any(|c| c.is_control())
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Extract a sanitized `session_id` according to `x-session-id` first, then optional
+/// configured fallback headers, then optional configured JSON body dot-paths.
+pub fn extract_session_id_with_config(
+    headers: &axum::http::HeaderMap,
+    body: Option<&[u8]>,
+    cfg: &SessionExtractConfig,
+) -> Option<(String, SessionIdSource)> {
+    if let Some(sid) = headers
+        .get(HEADER_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(sanitize_session_id)
+    {
+        return Some((sid, SessionIdSource::PrimaryHeader));
+    }
+
+    for name in &cfg.fallback_headers {
+        if let Some(sid) = headers
+            .get(name.as_str())
+            .and_then(|v| v.to_str().ok())
+            .and_then(sanitize_session_id)
+        {
+            return Some((sid, SessionIdSource::FallbackHeader));
+        }
+    }
+
+    if cfg.body_fields.is_empty() {
+        return None;
+    }
+    let body = body?;
+    let first_non_ws = body.iter().copied().find(|b| !b.is_ascii_whitespace())?;
+    if first_non_ws != b'{' {
+        return None;
+    }
+    let doc: serde_json::Value = serde_json::from_slice(body).ok()?;
+    extract_session_id_from_json(&doc, cfg).map(|sid| (sid, SessionIdSource::BodyField))
+}
+
+/// Extract a sanitized `session_id` from a parsed JSON body using `cfg.body_fields`.
+pub fn extract_session_id_from_json(
+    doc: &serde_json::Value,
+    cfg: &SessionExtractConfig,
+) -> Option<String> {
+    for path in &cfg.body_fields {
+        let mut cur = doc;
+        let mut matched = true;
+        for seg in path {
+            match cur.get(seg.as_str()) {
+                Some(next) => cur = next,
+                None => {
+                    matched = false;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            continue;
+        }
+        let candidate = match cur {
+            serde_json::Value::String(s) => sanitize_session_id(s),
+            serde_json::Value::Number(n) => sanitize_session_id(&n.to_string()),
+            _ => None,
+        };
+        if let Some(sid) = candidate {
+            return Some(sid);
+        }
+    }
+    None
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub struct InferenceHint {
@@ -119,7 +326,7 @@ pub fn build_execution_context(
 
     ExecutionContext {
         request_id,
-        session_id: header_str(HEADER_SESSION_ID),
+        session_id: header_str(HEADER_SESSION_ID).and_then(|s| sanitize_session_id(&s)),
         tenant_id,
         priority,
         deadline_ms,
@@ -228,5 +435,53 @@ mod tests {
         let hint = parse_and_sanitize_inference_hint(raw).expect("valid hint");
         assert_eq!(hint.prefer_prefix_key, None);
         assert_eq!(hint.prefer_low_latency, Some(true));
+    }
+
+    #[test]
+    fn session_extractor_respects_precedence_and_sanitizes() {
+        let cfg = SessionExtractConfig::auto_preset();
+        let body = br#"{"model":"ds","metadata":{"session_id":"meta-sess-1"},"user":"u-fallback"}"#;
+
+        // 1. Default config is strictly off unless x-session-id is present.
+        let empty_headers = HeaderMap::new();
+        assert_eq!(
+            extract_session_id_with_config(
+                &empty_headers,
+                Some(body),
+                &SessionExtractConfig::default()
+            ),
+            None
+        );
+
+        // 2. Body dot-path extraction in configured order (`metadata.session_id` before `user`).
+        assert_eq!(
+            extract_session_id_with_config(&empty_headers, Some(body), &cfg),
+            Some(("meta-sess-1".to_string(), SessionIdSource::BodyField))
+        );
+
+        // 3. Fallback header beats body field.
+        let mut fb_headers = HeaderMap::new();
+        fb_headers.insert("x-conversation-id", "conv-42".parse().unwrap());
+        assert_eq!(
+            extract_session_id_with_config(&fb_headers, Some(body), &cfg),
+            Some(("conv-42".to_string(), SessionIdSource::FallbackHeader))
+        );
+
+        // 4. Primary `x-session-id` beats everything.
+        fb_headers.insert(HEADER_SESSION_ID, "primary-99".parse().unwrap());
+        assert_eq!(
+            extract_session_id_with_config(&fb_headers, Some(body), &cfg),
+            Some(("primary-99".to_string(), SessionIdSource::PrimaryHeader))
+        );
+
+        // 5. Oversized or control-char session IDs are rejected, falling through to `user`.
+        let bad_body = format!(
+            r#"{{"metadata":{{"session_id":"{}"}},"user":"u-valid"}}"#,
+            "x".repeat(MAX_SESSION_ID_LEN + 1)
+        );
+        assert_eq!(
+            extract_session_id_with_config(&empty_headers, Some(bad_body.as_bytes()), &cfg),
+            Some(("u-valid".to_string(), SessionIdSource::BodyField))
+        );
     }
 }

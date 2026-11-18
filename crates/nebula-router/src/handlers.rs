@@ -79,7 +79,7 @@ pub async fn proxy_chat_completions(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Response {
-    let ctx = build_execution_context(&headers);
+    let mut ctx = build_execution_context(&headers);
     let request_id = ctx.request_id.clone();
     let request_start = std::time::Instant::now();
     tracing::debug!(
@@ -147,6 +147,16 @@ pub async fn proxy_chat_completions(
     };
 
     let plan_version = st.router.plan_version_for(&model_uid).filter(|&v| v > 0);
+
+    if ctx.session_id.is_none() && st.session_extract.is_fallback_enabled() {
+        if let Some((sid, _source)) = nebula_common::extract_session_id_with_config(
+            &headers,
+            body_bytes.as_deref(),
+            &st.session_extract,
+        ) {
+            ctx.session_id = Some(sid);
+        }
+    }
 
     // P1c: hash the prompt's prefix blocks so the prefix_affinity strategy
     // can route to the replica that already holds the KV. No-op unless the

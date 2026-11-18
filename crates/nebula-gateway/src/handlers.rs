@@ -67,10 +67,11 @@ pub async fn create_responses(
         }
     };
 
-    let prepared = match prepare_upstream_from_json(&st, &auth, &headers, &chat_body).await {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+    let prepared =
+        match prepare_upstream_from_json(&st, &auth, &headers, &chat_body, Some(&payload)).await {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
 
     let builder_seed = crate::responses::CreateResponseRequest {
         model: Some(resp_req.model.clone()),
@@ -128,10 +129,11 @@ pub async fn create_anthropic_messages(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let prepared = match prepare_upstream_from_json(&st, &auth, &headers, &chat_body).await {
-        Ok(p) => p,
-        Err(r) => return r,
-    };
+    let prepared =
+        match prepare_upstream_from_json(&st, &auth, &headers, &chat_body, Some(&payload)).await {
+            Ok(p) => p,
+            Err(r) => return r,
+        };
 
     proxy_chat_as_anthropic(st, prepared, chat_body, requested_model, stream).await
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use nebula_common::auth::AuthConfig;
-use nebula_common::{DualWriteEmitter, UpstreamTransport};
+use nebula_common::{DualWriteEmitter, SessionExtractConfig, UpstreamTransport};
 
 use crate::metrics::Metrics;
 
@@ -17,6 +17,7 @@ pub struct AppState {
     pub retry_max: u32,
     pub retry_backoff_ms: u64,
     pub auth: AuthConfig,
+    pub session_extract: SessionExtractConfig,
 }
 
 impl AsRef<AuthConfig> for AppState {

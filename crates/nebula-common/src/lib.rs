@@ -55,10 +55,11 @@ pub use engine_metrics::{
     EngineScrapeDiagnostics,
 };
 pub use execution_context::{
-    build_execution_context, inject_execution_context, parse_and_sanitize_inference_hint,
-    ExecutionContext, InferenceHint, HEADER_BUDGET_TOKENS, HEADER_DEADLINE_MS, HEADER_HINT_TRUSTED,
-    HEADER_INFERENCE_HINT, HEADER_INTERNAL_AUTH, HEADER_PRIORITY, HEADER_REPLICA_ID,
-    HEADER_REQUEST_ID, HEADER_SESSION_ID, HEADER_TENANT_ID,
+    build_execution_context, extract_session_id_from_json, extract_session_id_with_config,
+    inject_execution_context, parse_and_sanitize_inference_hint, ExecutionContext, InferenceHint,
+    SessionExtractConfig, SessionIdSource, HEADER_BUDGET_TOKENS, HEADER_DEADLINE_MS,
+    HEADER_HINT_TRUSTED, HEADER_INFERENCE_HINT, HEADER_INTERNAL_AUTH, HEADER_PRIORITY,
+    HEADER_REPLICA_ID, HEADER_REQUEST_ID, HEADER_SESSION_ID, HEADER_TENANT_ID, MAX_SESSION_ID_LEN,
 };
 pub use json_model::{
     peek_json_model_field, rewrite_json_model_field, HEADER_NEBULA_MODEL, HEADER_NEBULA_MODEL_UID,

@@ -73,6 +73,9 @@ pub const DEFAULT_PD_PREFILL_SPILLOVER_PENDING: u64 = 0;
 pub const DEFAULT_TOOL_PAUSE_TTL_MS: u64 = 60_000;
 pub const TOOL_PAUSE_MAX_ENTRIES: usize = 4_096;
 pub const SESSION_AFFINITY_MAX_ENTRIES: usize = 4_096;
+pub const DEFAULT_SESSION_AFFINITY_TTL_MS: u64 = 1_800_000;
+pub const DEFAULT_SESSION_MAX_WAITING: u64 = 8;
+pub const DEFAULT_PREEMPTION_WINDOW_MS: u64 = 30_000;
 
 /// Default number of prompt tokens remembered per Tool-Pause session and pinned on
 /// `tool_calls`. The pin protects the *spine* (system prompt + tool schemas), not the
@@ -327,7 +330,15 @@ impl std::fmt::Display for RouteError {
 pub struct Router {
     endpoints: DashMap<(String, u32), EndpointInfo>,
     stats: DashMap<(String, u32), EndpointStats>,
+    /// Sliding-window preemption tracker: `(model_uid, replica_id) -> (last_total, last_increase_ms)`.
+    preemption_window: DashMap<(String, u32), (u64, Option<u64>)>,
+    preemption_window_ms: u64,
     session_affinity: DashMap<SessionKey, (String, u32)>,
+    session_last_seen: DashMap<SessionKey, u64>,
+    session_affinity_max_entries: usize,
+    session_affinity_ttl_ms: u64,
+    session_max_waiting: u64,
+    session_affinity_spillover_total: AtomicU64,
     /// Batch 5.3: bounded single-use Tool-Pause session leases
     /// `(tenant_id, session_id) -> (model_uid, replica_id, expires_at_ms, queue_admitted)`.
     tool_pause_leases: DashMap<SessionKey, (String, u32, u64, bool)>,
@@ -397,9 +408,13 @@ pub struct Router {
     pd_bypass_tokens: usize,
     pd_short_bypass_total: AtomicU64,
     /// Batch 6.4 (Account): prefill tokens the chosen replica already held, per model.
-    /// `matched_blocks * 16` for the replica that actually served the request, so this is
+    /// `matched_blocks * block_size` for the replica that actually served the request, so this is
     /// the conservative form of the ROI numerator - it only counts cache hits we routed to.
     saved_prefill_tokens: DashMap<String, AtomicU64>,
+    /// Total tokenized prompt tokens evaluated on the routing path per model (denominator
+    /// pairing with `saved_prefill_tokens` for sliding-window hit-rate PromQL).
+    routed_prompt_tokens: DashMap<String, AtomicU64>,
+    prefix_tuning: strategy::PrefixAffinityTuning,
     /// Stage decisions skipped for lack of fresh `/stats/` (decision → count):
     /// `short_bypass` | `prefill_spillover`. Without the node/controller scrape these
     /// decisions are impossible, and the degradation used to be invisible.
@@ -468,6 +483,24 @@ impl Router {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_TOOL_PAUSE_PIN_TOKENS);
+        let session_affinity_max_entries = std::env::var("NEBULA_SESSION_AFFINITY_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(SESSION_AFFINITY_MAX_ENTRIES);
+        let session_affinity_ttl_ms = std::env::var("NEBULA_SESSION_AFFINITY_TTL_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SESSION_AFFINITY_TTL_MS);
+        let session_max_waiting = std::env::var("NEBULA_SESSION_MAX_WAITING")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_SESSION_MAX_WAITING);
+        let preemption_window_ms = std::env::var("NEBULA_PREEMPTION_WINDOW_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_PREEMPTION_WINDOW_MS);
+        let prefix_tuning = strategy::PrefixAffinityTuning::from_env();
         let tool_pause_pin_base = tool_pause_pin_base_from_env();
         if tool_pause_pin_base.is_some() {
             tracing::info!(
@@ -478,7 +511,14 @@ impl Router {
         Arc::new(Self {
             endpoints: DashMap::new(),
             stats: DashMap::new(),
+            preemption_window: DashMap::new(),
+            preemption_window_ms,
             session_affinity: DashMap::new(),
+            session_last_seen: DashMap::new(),
+            session_affinity_max_entries,
+            session_affinity_ttl_ms,
+            session_max_waiting,
+            session_affinity_spillover_total: AtomicU64::new(0),
             tool_pause_leases: DashMap::new(),
             tool_pause_ttl_ms,
             tool_pause_marked_total: AtomicU64::new(0),
@@ -515,6 +555,8 @@ impl Router {
             stage_decode_fallback_total: AtomicU64::new(0),
             stage_stats_missing: DashMap::new(),
             saved_prefill_tokens: DashMap::new(),
+            routed_prompt_tokens: DashMap::new(),
+            prefix_tuning,
             stage_prefill_spillover_total: AtomicU64::new(0),
             pd_decode_local_hit_total: AtomicU64::new(0),
             pd_prefill_spillover_pending: AtomicU64::new(pd_prefill_spillover_pending),
@@ -547,6 +589,7 @@ impl Router {
                 .insert((info.model_uid.clone(), info.replica_id), info);
         }
         self.session_affinity.clear();
+        self.session_last_seen.clear();
         self.tool_pause_leases.clear();
         self.session_prefix_ids.clear();
     }
@@ -566,19 +609,54 @@ impl Router {
     }
 
     pub fn upsert_stats(&self, stats: EndpointStats) {
-        self.stats
-            .insert((stats.model_uid.clone(), stats.replica_id), stats);
+        let key = (stats.model_uid.clone(), stats.replica_id);
+        if let Some(cur_total) = stats.num_preemptions_total {
+            let ts = stats.last_updated_ms;
+            let prev = self.preemption_window.get(&key).map(|e| *e.value());
+            let next_state = match prev {
+                // First observation establishes baseline so historical lifetime
+                // preemptions from days ago do not permanently penalize a replica.
+                None => (cur_total, None),
+                Some((prev_total, _)) if cur_total > prev_total => (cur_total, Some(ts)),
+                Some((prev_total, prev_inc)) if cur_total == prev_total => {
+                    let active_inc = prev_inc
+                        .filter(|&inc_ts| ts.saturating_sub(inc_ts) < self.preemption_window_ms);
+                    (cur_total, active_inc)
+                }
+                // Counter decreased (engine restarted): reset baseline cleanly.
+                Some(_) => (cur_total, (cur_total > 0).then_some(ts)),
+            };
+            self.preemption_window.insert(key.clone(), next_state);
+        }
+        self.stats.insert(key, stats);
     }
 
     pub fn remove_stats(&self, model_uid: &str, replica_id: u32) {
-        self.stats.remove(&(model_uid.to_string(), replica_id));
+        let key = (model_uid.to_string(), replica_id);
+        self.stats.remove(&key);
+        self.preemption_window.remove(&key);
     }
 
     pub fn replace_all_stats(&self, items: Vec<EndpointStats>) {
+        let keep: std::collections::HashSet<(String, u32)> = items
+            .iter()
+            .map(|s| (s.model_uid.clone(), s.replica_id))
+            .collect();
+        self.preemption_window.retain(|k, _| keep.contains(k));
         self.stats.clear();
         for stats in items {
             self.upsert_stats(stats);
         }
+    }
+
+    fn is_actively_preempting(&self, model_uid: &str, replica_id: u32, now_ms: u64) -> bool {
+        if self.preemption_window_ms == 0 {
+            return false;
+        }
+        self.preemption_window
+            .get(&(model_uid.to_string(), replica_id))
+            .and_then(|e| e.value().1)
+            .is_some_and(|inc_ts| now_ms.saturating_sub(inc_ts) < self.preemption_window_ms)
     }
 
     pub fn route_stale_stats_dropped_total(&self) -> u64 {
@@ -690,6 +768,38 @@ impl Router {
             .fetch_add(tokens, Ordering::Relaxed);
     }
 
+    /// Tokenized prompt tokens evaluated on the routing path for `model_uid`.
+    pub fn routed_prompt_tokens(&self, model_uid: &str) -> u64 {
+        self.routed_prompt_tokens
+            .get(model_uid)
+            .map(|e| e.value().load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    /// Per-model routed prompt token counters (denominator for sliding-window hit rate).
+    pub fn routed_prompt_tokens_by_model(&self) -> Vec<(String, u64)> {
+        self.routed_prompt_tokens
+            .iter()
+            .map(|e| (e.key().clone(), e.value().load(Ordering::Relaxed)))
+            .collect()
+    }
+
+    fn record_routed_prompt_tokens(&self, model_uid: &str, tokens: u64) {
+        if tokens == 0 {
+            return;
+        }
+        self.routed_prompt_tokens
+            .entry(model_uid.to_string())
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(tokens, Ordering::Relaxed);
+    }
+
+    /// Sticky session turns that escaped an overloaded or congested anchor replica.
+    pub fn session_affinity_spillover_total(&self) -> u64 {
+        self.session_affinity_spillover_total
+            .load(Ordering::Relaxed)
+    }
+
     /// Count of stage decisions skipped for lack of fresh `/stats/` (`decision`, count).
     pub fn stage_stats_missing(&self, decision: &str) -> u64 {
         self.stage_stats_missing
@@ -731,19 +841,55 @@ impl Router {
     }
 
     fn insert_session_affinity(&self, key: SessionKey, model_uid: String, replica_id: u32) {
-        if self.session_affinity.len() >= SESSION_AFFINITY_MAX_ENTRIES
-            && !self.session_affinity.contains_key(&key)
-        {
-            // Bind `evict_key` in a standalone `let` statement so the temporary
-            // `DashMap::iter()` guard is dropped BEFORE `remove(&evict_key)`
-            // acquires a write lock on the same shard (Rust 2021 temporary
-            // lifetime rule inside `if let` scrutinees).
-            let evict_key = self.session_affinity.iter().next().map(|e| e.key().clone());
-            if let Some(evict_key) = evict_key {
+        self.insert_session_affinity_at(key, model_uid, replica_id, now_ms());
+    }
+
+    fn insert_session_affinity_at(
+        &self,
+        key: SessionKey,
+        model_uid: String,
+        replica_id: u32,
+        now: u64,
+    ) {
+        let cap = self.session_affinity_max_entries.max(1);
+        if self.session_affinity.len() >= cap && !self.session_affinity.contains_key(&key) {
+            if self.session_affinity_ttl_ms > 0 {
+                let ttl = self.session_affinity_ttl_ms;
+                let expired_keys: Vec<SessionKey> = self
+                    .session_last_seen
+                    .iter()
+                    .filter(|e| now.saturating_sub(*e.value()) >= ttl)
+                    .map(|e| e.key().clone())
+                    .collect();
+                for k in expired_keys {
+                    self.session_affinity.remove(&k);
+                    self.session_last_seen.remove(&k);
+                }
+            }
+            while self.session_affinity.len() >= cap {
+                // Evict the oldest-accessed entry (approximate LRU) rather than an
+                // arbitrary DashMap shard bucket; bind `evict_key` before `remove`
+                // so read guards are dropped before acquiring shard write locks.
+                let evict_key = self
+                    .session_affinity
+                    .iter()
+                    .min_by_key(|e| {
+                        self.session_last_seen
+                            .get(e.key())
+                            .map(|ts| *ts.value())
+                            .unwrap_or(0)
+                    })
+                    .map(|e| e.key().clone());
+                let Some(evict_key) = evict_key else {
+                    break;
+                };
                 self.session_affinity.remove(&evict_key);
+                self.session_last_seen.remove(&evict_key);
             }
         }
-        self.session_affinity.insert(key, (model_uid, replica_id));
+        self.session_affinity
+            .insert(key.clone(), (model_uid, replica_id));
+        self.session_last_seen.insert(key, now);
     }
 
     /// Record a single-use Coding Agent `Tool-Pause` session lease
@@ -1274,6 +1420,7 @@ impl Router {
         let Some(ids) = self.body_token_ids(model_uid, body) else {
             return (None, false);
         };
+        self.record_routed_prompt_tokens(model_uid, ids.len() as u64);
         self.remember_session_prefix(tenant_id, session_id, &ids);
         let hashes = self
             .prefix_hasher
@@ -1450,6 +1597,14 @@ impl Router {
             self.prefix_hasher
                 .set_model_block_size(&spec.model_uid, bs as usize);
         }
+        if let Some(mode) = spec
+            .config
+            .as_ref()
+            .and_then(|c| c.tokenizer_mode.as_deref())
+        {
+            self.prefix_hasher
+                .set_model_tokenizer_mode(&spec.model_uid, mode);
+        }
 
         if let Some(path) = spec.model_path.as_deref().filter(|_| !isolated) {
             self.register_model_alias(&spec.model_uid, path);
@@ -1478,6 +1633,7 @@ impl Router {
         self.model_uids_to_names.remove(model_uid);
         self.engine_model_ids.remove(model_uid);
         self.prefix_hasher.clear_model_block_size(model_uid);
+        self.prefix_hasher.clear_model_tokenizer_mode(model_uid);
     }
 
     /// OpenAI `model` field to send to the engine after routing.
@@ -1634,8 +1790,20 @@ impl Router {
         // Session affinity check (never lock onto a Prefill role replica in pd_split:
         // a cold first turn routes to Prefill to populate shared KV, while subsequent
         // warm turns must evaluate stage routing to land on a Decode replica).
+        let mut session_escaped_from: Option<u32> = None;
         if let Some(session_id) = ctx.session_id.as_deref() {
             let key = session_key(ctx.tenant_id.as_deref(), session_id);
+            if self.session_affinity_ttl_ms > 0 {
+                let ttl = self.session_affinity_ttl_ms;
+                let expired = self
+                    .session_last_seen
+                    .get(&key)
+                    .is_some_and(|ts| now.saturating_sub(*ts.value()) >= ttl);
+                if expired {
+                    self.session_affinity.remove(&key);
+                    self.session_last_seen.remove(&key);
+                }
+            }
             let _ = self
                 .tool_pause_leases
                 .remove_if(&key, |_, (_, _, exp, _)| *exp <= now);
@@ -1667,13 +1835,39 @@ impl Router {
                         && !self.is_endpoint_circuit_open(&ep.model_uid, ep.replica_id)
                         && ep.role != ReplicaRole::Prefill
                     {
-                        if tool_pause_consumed {
-                            self.tool_continuation_hit_total
+                        let sticky_stats = self.get_fresh_stats(&ep.model_uid, ep.replica_id);
+                        let kv_overloaded = sticky_stats
+                            .as_ref()
+                            .and_then(|s| s.kv_cache_usage)
+                            .is_some_and(|u| u >= KV_CACHE_OVERLOAD_THRESHOLD);
+                        let queue_congested = !tool_pause_consumed
+                            && self.session_max_waiting > 0
+                            && sticky_stats.as_ref().is_some_and(|st| {
+                                let sticky_wait =
+                                    st.waiting_requests.unwrap_or(st.pending_requests);
+                                sticky_wait >= self.session_max_waiting
+                                    && self.has_lighter_peer_for_session(
+                                        model_uid,
+                                        ep.replica_id,
+                                        ep.role,
+                                        plan_version,
+                                        exclude,
+                                        sticky_wait,
+                                    )
+                            });
+
+                        if kv_overloaded || queue_congested {
+                            session_escaped_from = Some(ep.replica_id);
+                        } else {
+                            self.session_last_seen.insert(key, now);
+                            if tool_pause_consumed {
+                                self.tool_continuation_hit_total
+                                    .fetch_add(1, Ordering::Relaxed);
+                            }
+                            self.session_affinity_hit_total
                                 .fetch_add(1, Ordering::Relaxed);
+                            return Ok(ep);
                         }
-                        self.session_affinity_hit_total
-                            .fetch_add(1, Ordering::Relaxed);
-                        return Ok(ep);
                     }
                 }
             }
@@ -1984,14 +2178,37 @@ impl Router {
             })
             .collect();
 
+        let active_preempting: std::collections::HashSet<u32> = candidates_data
+            .iter()
+            .filter_map(|(ep, _)| {
+                self.is_actively_preempting(&ep.model_uid, ep.replica_id, now)
+                    .then_some(ep.replica_id)
+            })
+            .collect();
+
+        let session_seed = ctx.session_id.as_deref().map(|sid| {
+            strategy::seed_from_bytes(&[
+                ctx.tenant_id.as_deref().unwrap_or("").as_bytes(),
+                sid.as_bytes(),
+            ])
+        });
+        let prefix_key_seed = prefix_hashes
+            .and_then(|hs| hs.first())
+            .map(|h0| u64::from_be_bytes(crate::kv_hash::external(h0)))
+            .or(session_seed);
+
         let sel_ctx = SelectionCtx {
             prefix_owner,
             prefix_matches: scoped_prefix_matches.as_ref(),
             block_size,
+            prefix_key_seed,
+            active_preemptions: Some(&active_preempting),
+            tuning: self.prefix_tuning,
         };
 
         let selected = if let Some(hint) = active_hint.as_ref() {
-            if let Some(idx) = Self::select_hint_biased_endpoint(&candidates_data, hint) {
+            if let Some(idx) = self.select_hint_biased_endpoint(&candidates, &candidates_data, hint)
+            {
                 self.hint_adopted_total.fetch_add(1, Ordering::Relaxed);
                 if hint.prefer_prefix_key.is_some() {
                     self.prefix_hint_hit_total.fetch_add(1, Ordering::Relaxed);
@@ -2021,9 +2238,33 @@ impl Router {
             } else {
                 self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
             }
+        } else if self.strategy.name() == "least_pending"
+            && session_seed.is_some()
+            && session_escaped_from.is_none()
+            && candidates.len() > 1
+        {
+            // Stateless multi-Router session home replica: when a request carries a
+            // session_id and no local affinity entry matched yet, deterministically
+            // map `(tenant_id, session_id)` via Bounded-Load Rendezvous so concurrent
+            // or multi-Router turns agree on the same uncongested replica.
+            let idx = strategy::select_bounded_rendezvous(
+                &candidates,
+                session_seed.unwrap_or(0),
+                1,
+                self.prefix_tuning.owner_load_slack,
+            )
+            .unwrap_or(0);
+            candidates_data[idx].0.clone()
         } else {
             self.select_by_strategy(&sel_ctx, &candidates, &candidates_data)?
         };
+
+        if let Some(escaped_rid) = session_escaped_from {
+            if selected.replica_id != escaped_rid {
+                self.session_affinity_spillover_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
 
         if is_pd_split
             && pd_warm_stage
@@ -2124,10 +2365,77 @@ impl Router {
         Ok(candidates_data[sel.index].0.clone())
     }
 
+    fn has_lighter_peer_for_session(
+        &self,
+        model_uid: &str,
+        sticky_replica_id: u32,
+        sticky_role: ReplicaRole,
+        plan_version: Option<u64>,
+        exclude: Option<(&str, u32)>,
+        sticky_wait: u64,
+    ) -> bool {
+        let peer_ids: Vec<u32> = self
+            .endpoints
+            .iter()
+            .filter_map(|e| {
+                let ep = e.value();
+                if ep.model_uid != model_uid
+                    || ep.replica_id == sticky_replica_id
+                    || ep.status != EndpointStatus::Ready
+                    || ep.role != sticky_role
+                {
+                    return None;
+                }
+                if let Some(pv) = plan_version {
+                    if ep.plan_version != pv {
+                        return None;
+                    }
+                }
+                if let Some((ex_m, ex_r)) = exclude {
+                    if ep.model_uid == ex_m && ep.replica_id == ex_r {
+                        return None;
+                    }
+                }
+                Some(ep.replica_id)
+            })
+            .collect();
+
+        peer_ids.into_iter().any(|rid| {
+            if self.is_endpoint_circuit_open(model_uid, rid) {
+                return false;
+            }
+            let Some(st) = self.get_fresh_stats(model_uid, rid) else {
+                return false;
+            };
+            if st.kv_cache_usage.unwrap_or(0.0) >= KV_CACHE_OVERLOAD_THRESHOLD {
+                return false;
+            }
+            let peer_wait = st.waiting_requests.unwrap_or(st.pending_requests);
+            peer_wait.saturating_mul(2) < sticky_wait
+        })
+    }
+
     fn select_hint_biased_endpoint(
+        &self,
+        candidates: &[Candidate<'_>],
         candidates_data: &[(EndpointInfo, Option<EndpointStats>)],
         hint: &InferenceHint,
     ) -> Option<usize> {
+        // Explicit business prefix-key aggregation: pack onto the deterministic
+        // top-K Rendezvous subset for `prefer_prefix_key` within bounded load slack.
+        if let Some(ref pk) = hint.prefer_prefix_key {
+            let seed = strategy::seed_from_bytes(&[pk.as_bytes()]);
+            let max_owners = self.prefix_tuning.max_owners.max(1);
+            if let Some(idx) = strategy::select_bounded_rendezvous(
+                candidates,
+                seed,
+                max_owners,
+                self.prefix_tuning.owner_load_slack,
+            ) {
+                return Some(idx);
+            }
+        }
+
         let mut best: Option<(usize, f64)> = None;
         for (idx, (_, stats)) in candidates_data.iter().enumerate() {
             let mut score = 0.0_f64;
@@ -2137,9 +2445,6 @@ impl Router {
                 }
                 if hint.prefer_low_cost.unwrap_or(false) {
                     score += 1.0 - st.kv_cache_usage.unwrap_or(0.5).clamp(0.0, 1.0);
-                }
-                if hint.prefer_prefix_key.is_some() {
-                    score += st.prefix_cache_hit_rate.unwrap_or(0.0).clamp(0.0, 1.0) * 2.0;
                 }
             }
             if score > 0.0 {
@@ -3854,5 +4159,326 @@ mod sse_error_frame_tests {
             .unwrap()
             .get("error")
             .is_some());
+    }
+}
+
+#[cfg(test)]
+mod session_and_prefix_consolidation_tests {
+    use super::*;
+    use nebula_common::EndpointKind;
+
+    fn ready_ep(model: &str, replica_id: u32) -> EndpointInfo {
+        EndpointInfo {
+            model_uid: model.to_string(),
+            replica_id,
+            plan_version: 1,
+            node_id: format!("n{replica_id}"),
+            endpoint_kind: EndpointKind::NativeHttp,
+            api_flavor: "openai".to_string(),
+            status: EndpointStatus::Ready,
+            last_heartbeat_ms: 0,
+            status_detail: None,
+            grpc_target: None,
+            base_url: Some(format!("http://127.0.0.1:{}", 8000 + replica_id)),
+            engine_type: Some("vllm".to_string()),
+            role: ReplicaRole::Mixed,
+        }
+    }
+
+    fn session_ctx(tenant: Option<&str>, session: &str) -> ExecutionContext {
+        ExecutionContext {
+            request_id: "req".into(),
+            session_id: Some(session.to_string()),
+            tenant_id: tenant.map(str::to_string),
+            priority: None,
+            deadline_ms: None,
+            budget_tokens: None,
+            pinned_replica_id: None,
+            inference_hint: None,
+            hint_trusted: false,
+        }
+    }
+
+    #[test]
+    fn session_affinity_escapes_kv_overload_and_queue_congestion() {
+        let router = Router::new();
+        router.upsert_endpoint(ready_ep("ds-v41", 0));
+        router.upsert_endpoint(ready_ep("ds-v41", 1));
+
+        // Anchor `sess-1` onto replica 0.
+        router.insert_session_affinity_at(
+            session_key(Some("tenant-a"), "sess-1"),
+            "ds-v41".into(),
+            0,
+            now_ms(),
+        );
+        let now = now_ms();
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds-v41".into(),
+            replica_id: 0,
+            last_updated_ms: now,
+            pending_requests: 1,
+            waiting_requests: Some(0),
+            running_requests: Some(1),
+            kv_cache_usage: Some(0.40),
+            ..Default::default()
+        });
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds-v41".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 0,
+            waiting_requests: Some(0),
+            running_requests: Some(0),
+            kv_cache_usage: Some(0.10),
+            ..Default::default()
+        });
+
+        // Healthy sticky replica 0 is honored even when replica 1 has 0 pending.
+        let ctx = session_ctx(Some("tenant-a"), "sess-1");
+        let ep_sticky = router.route(&ctx, "ds-v41", None, false).unwrap();
+        assert_eq!(ep_sticky.replica_id, 0);
+        assert_eq!(router.session_affinity_hit_total(), 1);
+        assert_eq!(router.session_affinity_spillover_total(), 0);
+
+        // Peak-hour queue congestion on replica 0 (waiting = 10 >= DEFAULT_SESSION_MAX_WAITING = 8)
+        // while replica 1 is idle -> soft-escapes to replica 1 and re-anchors the session.
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds-v41".into(),
+            replica_id: 0,
+            last_updated_ms: now,
+            pending_requests: 14,
+            waiting_requests: Some(10),
+            running_requests: Some(4),
+            kv_cache_usage: Some(0.80),
+            ..Default::default()
+        });
+        let ep_escaped = router.route(&ctx, "ds-v41", None, false).unwrap();
+        assert_eq!(ep_escaped.replica_id, 1);
+        assert_eq!(router.session_affinity_spillover_total(), 1);
+
+        // Next turn is now anchored on replica 1; push replica 1 over KV 95% threshold ->
+        // escapes back to uncongested replica 0 rather than bypassing overload admission.
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds-v41".into(),
+            replica_id: 0,
+            last_updated_ms: now,
+            pending_requests: 0,
+            waiting_requests: Some(0),
+            running_requests: Some(0),
+            kv_cache_usage: Some(0.30),
+            ..Default::default()
+        });
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds-v41".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 2,
+            waiting_requests: Some(0),
+            running_requests: Some(2),
+            kv_cache_usage: Some(0.97),
+            ..Default::default()
+        });
+        let ep_kv_escaped = router.route(&ctx, "ds-v41", None, false).unwrap();
+        assert_eq!(ep_kv_escaped.replica_id, 0);
+        assert_eq!(router.session_affinity_spillover_total(), 2);
+    }
+
+    #[test]
+    fn session_affinity_evicts_oldest_accessed_and_stateless_routers_agree() {
+        // 1. Oldest-accessed (approximate LRU) eviction.
+        let router = Router::new();
+        let t0 = 1_000_000u64;
+        for i in 0..SESSION_AFFINITY_MAX_ENTRIES {
+            router.insert_session_affinity_at(
+                session_key(None, &format!("s-{i}")),
+                "ds".into(),
+                0,
+                t0 + (i as u64) + 10,
+            );
+        }
+        // Overwrite `s-42` as the oldest session (`t0`), then insert one new session ->
+        // `s-42` must be evicted while hot `s-4095` remains intact.
+        router.insert_session_affinity_at(session_key(None, "s-42"), "ds".into(), 0, t0);
+        router.insert_session_affinity_at(session_key(None, "s-new"), "ds".into(), 0, t0 + 99_999);
+        assert!(router
+            .session_affinity
+            .get(&session_key(None, "s-42"))
+            .is_none());
+        assert!(router
+            .session_affinity
+            .get(&session_key(None, "s-4095"))
+            .is_some());
+
+        // 2. Two independent stateless Router instances route the same `(tenant, session)`
+        // to the exact same replica on cold start.
+        let r_a = Router::new();
+        let r_b = Router::new();
+        for rid in 0..8 {
+            r_a.upsert_endpoint(ready_ep("ds", rid));
+            r_b.upsert_endpoint(ready_ep("ds", rid));
+        }
+        for s in 0..20 {
+            let ctx = session_ctx(Some("tenant-x"), &format!("conv-{s}"));
+            let a = r_a.route(&ctx, "ds", None, false).unwrap().replica_id;
+            let b = r_b.route(&ctx, "ds", None, false).unwrap().replica_id;
+            assert_eq!(a, b, "stateless routers disagreed on conv-{s}");
+        }
+    }
+
+    #[test]
+    fn sliding_window_preemption_penalty_recovers_after_window() {
+        let router = Router::with_strategy(Box::new(strategy::PrefixAffinity));
+        router.upsert_endpoint(ready_ep("ds", 0));
+        router.upsert_endpoint(ready_ep("ds", 1));
+
+        let h: [u8; 32] = [0xAB; 32];
+        let chain = vec![h.to_vec(); 4];
+        for rid in [0u32, 1u32] {
+            router.prefix_index().apply(
+                "ds",
+                rid,
+                &[kv_events::KvEvent::Stored {
+                    block_hashes: chain.clone(),
+                    medium: None,
+                }],
+                100,
+            );
+        }
+        let hashes: Vec<[u8; 32]> = vec![h; 4];
+        let ctx = ExecutionContext {
+            request_id: "r".into(),
+            ..Default::default()
+        };
+
+        let base_now = now_ms();
+        for rid in [0u32, 1u32] {
+            router.upsert_stats(EndpointStats {
+                model_uid: "ds".into(),
+                replica_id: rid,
+                last_updated_ms: base_now,
+                pending_requests: 0,
+                kv_cache_usage: Some(0.20),
+                num_preemptions_total: Some(0),
+                ..Default::default()
+            });
+        }
+        let primary = router
+            .route(&ctx, "ds", Some(&hashes), false)
+            .unwrap()
+            .replica_id;
+        let peer = 1 - primary;
+
+        // 1. Fresh baseline observation with historical `num_preemptions_total = 15`
+        // from yesterday must NOT permanently penalize `primary`.
+        router.remove_stats("ds", primary);
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds".into(),
+            replica_id: primary,
+            last_updated_ms: base_now,
+            pending_requests: 0,
+            kv_cache_usage: Some(0.20),
+            num_preemptions_total: Some(15),
+            ..Default::default()
+        });
+        assert_eq!(
+            router
+                .route(&ctx, "ds", Some(&hashes), false)
+                .unwrap()
+                .replica_id,
+            primary,
+            "historical lifetime preemptions on initial scrape must not penalize primary"
+        );
+
+        // 2. Active preemption increase (15 -> 17) within the 30s window penalizes `primary`
+        // (-32 tokens > 12-token Rendezvous rank gap) and routes to `peer`.
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds".into(),
+            replica_id: primary,
+            last_updated_ms: base_now,
+            pending_requests: 0,
+            kv_cache_usage: Some(0.20),
+            num_preemptions_total: Some(17),
+            ..Default::default()
+        });
+        assert_eq!(
+            router
+                .route(&ctx, "ds", Some(&hashes), false)
+                .unwrap()
+                .replica_id,
+            peer,
+            "active preemption delta must divert traffic to non-preempting peer"
+        );
+
+        // 3. Once the spike is older than `DEFAULT_PREEMPTION_WINDOW_MS` (30s) and the
+        // counter stays flat at 17, the penalty lifts and traffic returns to `primary`.
+        router.remove_stats("ds", primary);
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds".into(),
+            replica_id: primary,
+            last_updated_ms: base_now.saturating_sub(40_000),
+            pending_requests: 0,
+            kv_cache_usage: Some(0.20),
+            num_preemptions_total: Some(15),
+            ..Default::default()
+        });
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds".into(),
+            replica_id: primary,
+            last_updated_ms: base_now.saturating_sub(35_000),
+            pending_requests: 0,
+            kv_cache_usage: Some(0.20),
+            num_preemptions_total: Some(17),
+            ..Default::default()
+        });
+        router.upsert_stats(EndpointStats {
+            model_uid: "ds".into(),
+            replica_id: primary,
+            last_updated_ms: base_now,
+            pending_requests: 0,
+            kv_cache_usage: Some(0.20),
+            num_preemptions_total: Some(17),
+            ..Default::default()
+        });
+        assert_eq!(
+            router
+                .route(&ctx, "ds", Some(&hashes), false)
+                .unwrap()
+                .replica_id,
+            primary,
+            "preemption penalty must lift once sliding window expires with flat counter"
+        );
+    }
+
+    #[test]
+    fn prefer_prefix_key_hint_aggregates_onto_bounded_subset() {
+        let router = Router::new();
+        let now = now_ms();
+        for rid in 0..8 {
+            router.upsert_endpoint(ready_ep("ds", rid));
+            router.upsert_stats(EndpointStats {
+                model_uid: "ds".into(),
+                replica_id: rid,
+                last_updated_ms: now,
+                pending_requests: 0,
+                kv_cache_usage: Some(0.20),
+                ..Default::default()
+            });
+        }
+        let ctx = ExecutionContext {
+            request_id: "r".into(),
+            inference_hint: Some(InferenceHint {
+                prefer_prefix_key: Some("shared-system-v2".into()),
+                ..Default::default()
+            }),
+            hint_trusted: true,
+            ..Default::default()
+        };
+        let first = router.route(&ctx, "ds", None, false).unwrap().replica_id;
+        for _ in 0..10 {
+            let next = router.route(&ctx, "ds", None, false).unwrap().replica_id;
+            assert_eq!(next, first);
+        }
+        assert_eq!(router.prefix_hint_hit_total(), 11);
     }
 }

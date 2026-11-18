@@ -151,6 +151,10 @@ pub struct Metrics {
     pub queue_denied_full_total: AtomicU64,
     pub queue_denied_tenant_total: AtomicU64,
     pub queue_denied_timeout_total: AtomicU64,
+    /// Session ID resolutions by low-cardinality source (`header`, `fallback_header`, `body`).
+    pub session_extracted_header_total: AtomicU64,
+    pub session_extracted_fallback_header_total: AtomicU64,
+    pub session_extracted_body_total: AtomicU64,
     pub e2e_latency: ModelHistograms,
     pub ttft: ModelHistograms,
     pub tpot: ModelHistograms,
@@ -167,6 +171,23 @@ impl Metrics {
 
     pub fn observe_tpot(&self, model_uid: &str, seconds: f64) {
         observe_model_histogram(&self.tpot, TPOT_BOUNDS, model_uid, seconds);
+    }
+
+    pub fn record_session_extracted(&self, source: nebula_common::SessionIdSource) {
+        match source {
+            nebula_common::SessionIdSource::PrimaryHeader => {
+                self.session_extracted_header_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            nebula_common::SessionIdSource::FallbackHeader => {
+                self.session_extracted_fallback_header_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            nebula_common::SessionIdSource::BodyField => {
+                self.session_extracted_body_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     pub fn record_tenant_deny(&self, code: &str) {
@@ -334,6 +355,26 @@ pub fn render_metrics(metrics: &Metrics) -> String {
          nebula_gateway_request_too_large_total {}\n",
         metrics.request_too_large_total.load(Ordering::Relaxed),
     ));
+    body.push_str(
+        "# HELP nebula_gateway_session_id_extracted_total Session IDs resolved at Gateway ingress by source.\n\
+         # TYPE nebula_gateway_session_id_extracted_total counter\n",
+    );
+    body.push_str(&format!(
+        "nebula_gateway_session_id_extracted_total{{source=\"header\"}} {}\n",
+        metrics
+            .session_extracted_header_total
+            .load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_session_id_extracted_total{{source=\"fallback_header\"}} {}\n",
+        metrics
+            .session_extracted_fallback_header_total
+            .load(Ordering::Relaxed),
+    ));
+    body.push_str(&format!(
+        "nebula_gateway_session_id_extracted_total{{source=\"body\"}} {}\n",
+        metrics.session_extracted_body_total.load(Ordering::Relaxed),
+    ));
     body.push_str("# HELP nebula_gateway_upstream_error_total Upstream proxy errors by kind.\n# TYPE nebula_gateway_upstream_error_total counter\n");
     body.push_str(&format!(
         "nebula_gateway_upstream_error_total{{kind=\"connect\"}} {}\n",
@@ -473,6 +514,13 @@ pub fn render_router_metrics(router: &nebula_router::Router) -> String {
     );
     let _ = writeln!(
         body,
+        "# HELP nebula_router_session_affinity_spillover_total Sticky session turns that escaped an overloaded or congested anchor replica.\n\
+         # TYPE nebula_router_session_affinity_spillover_total counter\n\
+         nebula_router_session_affinity_spillover_total {}",
+        router.session_affinity_spillover_total()
+    );
+    let _ = writeln!(
+        body,
         "# HELP nebula_router_hint_total Hint lifecycle counters by stage.\n\
          # TYPE nebula_router_hint_total counter\n\
          nebula_router_hint_total{{stage=\"received\"}} {}\n\
@@ -511,6 +559,17 @@ pub fn render_router_metrics(router: &nebula_router::Router) -> String {
         let _ = writeln!(
             body,
             "nebula_router_saved_prefill_tokens_total{{model_uid=\"{model}\"}} {tokens}"
+        );
+    }
+    let _ = writeln!(
+        body,
+        "# HELP nebula_router_routed_prompt_tokens_total Tokenized prompt tokens evaluated on the routing path.\n\
+         # TYPE nebula_router_routed_prompt_tokens_total counter"
+    );
+    for (model, tokens) in router.routed_prompt_tokens_by_model() {
+        let _ = writeln!(
+            body,
+            "nebula_router_routed_prompt_tokens_total{{model_uid=\"{model}\"}} {tokens}"
         );
     }
     let _ = writeln!(

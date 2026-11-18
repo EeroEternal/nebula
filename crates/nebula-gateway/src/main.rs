@@ -303,6 +303,7 @@ async fn main() {
         bff_url: args.bff_url,
         tenant_admission,
         member_registry,
+        session_extract: nebula_common::SessionExtractConfig::from_env(),
     };
 
     // Engine queue capacity is a cluster budget too: keep it divided by the live

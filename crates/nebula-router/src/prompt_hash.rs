@@ -6,15 +6,13 @@
 //! chains the vLLM-compatible block hashes.
 //!
 //! Chat bodies (`/v1/chat/completions`) are rendered with the model's
-//! `chat_template` (from `tokenizer_config.json`) via mini-jinja — the same
-//! constructs transformers uses (`tojson`, `loop.first`, whitespace control)
-//! — then tokenized with `add_special_tokens=false`, exactly matching
-//! `tokenizer.apply_chat_template(messages, tokenize=True)`.
-//!
-//! shortcut: `chat_template_kwargs` per-request overrides and exotic
-//! template extensions are not rendered v1; mismatched renders just miss
-//! (visible via the strategy fallback counters). Upgrade if a model family
-//! needs them.
+//! `chat_template` (from `tokenizer_config.json`, precompiled once per model)
+//! via mini-jinja — including special tokens (`bos_token`, `eos_token`,
+//! `pad_token`, `unk_token`), `tojson`, Python string methods, whitespace
+//! control, and per-request `chat_template_kwargs` (such as `thinking` /
+//! `enable_thinking` / `reasoning_effort` on DeepSeek-V4.1-Flash & Qwen3) —
+//! then tokenized with `add_special_tokens=false`, matching
+//! `tokenizer.apply_chat_template(messages, tokenize=True, **kwargs)`.
 
 use std::sync::Arc;
 
@@ -23,12 +21,21 @@ use tokenizers::Tokenizer;
 
 use crate::kv_hash::{compute_block_hashes, DEFAULT_BLOCK_SIZE};
 
+struct CachedChatTemplate {
+    env: minijinja::Environment<'static>,
+    bos_token: Option<String>,
+    eos_token: Option<String>,
+    pad_token: Option<String>,
+    unk_token: Option<String>,
+}
+
 pub struct PromptHasher {
     dir: Option<String>,
     cache: DashMap<String, Option<Arc<Tokenizer>>>,
-    templates: DashMap<String, Option<Arc<String>>>,
+    templates: DashMap<String, Option<Arc<CachedChatTemplate>>>,
     block_size: usize,
     model_block_sizes: DashMap<String, usize>,
+    model_tokenizer_modes: DashMap<String, String>,
 }
 
 /// jinja2's `tojson`, which is what every HuggingFace chat template means by `| tojson`.
@@ -208,8 +215,36 @@ fn py_str_method(
     }
 }
 
-/// jinja2 environment as chat templates expect it: `tojson` plus Python string methods.
-fn chat_env(tpl: &str) -> Result<minijinja::Environment<'_>, minijinja::Error> {
+/// Built-in fallback template for `--tokenizer-mode deepseek_v41` when a repackaged
+/// model directory omits `chat_template` in `tokenizer_config.json`.
+const DEEPSEEK_V41_FALLBACK_TEMPLATE: &str = r#"{{- bos_token if bos_token is defined else '<｜begin▁of▁sentence｜>' -}}
+{%- for message in messages -%}
+{%- if message['role'] == 'system' and loop.first -%}
+{{- message['content'] -}}
+{%- elif message['role'] == 'user' -%}
+{{- '<｜User｜>' + message['content'] -}}
+{%- elif message['role'] == 'assistant' -%}
+{{- '<｜Assistant｜>' + message['content'] + (eos_token if eos_token is defined else '<｜end▁of▁sentence｜>') -}}
+{%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{%- if thinking is defined and not thinking -%}
+{{- '<｜Assistant｜></think>' -}}
+{%- else -%}
+{{- '<｜Assistant｜><think>\n' -}}
+{%- endif -%}
+{%- endif -%}"#;
+
+const CHATML_FALLBACK_TEMPLATE: &str = r#"{%- for message in messages -%}
+{{- '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+{{- '<|im_start|>assistant\n' -}}
+{%- endif -%}"#;
+
+/// Precompiled jinja2 environment (`'static`) as chat templates expect it:
+/// `tojson` filter plus Python string methods, compiled once per model.
+fn chat_env_owned(tpl: String) -> Result<minijinja::Environment<'static>, minijinja::Error> {
     let mut env = minijinja::Environment::new();
     env.add_filter("tojson", |v: minijinja::Value| py_json_dumps(&v));
     env.set_unknown_method_callback(|_, value, method, args| {
@@ -220,8 +255,102 @@ fn chat_env(tpl: &str) -> Result<minijinja::Environment<'_>, minijinja::Error> {
             ))
         })
     });
-    env.add_template("chat", tpl)?;
+    env.add_template_owned("chat", tpl)?;
     Ok(env)
+}
+
+#[cfg(test)]
+fn chat_env(tpl: &str) -> Result<minijinja::Environment<'static>, minijinja::Error> {
+    chat_env_owned(tpl.to_string())
+}
+
+fn extract_special_token(cfg: &serde_json::Value, key: &str) -> Option<String> {
+    match cfg.get(key)? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(obj) => obj
+            .get("content")
+            .and_then(|c| c.as_str())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn build_cached_template(
+    tpl: String,
+    bos_token: Option<String>,
+    eos_token: Option<String>,
+    pad_token: Option<String>,
+    unk_token: Option<String>,
+) -> Option<Arc<CachedChatTemplate>> {
+    let env = chat_env_owned(tpl).ok()?;
+    Some(Arc::new(CachedChatTemplate {
+        env,
+        bos_token,
+        eos_token,
+        pad_token,
+        unk_token,
+    }))
+}
+
+fn build_chat_render_context(
+    cached: &CachedChatTemplate,
+    body: &serde_json::Value,
+) -> Option<minijinja::Value> {
+    let messages = body.get("messages")?;
+    let mut ctx_map = serde_json::Map::new();
+    if let Some(ref bos) = cached.bos_token {
+        ctx_map.insert("bos_token".into(), serde_json::Value::String(bos.clone()));
+    }
+    if let Some(ref eos) = cached.eos_token {
+        ctx_map.insert("eos_token".into(), serde_json::Value::String(eos.clone()));
+    }
+    if let Some(ref pad) = cached.pad_token {
+        ctx_map.insert("pad_token".into(), serde_json::Value::String(pad.clone()));
+    }
+    if let Some(ref unk) = cached.unk_token {
+        ctx_map.insert("unk_token".into(), serde_json::Value::String(unk.clone()));
+    }
+    ctx_map.insert(
+        "add_generation_prompt".into(),
+        serde_json::Value::Bool(true),
+    );
+
+    // Unpack per-request `chat_template_kwargs` (e.g. DeepSeek-V4.1-Flash `thinking: false`,
+    // Qwen3 `enable_thinking: false`, `reasoning_effort`) matching vLLM / transformers.
+    if let Some(kwargs) = body
+        .get("chat_template_kwargs")
+        .or_else(|| body.pointer("/extra_body/chat_template_kwargs"))
+        .and_then(|v| v.as_object())
+    {
+        for (k, v) in kwargs {
+            ctx_map.insert(k.clone(), v.clone());
+        }
+    }
+    if !ctx_map.contains_key("reasoning_effort") {
+        if let Some(re) = body.get("reasoning_effort") {
+            if !re.is_null() {
+                ctx_map.insert("reasoning_effort".into(), re.clone());
+            }
+        }
+    }
+
+    // Core request fields always win over arbitrary kwargs.
+    ctx_map.insert("messages".into(), messages.clone());
+    ctx_map.insert(
+        "tools".into(),
+        body.get("tools")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    ctx_map.insert(
+        "documents".into(),
+        body.get("documents")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    );
+    Some(minijinja::Value::from_serialize(serde_json::Value::Object(
+        ctx_map,
+    )))
 }
 
 impl PromptHasher {
@@ -232,12 +361,13 @@ impl PromptHasher {
             templates: DashMap::new(),
             block_size: DEFAULT_BLOCK_SIZE,
             model_block_sizes: DashMap::new(),
+            model_tokenizer_modes: DashMap::new(),
         }
     }
 
     /// Register a model-specific prefix block granularity (e.g., 16 for standard
-    /// GQA, 64 for MLA / TokenSpeed Radix prefix granularity). Values of `0` are
-    /// ignored so division/chunking is always well-defined.
+    /// GQA, 64/128 for MLA / DeepSeek / TokenSpeed prefix granularity). Values of `0`
+    /// are ignored so division/chunking is always well-defined.
     pub fn set_model_block_size(&self, model_uid: &str, block_size: usize) {
         if block_size > 0 {
             self.model_block_sizes
@@ -247,6 +377,21 @@ impl PromptHasher {
 
     pub fn clear_model_block_size(&self, model_uid: &str) {
         self.model_block_sizes.remove(model_uid);
+    }
+
+    /// Register a model's declared `tokenizer_mode` (`"deepseek_v41"`, `"chatml"`, `"auto"`).
+    pub fn set_model_tokenizer_mode(&self, model_uid: &str, mode: &str) {
+        let trimmed = mode.trim();
+        if !trimmed.is_empty() {
+            self.model_tokenizer_modes
+                .insert(model_uid.to_string(), trimmed.to_string());
+            // Clear any cached `None` template entry so fallback resolution re-runs.
+            self.templates.retain(|k, _| !k.contains(model_uid));
+        }
+    }
+
+    pub fn clear_model_tokenizer_mode(&self, model_uid: &str) {
+        self.model_tokenizer_modes.remove(model_uid);
     }
 
     /// Effective prefix block size for `model_uid` (defaults to `DEFAULT_BLOCK_SIZE` = 16).
@@ -296,9 +441,14 @@ impl PromptHasher {
         loaded
     }
 
-    /// The model's chat template (`tokenizer_config.json`). A list of named
-    /// templates resolves to the one named "default" (transformers rule).
-    fn chat_template_for(&self, model_uid: &str, model_name: Option<&str>) -> Option<Arc<String>> {
+    /// The model's precompiled chat template & special tokens (`tokenizer_config.json`),
+    /// falling back to the declared `tokenizer_mode` (`deepseek_v41` / `chatml`) when
+    /// `tokenizer_config.json` omits `chat_template`.
+    fn chat_template_for(
+        &self,
+        model_uid: &str,
+        model_name: Option<&str>,
+    ) -> Option<Arc<CachedChatTemplate>> {
         #[cfg(test)]
         if let Some(hit) = self
             .templates
@@ -306,28 +456,66 @@ impl PromptHasher {
         {
             return hit.value().clone();
         }
+        let mode = self
+            .model_tokenizer_modes
+            .get(model_uid)
+            .map(|e| e.value().clone());
         let paths = self.candidate_paths(model_uid, model_name, "tokenizer_config.json");
-        let key = paths.first()?.clone();
-        if let Some(hit) = self.templates.get(&key) {
+        let cache_key = match (paths.first(), mode.as_deref()) {
+            (Some(p), Some(m)) => format!("{p}#{m}"),
+            (Some(p), None) => p.clone(),
+            (None, _) => return None,
+        };
+        if let Some(hit) = self.templates.get(&cache_key) {
             return hit.value().clone();
         }
-        let loaded = paths.iter().find_map(|p| {
-            let v: serde_json::Value =
-                serde_json::from_reader(std::fs::File::open(p).ok()?).ok()?;
-            match v.get("chat_template")? {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Array(a) => a
-                    .iter()
-                    .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("default"))
-                    .or_else(|| a.first())
-                    .and_then(|t| t.get("template"))?
-                    .as_str()
-                    .map(str::to_string),
-                _ => None,
+
+        let mut bos_token = None;
+        let mut eos_token = None;
+        let mut pad_token = None;
+        let mut unk_token = None;
+        let mut tpl_str: Option<String> = None;
+
+        for p in &paths {
+            let Ok(file) = std::fs::File::open(p) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_reader::<_, serde_json::Value>(file) else {
+                continue;
+            };
+            bos_token = extract_special_token(&v, "bos_token").or(bos_token);
+            eos_token = extract_special_token(&v, "eos_token").or(eos_token);
+            pad_token = extract_special_token(&v, "pad_token").or(pad_token);
+            unk_token = extract_special_token(&v, "unk_token").or(unk_token);
+            if let Some(raw_tpl) = v.get("chat_template") {
+                tpl_str = match raw_tpl {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Array(a) => a
+                        .iter()
+                        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("default"))
+                        .or_else(|| a.first())
+                        .and_then(|t| t.get("template"))
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string),
+                    _ => None,
+                };
+                if tpl_str.is_some() {
+                    break;
+                }
             }
-        });
-        let loaded = loaded.map(Arc::new);
-        self.templates.insert(key, loaded.clone());
+        }
+
+        if tpl_str.is_none() {
+            tpl_str = match mode.as_deref() {
+                Some("deepseek_v41") => Some(DEEPSEEK_V41_FALLBACK_TEMPLATE.to_string()),
+                Some("chatml") => Some(CHATML_FALLBACK_TEMPLATE.to_string()),
+                _ => None,
+            };
+        }
+
+        let loaded = tpl_str
+            .and_then(|tpl| build_cached_template(tpl, bos_token, eos_token, pad_token, unk_token));
+        self.templates.insert(cache_key, loaded.clone());
         loaded
     }
 
@@ -368,30 +556,19 @@ impl PromptHasher {
         Some(enc.get_ids().to_vec())
     }
 
-    /// Render a chat body (transformers-compatible subset) and return its
-    /// token ids (used by both block hashing and LMCache controller lookup).
+    /// Render a chat body (transformers-compatible subset + special tokens +
+    /// `chat_template_kwargs`) using the model's precompiled template and return
+    /// its token ids (used by both block hashing and LMCache controller lookup).
     pub fn chat_ids(
         &self,
         model_uid: &str,
         model_name: Option<&str>,
         body: &serde_json::Value,
     ) -> Option<Vec<u32>> {
-        let messages = body.get("messages")?;
         let tk = self.tokenizer_for(model_uid, model_name)?;
-        let tpl = self.chat_template_for(model_uid, model_name)?;
-
-        let env = chat_env(tpl.as_str()).ok()?;
-        // Context mirrors transformers apply_chat_template; chat_template_kwargs
-        // per-request overrides are not supported v1 (shortcut).
-        let ctx = minijinja::Value::from_serialize(serde_json::json!({
-            "messages": messages,
-            "add_generation_prompt": true,
-            "tools": body.get("tools").cloned().unwrap_or(serde_json::Value::Null),
-            "documents": body.get("documents")
-                .cloned()
-                .unwrap_or(serde_json::Value::Null),
-        }));
-        let rendered = env.get_template("chat").ok()?.render(ctx).ok()?;
+        let cached = self.chat_template_for(model_uid, model_name)?;
+        let ctx = build_chat_render_context(&cached, body)?;
+        let rendered = cached.env.get_template("chat").ok()?.render(ctx).ok()?;
         // apply_chat_template tokenizes the rendered string with
         // add_special_tokens=false (special tokens come from the template).
         let enc = tk.encode(rendered.as_str(), false).ok()?;
@@ -399,8 +576,7 @@ impl PromptHasher {
     }
 
     /// Render a chat body (transformers-compatible subset) and chain its
-    /// block hashes. The context mirrors `apply_chat_template`:
-    /// `messages`, `add_generation_prompt`, `tools` when present.
+    /// block hashes using the model's configured block size.
     #[cfg(test)]
     pub fn chat_hashes(
         &self,
@@ -409,18 +585,37 @@ impl PromptHasher {
         body: &serde_json::Value,
     ) -> Option<Vec<[u8; 32]>> {
         let ids = self.chat_ids(model_uid, model_name, body)?;
-        Some(self.hashes_from_ids(&ids))
+        Some(self.hashes_from_ids_for_model(model_uid, &ids))
     }
 
     #[cfg(test)]
     pub(crate) fn seed_for_test(&self, model_uid: &str, tk: Tokenizer, tpl: &str) {
+        self.seed_for_test_with_tokens(model_uid, tk, tpl, None, None);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_for_test_with_tokens(
+        &self,
+        model_uid: &str,
+        tk: Tokenizer,
+        tpl: &str,
+        bos_token: Option<&str>,
+        eos_token: Option<&str>,
+    ) {
         self.cache.insert(
             format!("__test__/{model_uid}/tokenizer.json"),
             Some(Arc::new(tk)),
         );
+        let cached = build_cached_template(
+            tpl.to_string(),
+            bos_token.map(str::to_string),
+            eos_token.map(str::to_string),
+            None,
+            None,
+        );
         self.templates.insert(
             format!("__test__/{model_uid}/tokenizer_config.json"),
-            Some(Arc::new(tpl.to_string())),
+            cached,
         );
     }
 }
@@ -533,11 +728,78 @@ mod tests {
             templates: DashMap::new(),
             block_size: 16,
             model_block_sizes: DashMap::new(),
+            model_tokenizer_modes: DashMap::new(),
         };
         assert!(h.prompt_hashes("m", Some("org/model"), "hello").is_none());
         assert!(h
             .chat_hashes("m", None, &serde_json::json!({"messages": []}))
             .is_none());
+    }
+
+    #[test]
+    fn deepseek_v41_bos_token_and_thinking_kwargs_align_render() {
+        let cached = build_cached_template(
+            DEEPSEEK_V41_FALLBACK_TEMPLATE.to_string(),
+            Some("<｜begin▁of▁sentence｜>".to_string()),
+            Some("<｜end▁of▁sentence｜>".to_string()),
+            None,
+            None,
+        )
+        .expect("compile deepseek_v41 template");
+
+        // Default thinking=true -> opens `<think>\n`
+        let body_think = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "13*17?"}
+            ]
+        });
+        let ctx_think = build_chat_render_context(&cached, &body_think).unwrap();
+        let out_think = cached
+            .env
+            .get_template("chat")
+            .unwrap()
+            .render(ctx_think)
+            .unwrap();
+        assert_eq!(
+            out_think,
+            "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>13*17?<｜Assistant｜><think>\n"
+        );
+
+        // Per-request `chat_template_kwargs: {"thinking": false}` -> closes `</think>`,
+        // while preserving the exact `<｜begin▁of▁sentence｜>` token-0 alignment on the prefix.
+        let body_no_think = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "13*17?"}
+            ],
+            "chat_template_kwargs": {"thinking": false}
+        });
+        let ctx_no_think = build_chat_render_context(&cached, &body_no_think).unwrap();
+        let out_no_think = cached
+            .env
+            .get_template("chat")
+            .unwrap()
+            .render(ctx_no_think)
+            .unwrap();
+        assert_eq!(
+            out_no_think,
+            "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>13*17?<｜Assistant｜></think>"
+        );
+
+        // AddedToken object extraction (`{"content": "..."}`) matches string form.
+        let cfg = serde_json::json!({
+            "bos_token": {"__type": "AddedToken", "content": "<｜begin▁of▁sentence｜>"},
+            "eos_token": "<｜end▁of▁sentence｜>"
+        });
+        assert_eq!(
+            extract_special_token(&cfg, "bos_token").as_deref(),
+            Some("<｜begin▁of▁sentence｜>")
+        );
+        assert_eq!(
+            extract_special_token(&cfg, "eos_token").as_deref(),
+            Some("<｜end▁of▁sentence｜>")
+        );
     }
 
     #[test]

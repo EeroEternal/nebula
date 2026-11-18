@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         retry_max,
         retry_backoff_ms,
         auth,
+        session_extract: nebula_common::SessionExtractConfig::from_env(),
     };
 
     // Routes that require auth (inference endpoints)

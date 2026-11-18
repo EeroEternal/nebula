@@ -325,6 +325,15 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
         ));
     }
     body.push_str(
+        "# HELP nebula_router_routed_prompt_tokens_total Tokenized prompt tokens evaluated on the routing path (denominator for sliding-window hit rate).\n\
+         # TYPE nebula_router_routed_prompt_tokens_total counter\n",
+    );
+    for (model, tokens) in st.router.routed_prompt_tokens_by_model() {
+        body.push_str(&format!(
+            "nebula_router_routed_prompt_tokens_total{{model_uid=\"{model}\"}} {tokens}\n"
+        ));
+    }
+    body.push_str(
         "# HELP nebula_router_affinity_hit_total Affinity/hint hits by kind.\n\
          # TYPE nebula_router_affinity_hit_total counter\n",
     );
@@ -335,6 +344,12 @@ pub async fn metrics_handler(State(st): State<AppState>) -> impl IntoResponse {
     body.push_str(&format!(
         "nebula_router_affinity_hit_total{{kind=\"prefix_hint\"}} {}\n",
         st.router.prefix_hint_hit_total(),
+    ));
+    body.push_str(&format!(
+        "# HELP nebula_router_session_affinity_spillover_total Sticky session turns that escaped an overloaded or congested anchor replica.\n\
+         # TYPE nebula_router_session_affinity_spillover_total counter\n\
+         nebula_router_session_affinity_spillover_total {}\n",
+        st.router.session_affinity_spillover_total(),
     ));
     body.push_str(&format!(
         "# HELP nebula_router_prefix_index_entries Live prefix-index entries (KV-event routing hints).\n\
