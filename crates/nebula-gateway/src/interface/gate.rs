@@ -108,10 +108,13 @@ pub async fn resolve_engine_type_from_snapshot(
     if model.is_empty() {
         return None;
     }
+    // Acquire `synced` BEFORE reading the snapshot so `synced == true` strictly
+    // happens-after `replace_all_model_specs` populated the map (no TOCTOU miss).
+    let models_synced = snapshot.is_models_synced();
     if let Some(engine) = snapshot.get_engine_type(model).await {
         return Some(engine);
     }
-    if snapshot.is_models_synced() {
+    if models_synced {
         return None;
     }
     resolve_engine_type_for_model(store, Some(model)).await

@@ -65,9 +65,12 @@ pub async fn prepare_upstream(
             // Once synced, `None` is authoritative (zero etcd I/O on nonexistent tenants).
             // Only fall back to etcd during cold boot before the initial snapshot completes,
             // and never write back into `meta_snapshot` (single-writer: `gateway_tenants_sync_loop`).
+            // Acquire `synced` BEFORE reading the snapshot so that `synced == true`
+            // strictly happens-after `replace_all_tenants` populated the map (no TOCTOU miss).
+            let tenants_synced = st.meta_snapshot.is_tenants_synced();
             let tenant = match st.meta_snapshot.get_tenant(tenant_id).await {
                 Some(t) => Some(t),
-                None if st.meta_snapshot.is_tenants_synced() => None,
+                None if tenants_synced => None,
                 None => {
                     let mut attempts = 0;
                     let tenant_result = loop {

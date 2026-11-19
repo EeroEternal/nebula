@@ -105,6 +105,12 @@ impl GatewayMetaSnapshot {
     pub async fn wait_initial_sync(&self, timeout: Duration) -> (bool, bool) {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
+            // Register the waiter BEFORE checking flags so `notify_waiters()` cannot
+            // be missed between the check and awaiting (no lost wakeup).
+            let notified = self.sync_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
             let t = self.is_tenants_synced();
             let m = self.is_models_synced();
             if t && m {
@@ -114,7 +120,7 @@ impl GatewayMetaSnapshot {
             if remaining.is_zero() {
                 return (t, m);
             }
-            let _ = tokio::time::timeout(remaining, self.sync_notify.notified()).await;
+            let _ = tokio::time::timeout(remaining, notified).await;
         }
     }
 
