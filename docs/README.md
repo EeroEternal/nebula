@@ -1,6 +1,6 @@
 # Nebula 文档索引
 
-当前发布：**[v1.10.0](versions/v1.10.0.md)**。
+当前发布：**[v1.11.0](versions/v1.11.0.md)**。
 
 ## 产品与运维（`manual/`）
 
@@ -18,6 +18,7 @@
 
 | 文档 | 说明 |
 |------|------|
+| [`versions/v1.11.0.md`](versions/v1.11.0.md) | v1.11.0 集群动态配额分片、Gateway 热路径快照、TokenSpeed/zstep 纳管、KV 资源化与前缀聚合路由 |
 | [`versions/v1.10.0.md`](versions/v1.10.0.md) | v1.10.0 有界公平准入、单模型多副本、多引擎对齐与 replica_specs 放置 |
 | [`versions/v1.9.2.md`](versions/v1.9.2.md) | v1.9.2 前端 console-kit lint 规则落地与本地 CI 门禁收敛 |
 | [`versions/v1.9.1.md`](versions/v1.9.1.md) | v1.9.1 文档边界澄清（PowerLLM 兼容层定位）与 Admin 安装脚本修复 |

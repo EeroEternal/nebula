@@ -2,7 +2,7 @@
 
 Nebula is a cross-engine control and data plane for on-prem / private-GPU inference. It owns declarative model lifecycle, an OpenAI- and Anthropic-compatible ingress, a programmatic `/platform/v1` control API, state-aware routing, admission control, multi-tenancy and quotas, observability, benchmarking and selection governance. The engines — **vLLM, SGLang, TokenSpeed, zstep** — keep doing the token work; Nebula orchestrates black boxes and never touches engine internals, KV bytes or per-step scheduling.
 
-- **Current release:** workspace `1.10.0` (last tag [`v1.10.0`](docs/versions/v1.10.0.md), 2026-09-22). Work merged after that tag lives under `Unreleased` in [CHANGELOG.md](CHANGELOG.md).
+- **Current release:** workspace `1.11.0` (last tag [`v1.11.0`](docs/versions/v1.11.0.md), 2026-11-19). Work merged after that tag lives under `Unreleased` in [CHANGELOG.md](CHANGELOG.md).
 - **Project docs are currently written in Chinese;** [docs/README.md](docs/README.md) is the single index. This README is the English entry point.
 - **License:** Apache-2.0.
 
