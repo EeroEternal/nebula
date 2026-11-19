@@ -75,8 +75,8 @@ pub fn unsupported_score_response(engine_type: Option<&str>) -> Response {
     )
 }
 
-/// Look up model spec engine_type from etcd (`/models/{uid}/spec`), resolving
-/// an omitted `engine_type` on an existing `ModelSpec` to `DEFAULT_ENGINE_TYPE` (`"vllm"`).
+/// Look up model spec engine_type from in-memory snapshot, or fallback to etcd (`/models/{uid}/spec`),
+/// resolving an omitted `engine_type` on an existing `ModelSpec` to `DEFAULT_ENGINE_TYPE` (`"vllm"`).
 pub async fn resolve_engine_type_for_model(
     store: &dyn MetaStore,
     model: Option<&str>,
@@ -97,8 +97,51 @@ pub async fn resolve_engine_type_for_model(
     }
 }
 
+/// Look up model spec engine_type from the in-memory snapshot first (hot-path Rule #8).
+pub async fn resolve_engine_type_from_snapshot(
+    snapshot: &crate::sync::GatewayMetaSnapshot,
+    store: &dyn MetaStore,
+    model: Option<&str>,
+) -> Option<String> {
+    let model = model?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    if let Some(engine) = snapshot.get_engine_type(model).await {
+        return Some(engine);
+    }
+    resolve_engine_type_for_model(store, Some(model)).await
+}
+
 /// If the body requests tools, enforce `tool_calling` capability.
 /// Returns `Some(Response)` to short-circuit; `None` to continue.
+pub async fn check_tooling_gate_snapshot(
+    snapshot: &crate::sync::GatewayMetaSnapshot,
+    store: &dyn MetaStore,
+    payload: &Value,
+    model: Option<&str>,
+) -> Option<Response> {
+    if !request_has_tools(payload) {
+        return None;
+    }
+    let engine_type = resolve_engine_type_from_snapshot(snapshot, store, model).await;
+    let level = tool_calling_for_engine(engine_type.as_deref());
+    match tooling_gate_decision(level) {
+        ToolingGate::Allow => None,
+        ToolingGate::AllowWithWarn => {
+            tracing::warn!(
+                model = model.unwrap_or(""),
+                engine_type = engine_type.as_deref().unwrap_or(""),
+                "tool_calling capability unknown; allowing request"
+            );
+            None
+        }
+        ToolingGate::Deny => Some(unsupported_tooling_response(engine_type.as_deref())),
+    }
+}
+
+/// Legacy check_tooling_gate for backwards compatibility or standalone calls.
+#[allow(dead_code)]
 pub async fn check_tooling_gate(
     store: &dyn MetaStore,
     payload: &Value,
@@ -124,8 +167,31 @@ pub async fn check_tooling_gate(
 }
 
 /// Enforce `score_api` capability on `POST /v1/score` (Batch 5.4).
+#[allow(dead_code)]
 pub async fn check_score_gate(store: &dyn MetaStore, model: Option<&str>) -> Option<Response> {
     let engine_type = resolve_engine_type_for_model(store, model).await;
+    let level = score_api_for_engine(engine_type.as_deref());
+    match tooling_gate_decision(level) {
+        ToolingGate::Allow => None,
+        ToolingGate::AllowWithWarn => {
+            tracing::warn!(
+                model = model.unwrap_or(""),
+                engine_type = engine_type.as_deref().unwrap_or(""),
+                "score_api capability unknown; allowing request"
+            );
+            None
+        }
+        ToolingGate::Deny => Some(unsupported_score_response(engine_type.as_deref())),
+    }
+}
+
+/// Enforce `score_api` capability using the in-memory snapshot first.
+pub async fn check_score_gate_snapshot(
+    snapshot: &crate::sync::GatewayMetaSnapshot,
+    store: &dyn MetaStore,
+    model: Option<&str>,
+) -> Option<Response> {
+    let engine_type = resolve_engine_type_from_snapshot(snapshot, store, model).await;
     let level = score_api_for_engine(engine_type.as_deref());
     match tooling_gate_decision(level) {
         ToolingGate::Allow => None,

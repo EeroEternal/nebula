@@ -17,7 +17,7 @@ use crate::tenant::{admit_static, AdmitDecision, Tenant, TenantDenyCode, TenantQ
 struct TenantLive {
     rps_window_start: Option<Instant>,
     rps_count: u64,
-    concurrency: u64,
+    concurrency: Arc<AtomicU64>,
     token_window_start: Option<Instant>,
     token_count: u64,
     pin_window_start: Option<Instant>,
@@ -80,20 +80,16 @@ impl Default for TenantAdmission {
 }
 
 pub struct ConcurrencyGuard {
-    admission: TenantAdmission,
-    tenant_id: String,
+    concurrency: Arc<AtomicU64>,
 }
 
 impl Drop for ConcurrencyGuard {
     fn drop(&mut self) {
-        let admission = self.admission.clone();
-        let tenant_id = self.tenant_id.clone();
-        tokio::spawn(async move {
-            let mut guard = admission.inner.lock().await;
-            if let Some(live) = guard.get_mut(&tenant_id) {
-                live.concurrency = live.concurrency.saturating_sub(1);
-            }
-        });
+        let _ = self
+            .concurrency
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+                Some(val.saturating_sub(1))
+            });
     }
 }
 
@@ -180,8 +176,10 @@ impl TenantAdmission {
             live.rps_count += 1;
         }
 
+        let concurrency_arc = live.concurrency.clone();
         if let Some(limit) = quotas.max_concurrency {
-            if live.concurrency >= limit {
+            let current = concurrency_arc.load(Ordering::SeqCst);
+            if current >= limit {
                 return Err(TenantDenyCode::ConcurrencyExceeded);
             }
         }
@@ -195,10 +193,9 @@ impl TenantAdmission {
             live.token_count = live.token_count.saturating_add(add);
         }
 
-        live.concurrency += 1;
+        concurrency_arc.fetch_add(1, Ordering::SeqCst);
         Ok(ConcurrencyGuard {
-            admission: self.clone(),
-            tenant_id: tenant.tenant_id.clone(),
+            concurrency: concurrency_arc,
         })
     }
 
@@ -298,8 +295,6 @@ mod tests {
                 Some(TenantDenyCode::ConcurrencyExceeded)
             );
         }
-        // Allow Drop's spawned task to run.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         adm.try_admit(&t, None, 0).await.expect("after drop");
     }
 

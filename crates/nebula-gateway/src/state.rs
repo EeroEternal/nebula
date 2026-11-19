@@ -7,6 +7,7 @@ use nebula_meta::EtcdMetaStore;
 use crate::audit::AuditWriter;
 use crate::metrics::Metrics;
 use crate::platform_auth::GatewayAuth;
+use crate::sync::GatewayMetaSnapshot;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -39,6 +40,8 @@ pub struct AppState {
     #[allow(dead_code)] // retained for BFF reverse-linking from platform routes
     pub bff_url: String,
     pub tenant_admission: TenantAdmission,
+    /// In-memory reactive snapshot for hot-path tenant & model spec resolution (AGENTS.md Rule #8).
+    pub meta_snapshot: GatewayMetaSnapshot,
     /// `/gateways/` lease registry, present unless the divisor is pinned
     /// (`NEBULA_GATEWAY_QUOTA_MEMBERS`). Used for shutdown deregistration.
     pub member_registry: Option<Arc<crate::quota_members::MemberRegistry>>,

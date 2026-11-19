@@ -14,6 +14,7 @@ mod proxy_common;
 mod quota_members;
 mod responses;
 mod state;
+mod sync;
 mod util;
 
 use std::sync::Arc;
@@ -281,6 +282,20 @@ async fn main() {
         args.common.xtrace_token.as_deref(),
     );
 
+    let meta_snapshot = sync::GatewayMetaSnapshot::new();
+    let (s_tenants, snap_tenants) = (store.clone(), meta_snapshot.clone());
+    tokio::spawn(async move {
+        if let Err(e) = sync::gateway_tenants_sync_loop(s_tenants, snap_tenants).await {
+            tracing::error!(error=%e, "gateway tenants sync loop exited");
+        }
+    });
+    let (s_models, snap_models) = (store.clone(), meta_snapshot.clone());
+    tokio::spawn(async move {
+        if let Err(e) = sync::gateway_models_sync_loop(s_models, snap_models).await {
+            tracing::error!(error=%e, "gateway models sync loop exited");
+        }
+    });
+
     let st = AppState {
         _noop: Arc::new(()),
         router_base_url,
@@ -302,6 +317,7 @@ async fn main() {
         xtrace_token: args.common.xtrace_token.clone(),
         bff_url: args.bff_url,
         tenant_admission,
+        meta_snapshot,
         member_registry,
         session_extract: nebula_common::SessionExtractConfig::from_env(),
     };
