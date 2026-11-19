@@ -58,7 +58,7 @@ if [ -f frontend/package.json ]; then
   if [ ! -d frontend/node_modules ]; then
     (cd frontend && npm ci --no-audit --no-fund)
   fi
-  (cd frontend && npx tsc -b --noEmit && npm run lint && npm run build)
+  (cd frontend && npx tsc -b --noEmit && npm run lint && npm test && npm run build)
 else
   echo "frontend/package.json not found; skipping frontend gate"
 fi

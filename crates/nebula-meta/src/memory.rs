@@ -187,3 +187,125 @@ impl MetaStore for MemoryMetaStore {
         Ok(Box::pin(stream))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::StreamExt;
+
+    #[tokio::test]
+    async fn put_get_delete_and_prefix_snapshot_boundaries() {
+        let store = MemoryMetaStore::new();
+        assert!(store.get("/a/1").await.unwrap().is_none());
+
+        let r1 = store
+            .put("/models/m1/spec", b"v1".to_vec(), None)
+            .await
+            .unwrap();
+        let r2 = store
+            .put("/models/m2/spec", b"v2".to_vec(), None)
+            .await
+            .unwrap();
+        let _r3 = store
+            .put("/models_extra/x", b"other".to_vec(), None)
+            .await
+            .unwrap();
+        assert!(r2 > r1);
+
+        let (v, rev) = store.get("/models/m1/spec").await.unwrap().unwrap();
+        assert_eq!(v, b"v1");
+        assert_eq!(rev, r1);
+
+        let (snap, snap_rev) = store.list_prefix_snapshot("/models/").await.unwrap();
+        assert_eq!(snap.len(), 2);
+        assert_eq!(snap[0].0, "/models/m1/spec");
+        assert_eq!(snap[1].0, "/models/m2/spec");
+        assert!(snap_rev >= r2);
+
+        store.delete("/models/m1/spec").await.unwrap();
+        assert!(store.get("/models/m1/spec").await.unwrap().is_none());
+        let listed = store.list_prefix("/models/").await.unwrap();
+        assert_eq!(listed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compare_and_swap_and_guarded_atomicity() {
+        let store = MemoryMetaStore::new();
+
+        // Create succeeds only with expected_revision == 0.
+        let (ok, rev1) = store
+            .compare_and_swap("/placements/m1", 0, b"plan1".to_vec())
+            .await
+            .unwrap();
+        assert!(ok);
+        assert_eq!(rev1, 1);
+
+        // Stale revision 0 fails and returns current revision.
+        let (ok_dup, cur) = store
+            .compare_and_swap("/placements/m1", 0, b"plan_stale".to_vec())
+            .await
+            .unwrap();
+        assert!(!ok_dup);
+        assert_eq!(cur, rev1);
+
+        // Guarded CAS fails if any guard key's revision mismatches, leaving target untouched.
+        let (_, guard_rev) = store
+            .compare_and_swap("/models/m1/spec", 0, b"spec1".to_vec())
+            .await
+            .unwrap();
+        let (ok_bad_guard, _) = store
+            .compare_and_swap_guarded(
+                "/placements/m1",
+                rev1,
+                b"plan2".to_vec(),
+                &[("/models/m1/spec".to_string(), guard_rev + 99)],
+            )
+            .await
+            .unwrap();
+        assert!(!ok_bad_guard);
+        assert_eq!(
+            store.get("/placements/m1").await.unwrap().unwrap().0,
+            b"plan1"
+        );
+
+        // Matching guard commits atomically.
+        let (ok_good_guard, rev2) = store
+            .compare_and_swap_guarded(
+                "/placements/m1",
+                rev1,
+                b"plan2".to_vec(),
+                &[("/models/m1/spec".to_string(), guard_rev)],
+            )
+            .await
+            .unwrap();
+        assert!(ok_good_guard);
+        assert!(rev2 > rev1);
+        assert_eq!(
+            store.get("/placements/m1").await.unwrap().unwrap().0,
+            b"plan2"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_prefix_filters_prefix_and_revision_and_skips_missing_delete() {
+        let store = MemoryMetaStore::new();
+        let r1 = store.put("/tenants/t1", b"1".to_vec(), None).await.unwrap();
+
+        let mut stream = store.watch_prefix("/tenants/", Some(r1)).await.unwrap();
+
+        // Unrelated prefix and deleting a nonexistent key must not emit.
+        store.put("/models/m1", b"x".to_vec(), None).await.unwrap();
+        store.delete("/tenants/missing").await.unwrap();
+        let r_t2 = store.put("/tenants/t2", b"2".to_vec(), None).await.unwrap();
+        store.delete("/tenants/t1").await.unwrap();
+
+        let ev1 = stream.next().await.unwrap();
+        assert_eq!(ev1.key, "/tenants/t2");
+        assert_eq!(ev1.value.as_deref(), Some(b"2".as_slice()));
+        assert_eq!(ev1.revision, r_t2);
+
+        let ev2 = stream.next().await.unwrap();
+        assert_eq!(ev2.key, "/tenants/t1");
+        assert!(ev2.value.is_none());
+    }
+}
