@@ -69,7 +69,7 @@ function extractLocaleMessages(filePath) {
 }
 
 function extractPlaceholders(str) {
-  const matches = str.match(/\{[a-zA-Z0-9_]+\}/g) || []
+  const matches = str.match(/\{\{[a-zA-Z0-9_]+\}\}|\{[a-zA-Z0-9_]+\}/g) || []
   return [...new Set(matches)].sort()
 }
 

@@ -291,8 +291,15 @@ mod tests {
         let store = MemoryMetaStore::new();
         let r1 = store.put("/tenants/t1", b"1".to_vec(), None).await.unwrap();
 
-        let mut stream = store.watch_prefix("/tenants/", Some(r1)).await.unwrap();
+        // Cutoff is r1 + 1: the next write (revision == r1 + 1) must be filtered
+        // by `ev.revision <= min_rev`, while `r1 + 2` is delivered.
+        let mut stream = store.watch_prefix("/tenants/", Some(r1 + 1)).await.unwrap();
 
+        // Filtered by revision cutoff (revision == r1 + 1).
+        store
+            .put("/tenants/filtered", b"old".to_vec(), None)
+            .await
+            .unwrap();
         // Unrelated prefix and deleting a nonexistent key must not emit.
         store.put("/models/m1", b"x".to_vec(), None).await.unwrap();
         store.delete("/tenants/missing").await.unwrap();
