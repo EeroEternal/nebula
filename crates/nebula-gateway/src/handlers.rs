@@ -156,16 +156,16 @@ async fn acquire_queue_permit(
                 .model
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
-            let is_continuation = st
-                .router
-                .as_ref()
-                .map(|r| {
-                    r.is_tool_continuation_for_tenant(
-                        prepared.ctx.tenant_id.as_deref(),
-                        prepared.ctx.session_id.as_deref(),
-                    )
-                })
-                .unwrap_or(false);
+            let is_continuation = match st.router.as_ref() {
+                Some(r) => r.is_tool_continuation_for_tenant(
+                    prepared.ctx.tenant_id.as_deref(),
+                    prepared.ctx.session_id.as_deref(),
+                ),
+                None => st.tool_pause.claim_continuation(
+                    prepared.ctx.tenant_id.as_deref(),
+                    prepared.ctx.session_id.as_deref(),
+                ),
+            };
             match queues
                 .for_model(&model)
                 .acquire_with_priority(prepared.ctx.tenant_id.as_deref(), is_continuation)
@@ -238,6 +238,7 @@ async fn proxy_chat_as_responses(
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
+        let tool_pause_for_stream = st.tool_pause.clone();
         let model_for_metrics = routed_endpoint
             .as_ref()
             .map(|(m, _)| m.clone())
@@ -327,20 +328,17 @@ async fn proxy_chat_as_responses(
                                                 name,
                                                 arguments,
                                             } => {
-                                                if !tool_pause_marked {
-                                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                                if !tool_pause_marked
+                                                    && session_id.as_deref().is_some()
+                                                {
+                                                    crate::tool_pause::record_tool_pause(
                                                         router_for_stream.as_ref(),
+                                                        &tool_pause_for_stream,
+                                                        tenant_id.as_deref(),
                                                         session_id.as_deref(),
                                                         routed_endpoint.as_ref(),
-                                                    ) {
-                                                        router.mark_tool_pause_for_tenant(
-                                                            tenant_id.as_deref(),
-                                                            sid,
-                                                            m,
-                                                            *r,
-                                                        );
-                                                        tool_pause_marked = true;
-                                                    }
+                                                    );
+                                                    tool_pause_marked = true;
                                                 }
                                                 for ev in builder.push_tool_call_delta(
                                                     index, id, name, arguments,
@@ -354,20 +352,18 @@ async fn proxy_chat_as_responses(
                                                 }
                                             }
                                             OpenAiStreamChunk::FinishReason(reason) => {
-                                                if !tool_pause_marked && reason == "tool_calls" {
-                                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                                if !tool_pause_marked
+                                                    && reason == "tool_calls"
+                                                    && session_id.as_deref().is_some()
+                                                {
+                                                    crate::tool_pause::record_tool_pause(
                                                         router_for_stream.as_ref(),
+                                                        &tool_pause_for_stream,
+                                                        tenant_id.as_deref(),
                                                         session_id.as_deref(),
                                                         routed_endpoint.as_ref(),
-                                                    ) {
-                                                        router.mark_tool_pause_for_tenant(
-                                                            tenant_id.as_deref(),
-                                                            sid,
-                                                            m,
-                                                            *r,
-                                                        );
-                                                        tool_pause_marked = true;
-                                                    }
+                                                    );
+                                                    tool_pause_marked = true;
                                                 }
                                             }
                                             OpenAiStreamChunk::Ignored => {}
@@ -409,14 +405,14 @@ async fn proxy_chat_as_responses(
         .or(builder_seed.model.as_deref())
         .unwrap_or("unknown");
     st.metrics.observe_e2e_latency(model_for_metrics, elapsed);
-    if let (Some(router), Some(sid), Some((m, r))) = (
-        st.router.as_ref(),
-        session_id.as_deref(),
-        routed_endpoint.as_ref(),
-    ) {
-        if nebula_router::response_has_tool_calls(&bytes) {
-            router.mark_tool_pause_for_tenant(tenant_id.as_deref(), sid, m, *r);
-        }
+    if session_id.as_deref().is_some() && nebula_router::response_has_tool_calls(&bytes) {
+        crate::tool_pause::record_tool_pause(
+            st.router.as_ref(),
+            &st.tool_pause,
+            tenant_id.as_deref(),
+            session_id.as_deref(),
+            routed_endpoint.as_ref(),
+        );
     }
     let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
     let text = openai
@@ -508,6 +504,7 @@ async fn proxy_chat_as_anthropic(
         let (tx, rx) = mpsc::channel::<Result<Event, Infallible>>(256);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
+        let tool_pause_for_stream = st.tool_pause.clone();
         let model = requested_model.clone();
         let model_for_metrics = routed_endpoint
             .as_ref()
@@ -609,20 +606,15 @@ async fn proxy_chat_as_anthropic(
                                                 }
                                                 _ => false,
                                             };
-                                            if is_tool {
-                                                if let (Some(router), Some(sid), Some((m, r))) = (
+                                            if is_tool && session_id.as_deref().is_some() {
+                                                crate::tool_pause::record_tool_pause(
                                                     router_for_stream.as_ref(),
+                                                    &tool_pause_for_stream,
+                                                    tenant_id.as_deref(),
                                                     session_id.as_deref(),
                                                     routed_endpoint.as_ref(),
-                                                ) {
-                                                    router.mark_tool_pause_for_tenant(
-                                                        tenant_id.as_deref(),
-                                                        sid,
-                                                        m,
-                                                        *r,
-                                                    );
-                                                    tool_pause_marked = true;
-                                                }
+                                                );
+                                                tool_pause_marked = true;
                                             }
                                         }
                                         let is_done =
@@ -691,14 +683,14 @@ async fn proxy_chat_as_anthropic(
         .map(|(m, _)| m.as_str())
         .unwrap_or(&requested_model);
     st.metrics.observe_e2e_latency(model_for_metrics, elapsed);
-    if let (Some(router), Some(sid), Some((m, r))) = (
-        st.router.as_ref(),
-        session_id.as_deref(),
-        routed_endpoint.as_ref(),
-    ) {
-        if nebula_router::response_has_tool_calls(&bytes) {
-            router.mark_tool_pause_for_tenant(tenant_id.as_deref(), sid, m, *r);
-        }
+    if session_id.as_deref().is_some() && nebula_router::response_has_tool_calls(&bytes) {
+        crate::tool_pause::record_tool_pause(
+            st.router.as_ref(),
+            &st.tool_pause,
+            tenant_id.as_deref(),
+            session_id.as_deref(),
+            routed_endpoint.as_ref(),
+        );
     }
     let openai: Value = serde_json::from_slice(&bytes).unwrap_or(json!({}));
     let anth = openai_chat_json_to_anthropic(&openai, &requested_model);

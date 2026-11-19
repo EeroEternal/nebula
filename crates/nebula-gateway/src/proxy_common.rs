@@ -404,6 +404,7 @@ pub async fn forward_upstream_response(
         let (tx, rx) = mpsc::channel::<Result<Bytes, Infallible>>(64);
         let metrics = st.metrics.clone();
         let router_for_stream = st.router.clone();
+        let tool_pause_for_stream = st.tool_pause.clone();
         let tenant_for_stream = tenant_id.map(|s| s.to_string());
         let session_for_stream = session_id.map(|s| s.to_string());
         let routed_for_stream = routed_endpoint.clone();
@@ -451,22 +452,18 @@ pub async fn forward_upstream_response(
                                     }
                                 }
                                 decode_tracker.feed(&b);
-                                if !tool_pause_marked {
-                                    if let (Some(router), Some(sid), Some((m, r))) = (
+                                if !tool_pause_marked
+                                    && session_for_stream.is_some()
+                                    && tool_scanner.feed(&b)
+                                {
+                                    crate::tool_pause::record_tool_pause(
                                         router_for_stream.as_ref(),
+                                        &tool_pause_for_stream,
+                                        tenant_for_stream.as_deref(),
                                         session_for_stream.as_deref(),
                                         routed_for_stream.as_ref(),
-                                    ) {
-                                        if tool_scanner.feed(&b) {
-                                            router.mark_tool_pause_for_tenant(
-                                                tenant_for_stream.as_deref(),
-                                                sid,
-                                                m,
-                                                *r,
-                                            );
-                                            tool_pause_marked = true;
-                                        }
-                                    }
+                                    );
+                                    tool_pause_marked = true;
                                 }
                                 if tx.send(Ok(b)).await.is_err() {
                                     aborted = true;
@@ -560,12 +557,14 @@ pub async fn forward_upstream_response(
                 .observe_e2e_latency(m, req_t0.elapsed().as_secs_f64());
         }
     }
-    if let (Some(router), Some(sid), Some((m, r))) =
-        (st.router.as_ref(), session_id, routed_endpoint.as_ref())
-    {
-        if nebula_router::response_has_tool_calls(&bytes) {
-            router.mark_tool_pause_for_tenant(tenant_id, sid, m, *r);
-        }
+    if session_id.is_some() && nebula_router::response_has_tool_calls(&bytes) {
+        crate::tool_pause::record_tool_pause(
+            st.router.as_ref(),
+            &st.tool_pause,
+            tenant_id,
+            session_id,
+            routed_endpoint.as_ref(),
+        );
     }
     if let Some(normalized) = maybe_normalize_router_error(status, &bytes) {
         return normalized;

@@ -8,6 +8,7 @@ use crate::audit::AuditWriter;
 use crate::metrics::Metrics;
 use crate::platform_auth::GatewayAuth;
 use crate::sync::GatewayMetaSnapshot;
+use crate::tool_pause::ToolPauseTracker;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -42,6 +43,8 @@ pub struct AppState {
     pub tenant_admission: TenantAdmission,
     /// In-memory reactive snapshot for hot-path tenant & model spec resolution (AGENTS.md Rule #8).
     pub meta_snapshot: GatewayMetaSnapshot,
+    /// Local Tool-Pause continuation tracker used in `remote` router mode.
+    pub tool_pause: ToolPauseTracker,
     /// `/gateways/` lease registry, present unless the divisor is pinned
     /// (`NEBULA_GATEWAY_QUOTA_MEMBERS`). Used for shutdown deregistration.
     pub member_registry: Option<Arc<crate::quota_members::MemberRegistry>>,

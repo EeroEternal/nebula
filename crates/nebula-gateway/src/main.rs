@@ -15,6 +15,7 @@ mod quota_members;
 mod responses;
 mod state;
 mod sync;
+mod tool_pause;
 mod util;
 
 use std::sync::Arc;
@@ -328,6 +329,7 @@ async fn main() {
         bff_url: args.bff_url,
         tenant_admission,
         meta_snapshot,
+        tool_pause: tool_pause::ToolPauseTracker::default(),
         member_registry,
         session_extract: nebula_common::SessionExtractConfig::from_env(),
     };
