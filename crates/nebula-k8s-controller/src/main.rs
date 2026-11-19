@@ -788,7 +788,22 @@ fn build_engine_pod_manifest(p: &EnginePodSpec<'_>) -> serde_json::Value {
     // PYTHONHASHSEED is unset) and the algo pinned to sha256_cbor (default
     // "sha256" is pickle-based, not reproducible outside Python).
     let mut kv_hash_seed: Option<String> = None;
-    if !is_sglang && !is_tokenspeed && !is_zstep {
+    if is_zstep {
+        if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
+            let endpoint = endpoint.trim();
+            if !endpoint.is_empty() {
+                let seed =
+                    std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string());
+                if let Some(arr) = args.as_array_mut() {
+                    arr.push(json!("--kv-events-endpoint"));
+                    arr.push(json!(endpoint));
+                    arr.push(json!("--kv-events-topic"));
+                    arr.push(json!(format!("{model_uid}/{replica_id}")));
+                }
+                kv_hash_seed = Some(seed);
+            }
+        }
+    } else if !is_sglang && !is_tokenspeed {
         if let Ok(endpoint) = std::env::var("NEBULA_KV_EVENTS_ENDPOINT") {
             let seed = std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string());
             if let Some(arr) = args.as_array_mut() {
@@ -872,6 +887,9 @@ fn build_engine_pod_manifest(p: &EnginePodSpec<'_>) -> serde_json::Value {
     if let Some(seed) = kv_hash_seed.as_deref() {
         if let Some(envs) = container["env"].as_array_mut() {
             envs.push(json!({ "name": "PYTHONHASHSEED", "value": seed }));
+            if is_zstep {
+                envs.push(json!({ "name": "NEBULA_KV_HASH_SEED", "value": seed }));
+            }
         }
     }
     if let Some(envs) = container["env"].as_array_mut() {

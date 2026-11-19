@@ -1631,4 +1631,62 @@ mod tests {
         assert_eq!(snap_gen, 1);
         assert_eq!(snap, vec![(0, vec![vec![0xaa; 8]])]);
     }
+
+    #[test]
+    fn zstep_kv_events_msgpack_and_hash_parity_routes_and_evicts() {
+        // Matches `zstep::zs_kv::kv_hash` + `zstep::zs_server::serve::kv_events` wire format:
+        // [ts_f64, [{"type": "BlockStored", "block_hashes": [bin_8], "medium": "GPU"}]]
+        let idx = PrefixIndex::new();
+        let tokens: Vec<u32> = vec![
+            37, 57610, 37611, 9934, 11, 7722, 1467, 1549, 11, 24132, 279, 4734, 1852, 15870, 17, 20,
+        ];
+        let full_hashes = crate::kv_hash::compute_block_hashes(&tokens, 16);
+        assert_eq!(full_hashes.len(), 1);
+        let ext8 = crate::kv_hash::external(&full_hashes[0]);
+        assert_eq!(u64::from_be_bytes(ext8), 1_015_703_622_044_383_654_u64);
+
+        let stored_batch = Value::Array(vec![
+            Value::F64(1_700_000_000.0),
+            Value::Array(vec![Value::Map(vec![
+                (Value::from("type"), Value::from("BlockStored")),
+                (
+                    Value::from("block_hashes"),
+                    Value::Array(vec![Value::Binary(ext8.to_vec())]),
+                ),
+                (Value::from("medium"), Value::from("GPU")),
+            ])]),
+        ]);
+        let mut stored_payload = Vec::new();
+        rmpv::encode::write_value(&mut stored_payload, &stored_batch).unwrap();
+
+        // Exercise the exact 3-frame ZMQ wire format ([topic, seq_u64_be, payload]) via
+        // `ingest_and_stamp_frames`, matching `kv_events_loop` / `kv_sink_loop`.
+        let mut stored_frames = vec![
+            bytes::Bytes::from("zstep-dsv41/3"),
+            bytes::Bytes::from(1u64.to_be_bytes().to_vec()),
+            bytes::Bytes::from(stored_payload),
+        ];
+        let (_epoch, _gen) = idx.ingest_and_stamp_frames(&mut stored_frames);
+        assert_eq!(idx.lookup("zstep-dsv41", &full_hashes), Some(3));
+
+        let removed_batch = Value::Array(vec![
+            Value::F64(1_700_000_001.0),
+            Value::Array(vec![Value::Map(vec![
+                (Value::from("type"), Value::from("BlockRemoved")),
+                (
+                    Value::from("block_hashes"),
+                    Value::Array(vec![Value::Binary(ext8.to_vec())]),
+                ),
+            ])]),
+        ]);
+        let mut removed_payload = Vec::new();
+        rmpv::encode::write_value(&mut removed_payload, &removed_batch).unwrap();
+        let mut removed_frames = vec![
+            bytes::Bytes::from("zstep-dsv41/3"),
+            bytes::Bytes::from(2u64.to_be_bytes().to_vec()),
+            bytes::Bytes::from(removed_payload),
+        ];
+        let _ = idx.ingest_and_stamp_frames(&mut removed_frames);
+        assert_eq!(idx.lookup("zstep-dsv41", &full_hashes), None);
+    }
 }
