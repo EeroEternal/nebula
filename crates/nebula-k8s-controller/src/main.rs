@@ -3,9 +3,10 @@
 //! Reconciles etcd `/deployments/{model_uid}` with in-cluster Kubernetes Pods
 //! and registers Ready endpoints to `/endpoints/{model_uid}/{replica_id}`.
 
+mod kubectl;
+
 use clap::Parser;
 use serde_json::json;
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -344,30 +345,13 @@ async fn cleanup_extra_replicas(
     model_uid: &str,
     replicas: u32,
 ) -> anyhow::Result<()> {
-    let out = Command::new("kubectl")
-        .args([
-            "-n",
-            namespace,
-            "get",
-            "pods",
-            "-l",
-            &format!("nebula.model_uid={model_uid}"),
-            "-o",
-            "jsonpath={range .items[*]}{.metadata.name}{\"\\n\"}{end}",
-        ])
-        .output();
-    let Ok(out) = out else { return Ok(()) };
-    if !out.status.success() {
+    let names = kubectl::list_model_pods(namespace, model_uid).await;
+    if names.is_empty() {
         return Ok(());
     }
 
     let base = format!("nebula-{model_uid}");
-    let names = String::from_utf8_lossy(&out.stdout).to_string();
-    for name in names.lines() {
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
+    for name in names {
         let replica_id = if name == base {
             0
         } else if let Some(suffix) = name.strip_prefix(&format!("{base}-")) {
@@ -380,9 +364,7 @@ async fn cleanup_extra_replicas(
         };
         if replica_id >= replicas {
             tracing::info!(pod = %name, replica_id, "deleting extra replica (scale-down)");
-            let _ = Command::new("kubectl")
-                .args(["-n", namespace, "delete", "pod", name, "--wait=false"])
-                .output();
+            kubectl::delete_pod_nowait(namespace, &name).await;
             let _ = store
                 .delete(&format!("/endpoints/{model_uid}/{replica_id}"))
                 .await;
@@ -461,31 +443,7 @@ async fn ensure_replica_running(
         .unwrap_or("vllm");
 
     // Check if pod exists
-    let status_output = Command::new("kubectl")
-        .args([
-            "-n",
-            namespace,
-            "get",
-            "pod",
-            &pod_name,
-            "-o",
-            "jsonpath={.status.phase}:{.status.podIP}:{.metadata.annotations.nebula\\.config\\.hash}",
-        ])
-        .output();
-
-    let mut phase = String::new();
-    let mut pod_ip = String::new();
-    let mut pod_config_hash = String::new();
-
-    if let Ok(out) = status_output {
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let mut parts = s.split(':');
-            phase = parts.next().unwrap_or_default().to_string();
-            pod_ip = parts.next().unwrap_or_default().to_string();
-            pod_config_hash = parts.next().unwrap_or_default().to_string();
-        }
-    }
+    let (phase, pod_ip, pod_config_hash) = kubectl::get_pod_status(namespace, &pod_name).await;
 
     // Config fingerprint: role / kv_sharing / image / engine changes must
     // recreate the pod, otherwise a running engine keeps stale launch config
@@ -558,9 +516,7 @@ async fn ensure_replica_running(
     // apply. Delete now; the next reconcile tick creates the fresh pod.
     if config_changed && !phase.is_empty() {
         tracing::info!(pod = %pod_name, "deleting pod for config adoption; will recreate next tick");
-        let _ = Command::new("kubectl")
-            .args(["-n", namespace, "delete", "pod", &pod_name, "--wait=false"])
-            .output();
+        kubectl::delete_pod_nowait(namespace, &pod_name).await;
         return Ok(());
     }
 
@@ -579,7 +535,8 @@ async fn ensure_replica_running(
             role,
             kv_sharing: dep.kv_sharing.as_ref(),
             config_hash: desired_hash.clone(),
-        })?;
+        })
+        .await?;
     }
 
     if is_running && !pod_ip.is_empty() {
@@ -685,9 +642,7 @@ async fn ensure_model_stopped(
             .await;
 
         let pod_name = replica_pod_name(model_uid, replica_id);
-        let _ = Command::new("kubectl")
-            .args(["-n", namespace, "delete", "pod", &pod_name, "--wait=false"])
-            .output();
+        kubectl::delete_pod_nowait(namespace, &pod_name).await;
     }
     Ok(())
 }
@@ -970,30 +925,9 @@ fn build_engine_pod_manifest(p: &EnginePodSpec<'_>) -> serde_json::Value {
     })
 }
 
-fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
+async fn create_engine_pod(p: EnginePodSpec<'_>) -> anyhow::Result<()> {
     let manifest = build_engine_pod_manifest(&p);
-
-    let manifest_str = serde_json::to_string(&manifest)?;
-    let mut child = Command::new("kubectl")
-        .args(["apply", "-f", "-"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        stdin.write_all(manifest_str.as_bytes())?;
-    }
-
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        tracing::error!(
-            stderr=%String::from_utf8_lossy(&out.stderr),
-            "failed to apply kubectl manifest"
-        );
-    }
-
-    Ok(())
+    kubectl::apply_manifest(&manifest).await
 }
 
 #[cfg(test)]
