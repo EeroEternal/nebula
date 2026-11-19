@@ -295,6 +295,16 @@ async fn main() {
             tracing::error!(error=%e, "gateway models sync loop exited");
         }
     });
+    let (tenants_ready, models_ready) = meta_snapshot
+        .wait_initial_sync(Duration::from_secs(2))
+        .await;
+    if !tenants_ready || !models_ready {
+        tracing::warn!(
+            tenants_ready,
+            models_ready,
+            "gateway metadata snapshot initial sync timed out; cold-start fallback active until synced"
+        );
+    }
 
     let st = AppState {
         _noop: Arc::new(()),

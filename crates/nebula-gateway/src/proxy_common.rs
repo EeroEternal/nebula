@@ -62,9 +62,12 @@ pub async fn prepare_upstream(
     let _conc_guard = if st.auth.env.multi_tenant {
         if let Some(ref tenant_id) = ctx.tenant_id {
             // Read tenant from in-memory reactive snapshot (Rule #8: hot path reads /endpoints/ only).
-            // Falls back to direct store lookup with single-retry if not yet populated during cold startup.
+            // Once synced, `None` is authoritative (zero etcd I/O on nonexistent tenants).
+            // Only fall back to etcd during cold boot before the initial snapshot completes,
+            // and never write back into `meta_snapshot` (single-writer: `gateway_tenants_sync_loop`).
             let tenant = match st.meta_snapshot.get_tenant(tenant_id).await {
                 Some(t) => Some(t),
+                None if st.meta_snapshot.is_tenants_synced() => None,
                 None => {
                     let mut attempts = 0;
                     let tenant_result = loop {
@@ -79,23 +82,33 @@ pub async fn prepare_upstream(
                         }
                     };
                     match tenant_result {
-                        Ok(t) => {
-                            if let Some(ref found) = t {
-                                st.meta_snapshot.upsert_tenant(found.clone()).await;
-                            }
-                            t
-                        }
+                        Ok(t) => t,
                         Err(e) => {
                             st.metrics
                                 .tenant_lookup_failed_total
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            tracing::warn!(
-                                error=%e,
-                                tenant_id=%tenant_id,
-                                attempts,
-                                "tenant lookup failed; serving without quota (counted)"
-                            );
-                            None
+                            match st.tenant_admission.degrade_policy() {
+                                nebula_common::admission::DegradePolicy::FailClosed => {
+                                    tracing::warn!(
+                                        error=%e,
+                                        tenant_id=%tenant_id,
+                                        attempts,
+                                        "tenant lookup failed before initial sync; denying per fail_closed policy"
+                                    );
+                                    let code = TenantDenyCode::QuotaUnavailable;
+                                    st.metrics.record_tenant_deny(code.as_str());
+                                    return Err(deny_response(code));
+                                }
+                                nebula_common::admission::DegradePolicy::FailOpen => {
+                                    tracing::warn!(
+                                        error=%e,
+                                        tenant_id=%tenant_id,
+                                        attempts,
+                                        "tenant lookup failed before initial sync; serving without quota per fail_open policy (counted)"
+                                    );
+                                    None
+                                }
+                            }
                         }
                     }
                 }

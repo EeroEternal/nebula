@@ -19,7 +19,7 @@ use nebula_meta::MetaStore;
 
 use crate::auth::AuthContext;
 use crate::interface::{
-    anthropic_json_to_openai_chat, check_score_gate_snapshot, check_tooling_gate_snapshot,
+    anthropic_json_to_openai_chat, check_score_gate, check_tooling_gate,
     maybe_normalize_router_error, openai_chat_json_to_anthropic, parse_openai_sse_chunk,
     payload_too_large_response, responses_json_to_openai_chat, upstream_transport_error,
     AnthropicSseMapper, OpenAiStreamChunk,
@@ -53,7 +53,7 @@ pub async fn create_responses(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     if let Some(deny) =
-        check_tooling_gate_snapshot(&st.meta_snapshot, &*st.store, &payload, model.as_deref()).await
+        check_tooling_gate(&st.meta_snapshot, &*st.store, &payload, model.as_deref()).await
     {
         return deny;
     }
@@ -109,7 +109,7 @@ pub async fn create_anthropic_messages(
         .unwrap_or("unknown")
         .to_string();
 
-    if let Some(deny) = check_tooling_gate_snapshot(
+    if let Some(deny) = check_tooling_gate(
         &st.meta_snapshot,
         &*st.store,
         &payload,
@@ -742,21 +742,15 @@ pub async fn proxy_post(
                 .get("model")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            if let Some(deny) = check_tooling_gate_snapshot(
-                &st.meta_snapshot,
-                &*st.store,
-                &payload,
-                model.as_deref(),
-            )
-            .await
+            if let Some(deny) =
+                check_tooling_gate(&st.meta_snapshot, &*st.store, &payload, model.as_deref()).await
             {
                 return deny;
             }
         }
     } else if uri_path.ends_with("/v1/score") {
         let model = nebula_common::peek_json_model_field(&body_bytes);
-        if let Some(deny) =
-            check_score_gate_snapshot(&st.meta_snapshot, &*st.store, model.as_deref()).await
+        if let Some(deny) = check_score_gate(&st.meta_snapshot, &*st.store, model.as_deref()).await
         {
             return deny;
         }

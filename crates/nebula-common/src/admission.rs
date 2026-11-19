@@ -87,7 +87,7 @@ impl Drop for ConcurrencyGuard {
     fn drop(&mut self) {
         let _ = self
             .concurrency
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |val| {
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |val| {
                 Some(val.saturating_sub(1))
             });
     }
@@ -119,6 +119,11 @@ impl TenantAdmission {
     pub fn with_degrade_policy(mut self, policy: DegradePolicy) -> Self {
         self.degrade = policy;
         self
+    }
+
+    /// Configured degradation policy when cluster quota state is unverifiable.
+    pub fn degrade_policy(&self) -> DegradePolicy {
+        self.degrade
     }
 
     /// Requests served under a degraded (untrusted) membership view.
@@ -173,12 +178,11 @@ impl TenantAdmission {
             if live.rps_count >= limit {
                 return Err(TenantDenyCode::RpsExceeded);
             }
-            live.rps_count += 1;
         }
 
         let concurrency_arc = live.concurrency.clone();
         if let Some(limit) = quotas.max_concurrency {
-            let current = concurrency_arc.load(Ordering::SeqCst);
+            let current = concurrency_arc.load(Ordering::Acquire);
             if current >= limit {
                 return Err(TenantDenyCode::ConcurrencyExceeded);
             }
@@ -190,10 +194,16 @@ impl TenantAdmission {
             if live.token_count.saturating_add(add) > limit {
                 return Err(TenantDenyCode::TokenBudgetExceeded);
             }
-            live.token_count = live.token_count.saturating_add(add);
         }
 
-        concurrency_arc.fetch_add(1, Ordering::SeqCst);
+        // All checks passed: commit counters atomically under the lock.
+        if quotas.rps_per_minute.is_some() {
+            live.rps_count += 1;
+        }
+        if quotas.max_tokens_per_minute.is_some() {
+            live.token_count = live.token_count.saturating_add(estimated_tokens as u64);
+        }
+        concurrency_arc.fetch_add(1, Ordering::AcqRel);
         Ok(ConcurrencyGuard {
             concurrency: concurrency_arc,
         })
@@ -296,6 +306,25 @@ mod tests {
             );
         }
         adm.try_admit(&t, None, 0).await.expect("after drop");
+    }
+
+    #[tokio::test]
+    async fn concurrency_guard_drops_safely_outside_tokio_runtime() {
+        let adm = TenantAdmission::new();
+        let t = tenant(100, 1);
+        let guard = adm.try_admit(&t, None, 0).await.unwrap();
+        assert_eq!(
+            adm.try_admit(&t, None, 0).await.err(),
+            Some(TenantDenyCode::ConcurrencyExceeded)
+        );
+        // Drop on a plain OS thread with no Tokio runtime context: must not panic
+        // and must release the slot immediately.
+        std::thread::spawn(move || drop(guard))
+            .join()
+            .expect("drop outside tokio runtime must not panic");
+        adm.try_admit(&t, None, 0)
+            .await
+            .expect("slot released after non-tokio drop");
     }
 
     #[tokio::test]

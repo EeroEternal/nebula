@@ -75,7 +75,7 @@ pub fn unsupported_score_response(engine_type: Option<&str>) -> Response {
     )
 }
 
-/// Look up model spec engine_type from in-memory snapshot, or fallback to etcd (`/models/{uid}/spec`),
+/// Cold-start fallback: look up model spec `engine_type` directly from etcd (`/models/{uid}/spec`),
 /// resolving an omitted `engine_type` on an existing `ModelSpec` to `DEFAULT_ENGINE_TYPE` (`"vllm"`).
 pub async fn resolve_engine_type_for_model(
     store: &dyn MetaStore,
@@ -97,7 +97,8 @@ pub async fn resolve_engine_type_for_model(
     }
 }
 
-/// Look up model spec engine_type from the in-memory snapshot first (hot-path Rule #8).
+/// Look up model spec `engine_type` from the in-memory snapshot (hot-path Rule #8).
+/// Once `/models/` has completed initial sync, a miss is authoritative and never queries etcd.
 pub async fn resolve_engine_type_from_snapshot(
     snapshot: &crate::sync::GatewayMetaSnapshot,
     store: &dyn MetaStore,
@@ -110,12 +111,15 @@ pub async fn resolve_engine_type_from_snapshot(
     if let Some(engine) = snapshot.get_engine_type(model).await {
         return Some(engine);
     }
+    if snapshot.is_models_synced() {
+        return None;
+    }
     resolve_engine_type_for_model(store, Some(model)).await
 }
 
 /// If the body requests tools, enforce `tool_calling` capability.
 /// Returns `Some(Response)` to short-circuit; `None` to continue.
-pub async fn check_tooling_gate_snapshot(
+pub async fn check_tooling_gate(
     snapshot: &crate::sync::GatewayMetaSnapshot,
     store: &dyn MetaStore,
     payload: &Value,
@@ -140,53 +144,8 @@ pub async fn check_tooling_gate_snapshot(
     }
 }
 
-/// Legacy check_tooling_gate for backwards compatibility or standalone calls.
-#[allow(dead_code)]
-pub async fn check_tooling_gate(
-    store: &dyn MetaStore,
-    payload: &Value,
-    model: Option<&str>,
-) -> Option<Response> {
-    if !request_has_tools(payload) {
-        return None;
-    }
-    let engine_type = resolve_engine_type_for_model(store, model).await;
-    let level = tool_calling_for_engine(engine_type.as_deref());
-    match tooling_gate_decision(level) {
-        ToolingGate::Allow => None,
-        ToolingGate::AllowWithWarn => {
-            tracing::warn!(
-                model = model.unwrap_or(""),
-                engine_type = engine_type.as_deref().unwrap_or(""),
-                "tool_calling capability unknown; allowing request"
-            );
-            None
-        }
-        ToolingGate::Deny => Some(unsupported_tooling_response(engine_type.as_deref())),
-    }
-}
-
 /// Enforce `score_api` capability on `POST /v1/score` (Batch 5.4).
-#[allow(dead_code)]
-pub async fn check_score_gate(store: &dyn MetaStore, model: Option<&str>) -> Option<Response> {
-    let engine_type = resolve_engine_type_for_model(store, model).await;
-    let level = score_api_for_engine(engine_type.as_deref());
-    match tooling_gate_decision(level) {
-        ToolingGate::Allow => None,
-        ToolingGate::AllowWithWarn => {
-            tracing::warn!(
-                model = model.unwrap_or(""),
-                engine_type = engine_type.as_deref().unwrap_or(""),
-                "score_api capability unknown; allowing request"
-            );
-            None
-        }
-        ToolingGate::Deny => Some(unsupported_score_response(engine_type.as_deref())),
-    }
-}
-
-/// Enforce `score_api` capability using the in-memory snapshot first.
-pub async fn check_score_gate_snapshot(
+pub async fn check_score_gate(
     snapshot: &crate::sync::GatewayMetaSnapshot,
     store: &dyn MetaStore,
     model: Option<&str>,
@@ -245,5 +204,76 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let score_resp = unsupported_score_response(Some("mock"));
         assert_eq!(score_resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn synced_snapshot_never_falls_back_to_store_on_miss_or_alias_hit() {
+        use nebula_common::{ModelConfig, ModelSource};
+        use nebula_meta::MemoryMetaStore;
+
+        // Seed a model ONLY in the MetaStore, NOT in the synced snapshot.
+        let store = MemoryMetaStore::new();
+        let store_only_spec = ModelSpec {
+            model_uid: "store-only".into(),
+            model_name: "store-only".into(),
+            model_source: ModelSource::Local,
+            model_path: None,
+            engine_type: Some("mock".into()),
+            docker_image: None,
+            config: None,
+            labels: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            created_by: None,
+        };
+        store
+            .put(
+                "/models/store-only/spec",
+                serde_json::to_vec(&store_only_spec).unwrap(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let snap = crate::sync::GatewayMetaSnapshot::new();
+        // Before initial sync, cold-start fallback reads from store.
+        assert_eq!(
+            resolve_engine_type_from_snapshot(&snap, &store, Some("store-only"))
+                .await
+                .as_deref(),
+            Some("mock")
+        );
+
+        // Once synced, snapshot is authoritative: `store-only` is NOT in snapshot so it
+        // must NOT query store (returns None), while `served-alias` resolves purely from snapshot.
+        let snap_spec = ModelSpec {
+            model_uid: "uid-1".into(),
+            model_name: "name-1".into(),
+            model_source: ModelSource::Local,
+            model_path: None,
+            engine_type: Some("sglang".into()),
+            docker_image: None,
+            config: Some(ModelConfig {
+                served_model_name: Some("served-alias".into()),
+                ..Default::default()
+            }),
+            labels: Default::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            created_by: None,
+        };
+        snap.replace_all_model_specs(vec![snap_spec]).await;
+
+        assert_eq!(
+            resolve_engine_type_from_snapshot(&snap, &store, Some("store-only")).await,
+            None,
+            "synced snapshot miss must not fall back to etcd"
+        );
+        assert_eq!(
+            resolve_engine_type_from_snapshot(&snap, &store, Some("served-alias"))
+                .await
+                .as_deref(),
+            Some("sglang")
+        );
     }
 }
