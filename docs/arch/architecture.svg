@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 600" width="1120" height="600" role="img" aria-labelledby="nebula-arch-title nebula-arch-desc">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 632" width="1120" height="632" role="img" aria-labelledby="nebula-arch-title nebula-arch-desc">
   <title id="nebula-arch-title">Nebula Architecture</title>
-  <desc id="nebula-arch-desc">Simplified architecture diagram of Nebula showing Data Plane (Gateway and Router), Control Plane (Console, BFF, PostgreSQL, etcd, Scheduler, Observe), and Execution Plane with Zone C inference engines (vLLM, SGLang, TokenSpeed, zstep).</desc>
+  <desc id="nebula-arch-desc">Simplified architecture diagram of Nebula showing Data Plane (Gateway and Router), Control Plane (Console, BFF, PostgreSQL, etcd, Scheduler, Observe), and Execution Plane managing 1..N black-box engine replicas (vLLM, SGLang, TokenSpeed, zstep).</desc>
 
   <defs>
     <style>
@@ -15,7 +15,8 @@
       .box-sub { font-size: 11.5px; font-weight: 450; fill: #475569; }
       .box-code { font-size: 10.8px; font-weight: 500; fill: #334155; }
       .edge-lbl { font-size: 10.5px; font-weight: 600; }
-      .chip { font-size: 11.5px; font-weight: 700; fill: #0f172a; }
+      .rep-title { font-size: 11.5px; font-weight: 700; fill: #0f172a; }
+      .chip { font-size: 10.5px; font-weight: 700; fill: #0f172a; }
       .chip-sub { font-size: 10px; font-weight: 500; fill: #64748b; }
     </style>
 
@@ -42,9 +43,9 @@
   </defs>
 
   <!-- Background -->
-  <rect x="0" y="0" width="1120" height="600" rx="14" fill="#f8fafc"/>
-  <rect x="0" y="0" width="1120" height="600" rx="14" fill="url(#grid)"/>
-  <rect x="1" y="1" width="1118" height="598" rx="14" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="0" y="0" width="1120" height="632" rx="14" fill="#f8fafc"/>
+  <rect x="0" y="0" width="1120" height="632" rx="14" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1118" height="630" rx="14" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
 
   <!-- Title -->
   <text x="36" y="40" class="sans hdr">Nebula Architecture</text>
@@ -138,45 +139,75 @@
   </g>
 
   <!-- ===================================================================== -->
-  <!-- LANE 3: EXECUTION PLANE & ENGINES                                     -->
+  <!-- LANE 3: EXECUTION PLANE & MULTI-REPLICA ENGINE POOLS                  -->
   <!-- ===================================================================== -->
-  <rect x="28" y="430" width="1064" height="146" rx="12" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
+  <rect x="28" y="430" width="1064" height="178" rx="12" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.5"/>
   <text x="46" y="452" class="sans lane-lbl" fill="#047857">EXECUTION PLANE &amp; BLACK-BOX ENGINES (ZONE C)</text>
 
   <!-- Node / K8s Controller -->
   <g transform="translate(46, 464)" filter="url(#shadow)">
-    <rect x="0" y="0" width="380" height="96" rx="9" fill="#ffffff" stroke="#34d399" stroke-width="1.5"/>
+    <rect x="0" y="0" width="374" height="128" rx="9" fill="#ffffff" stroke="#34d399" stroke-width="1.5"/>
     <text x="16" y="28" class="mono box-title" fill="#065f46">nebula-node | k8s-controller</text>
-    <text x="322" y="28" class="mono box-port" fill="#059669">:9090</text>
-    <text x="16" y="50" class="sans box-sub">Container / Pod Lifecycle · GPU Pinning · Drain</text>
-    <text x="16" y="70" class="sans box-sub">Health Probes &amp; /metrics Scrape</text>
+    <text x="316" y="28" class="mono box-port" fill="#059669">:9090</text>
+    <text x="16" y="52" class="sans box-sub">Spawns 1..N Replicas · GPU Pinning · Drain</text>
+    <text x="16" y="74" class="sans box-sub">Health Probes &amp; /metrics Scrape</text>
+    <rect x="14" y="88" width="346" height="26" rx="6" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.1"/>
+    <text x="24" y="105" class="mono chip-sub" fill="#334155">Registers /endpoints/{model}/{replica} leases</text>
   </g>
 
-  <line x1="426" y1="512" x2="476" y2="512" stroke="#059669" stroke-width="2" marker-end="url(#arr-emerald)"/>
-  <text x="451" y="503" text-anchor="middle" class="sans chip-sub">manage</text>
+  <line x1="420" y1="528" x2="472" y2="528" stroke="#059669" stroke-width="2" marker-end="url(#arr-emerald)"/>
+  <text x="446" y="518" text-anchor="middle" class="mono chip-sub" fill="#047857">spawn ×N</text>
 
-  <!-- Engine Replicas -->
-  <g transform="translate(480, 464)" filter="url(#shadow)">
-    <rect x="0" y="0" width="594" height="96" rx="9" fill="#ffffff" stroke="#10b981" stroke-width="1.6"/>
-    <text x="16" y="25" class="sans box-title" fill="#065f46">Engine Replicas</text>
-    <text x="140" y="25" class="sans chip-sub">(Native HTTP / SSE · Optional LMCache Shared KV)</text>
+  <!-- Engine Replica Pool (Multi-Replica + Pluggable Runtimes) -->
+  <g transform="translate(476, 464)" filter="url(#shadow)">
+    <rect x="0" y="0" width="598" height="128" rx="9" fill="#ffffff" stroke="#10b981" stroke-width="1.6"/>
+    <text x="16" y="24" class="sans box-title" fill="#065f46">Model Replica Pool</text>
+    <text x="160" y="24" class="sans chip-sub">(1..N Replicas per Model · Replicated or PD-Split)</text>
 
-    <g transform="translate(16, 38)">
-      <rect x="0" y="0" width="132" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
-      <text x="66" y="20" text-anchor="middle" class="mono chip">vLLM</text>
-      <text x="66" y="35" text-anchor="middle" class="sans chip-sub">APC · kv-events · PD</text>
+    <!-- Multi-Replica Row: Replica #0, Replica #1, Stacked Replica #2..N -->
+    <g transform="translate(16, 36)">
+      <!-- Replica #0 -->
+      <rect x="0" y="0" width="164" height="48" rx="7" fill="#f0fdf4" stroke="#6ee7b7" stroke-width="1.3"/>
+      <circle cx="14" cy="18" r="4" fill="#10b981"/>
+      <text x="24" y="22" class="mono rep-title">vLLM Replica #0</text>
+      <text x="14" y="38" class="sans chip-sub">GPU 0..k · Local KV</text>
 
-      <rect x="143" y="0" width="132" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
-      <text x="209" y="20" text-anchor="middle" class="mono chip">SGLang</text>
-      <text x="209" y="35" text-anchor="middle" class="sans chip-sub">RadixAttention</text>
+      <!-- Replica #1 -->
+      <rect x="176" y="0" width="164" height="48" rx="7" fill="#f0fdf4" stroke="#6ee7b7" stroke-width="1.3"/>
+      <circle cx="190" cy="18" r="4" fill="#10b981"/>
+      <text x="200" y="22" class="mono rep-title">vLLM Replica #1</text>
+      <text x="190" y="38" class="sans chip-sub">GPU k+1..m · Local KV</text>
 
-      <rect x="286" y="0" width="132" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
-      <text x="352" y="20" text-anchor="middle" class="mono chip">TokenSpeed</text>
-      <text x="352" y="35" text-anchor="middle" class="sans chip-sub">MTP Speculation</text>
+      <!-- Stacked Deck for Replica #2..N -->
+      <rect x="364" y="-6" width="190" height="48" rx="7" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1.1"/>
+      <rect x="358" y="-3" width="190" height="48" rx="7" fill="#f0fdf4" stroke="#6ee7b7" stroke-width="1.2"/>
+      <rect x="352" y="0" width="190" height="48" rx="7" fill="#ffffff" stroke="#10b981" stroke-width="1.5"/>
+      <circle cx="366" cy="18" r="4" fill="#10b981"/>
+      <text x="376" y="22" class="mono rep-title">vLLM Replica #2..N</text>
+      <rect x="508" y="9" width="26" height="16" rx="4" fill="#d1fae5"/>
+      <text x="521" y="20.5" text-anchor="middle" class="mono" font-size="9.5" font-weight="800" fill="#065f46">×N</text>
+      <text x="366" y="38" class="sans chip-sub">Scale-out / Prefill · Decode</text>
+    </g>
 
-      <rect x="429" y="0" width="133" height="44" rx="7" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
-      <text x="495" y="20" text-anchor="middle" class="mono chip">zstep</text>
-      <text x="495" y="35" text-anchor="middle" class="sans chip-sub">Rust + SHM TP</text>
+    <!-- Pluggable Engine Runtimes Strip -->
+    <line x1="14" y1="94" x2="584" y2="94" stroke="#e2e8f0" stroke-width="1"/>
+    <g transform="translate(16, 101)">
+      <text x="0" y="14" class="sans chip-sub" font-weight="700" fill="#475569">Runtimes:</text>
+
+      <rect x="64" y="0" width="54" height="19" rx="5" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.1"/>
+      <text x="91" y="13" text-anchor="middle" class="mono chip" fill="#0369a1">vLLM</text>
+
+      <rect x="126" y="0" width="66" height="19" rx="5" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.1"/>
+      <text x="159" y="13" text-anchor="middle" class="mono chip">SGLang</text>
+
+      <rect x="200" y="0" width="90" height="19" rx="5" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.1"/>
+      <text x="245" y="13" text-anchor="middle" class="mono chip">TokenSpeed</text>
+
+      <rect x="298" y="0" width="58" height="19" rx="5" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.1"/>
+      <text x="327" y="13" text-anchor="middle" class="mono chip">zstep</text>
+
+      <rect x="370" y="0" width="196" height="19" rx="5" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.1"/>
+      <text x="468" y="13" text-anchor="middle" class="sans chip-sub" fill="#92400e">+ Optional LMCache Shared KV</text>
     </g>
   </g>
 
@@ -193,7 +224,7 @@
   <rect x="610" y="211" width="132" height="20" rx="5" fill="#ffffff" stroke="#a5b4fc" stroke-width="1"/>
   <text x="676" y="225" text-anchor="middle" class="mono edge-lbl" fill="#4338ca">watch /endpoints</text>
 
-  <!-- Node <-> etcd (clean orthogonal connector or aligned vertical) -->
+  <!-- Node <-> etcd -->
   <path d="M 412 464 L 412 374" fill="none" stroke="#059669" stroke-width="1.8" stroke-dasharray="4,3" marker-start="url(#arr-emerald)" marker-end="url(#arr-emerald)"/>
   <rect x="330" y="399" width="164" height="20" rx="5" fill="#ffffff" stroke="#6ee7b7" stroke-width="1"/>
   <text x="412" y="413" text-anchor="middle" class="mono edge-lbl" fill="#047857">placements &amp; endpoints</text>
@@ -207,5 +238,5 @@
   <line x1="1054" y1="186" x2="1054" y2="464" stroke="#0284c7" stroke-width="2.6" marker-end="url(#arr-sky)"/>
   <rect x="1020" y="272" width="68" height="34" rx="6" fill="#e0f2fe" stroke="#38bdf8" stroke-width="1.2"/>
   <text x="1054" y="287" text-anchor="middle" class="mono chip-sub" fill="#0369a1">HTTP/SSE</text>
-  <text x="1054" y="300" text-anchor="middle" class="sans chip-sub" fill="#075985">Inference</text>
+  <text x="1054" y="300" text-anchor="middle" class="sans chip-sub" fill="#075985">1..N Route</text>
 </svg>
