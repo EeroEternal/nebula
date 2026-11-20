@@ -58,7 +58,7 @@ pub async fn create_responses(
         return deny;
     }
 
-    let (resp_req, chat_body) = match responses_json_to_openai_chat(&payload) {
+    let (resp_req, mut chat_body) = match responses_json_to_openai_chat(&payload) {
         Ok(v) => v,
         Err(e) => {
             return (
@@ -69,11 +69,55 @@ pub async fn create_responses(
         }
     };
 
-    let prepared =
+    let mut rehydrated_session_id: Option<String> = None;
+    if let Some(prev_id) = payload
+        .get("previous_response_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let new_msgs = chat_body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let Some((merged, root_sid)) = st.response_state.rehydrate_chat_messages(
+            auth.tenant_id.as_deref(),
+            prev_id,
+            &new_msgs,
+        ) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": {
+                        "message": format!("previous_response_id '{prev_id}' not found or expired"),
+                        "type": "invalid_request_error",
+                        "code": "previous_response_not_found"
+                    }
+                })),
+            )
+                .into_response();
+        };
+        chat_body["messages"] = Value::Array(merged);
+        rehydrated_session_id = Some(root_sid);
+    }
+
+    let mut prepared =
         match prepare_upstream_from_json(&st, &auth, &headers, &chat_body, Some(&payload)).await {
             Ok(p) => p,
             Err(r) => return r,
         };
+    if prepared.ctx.session_id.is_none() {
+        if let Some(root_sid) = rehydrated_session_id {
+            if let Ok(hv) = reqwest::header::HeaderValue::from_str(&root_sid) {
+                prepared.headers.insert(
+                    reqwest::header::HeaderName::from_static(nebula_common::HEADER_SESSION_ID),
+                    hv,
+                );
+            }
+            prepared.ctx.session_id = Some(root_sid);
+        }
+    }
 
     let builder_seed = crate::responses::CreateResponseRequest {
         model: Some(resp_req.model.clone()),
@@ -145,6 +189,19 @@ pub async fn create_anthropic_messages(
     proxy_chat_as_anthropic(st, prepared, chat_body, requested_model, stream).await
 }
 
+fn backend_saturation_thresholds() -> (u64, f64) {
+    let max_pending = std::env::var("NEBULA_QUEUE_BACKEND_SATURATION_PENDING")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let max_kv = std::env::var("NEBULA_QUEUE_BACKEND_SATURATION_KV")
+        .ok()
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(0.0);
+    (max_pending, max_kv)
+}
+
 async fn acquire_queue_permit(
     st: &AppState,
     prepared: &crate::proxy_common::PreparedUpstream,
@@ -156,6 +213,30 @@ async fn acquire_queue_permit(
                 .model
                 .clone()
                 .unwrap_or_else(|| "default".to_string());
+            let (sat_pending, sat_kv) = backend_saturation_thresholds();
+            if (sat_pending > 0 || sat_kv > 0.0) && st.router.is_some() {
+                let router = st.router.as_ref().expect("checked");
+                let cfg = queues.config();
+                while router.is_model_pool_saturated(&model, sat_pending, sat_kv) {
+                    if cfg.mode == nebula_common::queue::QueueMode::FastFail
+                        || cfg.max_wait.is_zero()
+                    {
+                        st.metrics
+                            .record_queue_deny(nebula_common::queue::QueueDeny::QueueFull.code());
+                        return Err(queue_deny_response(
+                            nebula_common::queue::QueueDeny::QueueFull,
+                        ));
+                    }
+                    if t_before_queue.elapsed() >= cfg.max_wait {
+                        st.metrics
+                            .record_queue_deny(nebula_common::queue::QueueDeny::Timeout.code());
+                        return Err(queue_deny_response(
+                            nebula_common::queue::QueueDeny::Timeout,
+                        ));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }
             let is_continuation = match st.router.as_ref() {
                 Some(r) => r.is_tool_continuation_for_tenant(
                     prepared.ctx.tenant_id.as_deref(),
@@ -166,9 +247,17 @@ async fn acquire_queue_permit(
                     prepared.ctx.session_id.as_deref(),
                 ),
             };
+            let turn_number = queues.record_session_turn(
+                prepared.ctx.tenant_id.as_deref(),
+                prepared.ctx.session_id.as_deref(),
+            );
             match queues
                 .for_model(&model)
-                .acquire_with_priority(prepared.ctx.tenant_id.as_deref(), is_continuation)
+                .acquire_with_turn(
+                    prepared.ctx.tenant_id.as_deref(),
+                    is_continuation,
+                    turn_number,
+                )
                 .await
             {
                 Ok(p) => Some(p),
@@ -244,6 +333,14 @@ async fn proxy_chat_as_responses(
             .map(|(m, _)| m.clone())
             .or_else(|| builder_seed.model.clone())
             .unwrap_or_else(|| "unknown".to_string());
+        let response_state_for_stream = st.response_state.clone();
+        let chat_messages_for_stream = chat_body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let tenant_for_stream = tenant_id.clone();
+        let session_for_stream = session_id.clone();
         let mut builder = ResponseStreamBuilder::new(&builder_seed);
         let started_at = std::time::Instant::now();
 
@@ -301,6 +398,26 @@ async fn proxy_chat_as_responses(
                                         match chunk {
                                             OpenAiStreamChunk::Done => {
                                                 let completed = builder.completed_event();
+                                                if let Some(resp_id) = completed
+                                                    .pointer("/response/id")
+                                                    .and_then(|v| v.as_str())
+                                                {
+                                                    let mut full_msgs = chat_messages_for_stream.clone();
+                                                    if let Some(output) = completed
+                                                        .pointer("/response/output")
+                                                        .and_then(|v| v.as_array())
+                                                    {
+                                                        if let Some(asst_msg) = crate::responses::assistant_message_from_response_output(output) {
+                                                            full_msgs.push(asst_msg);
+                                                        }
+                                                    }
+                                                    response_state_for_stream.save_response(
+                                                        tenant_for_stream.as_deref(),
+                                                        resp_id,
+                                                        session_for_stream.as_deref(),
+                                                        full_msgs,
+                                                    );
+                                                }
                                                 let _ = tx
                                                     .send(Ok(Event::default().data(completed.to_string())))
                                                     .await;
@@ -422,6 +539,25 @@ async fn proxy_chat_as_responses(
         .to_string();
     let built = build_response(&builder_seed, text);
     let mut out = build_non_stream_json(&built);
+    if let Some(resp_id) = out.get("id").and_then(|v| v.as_str()) {
+        let mut full_msgs = chat_body
+            .get("messages")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if let Some(output) = out.get("output").and_then(|v| v.as_array()) {
+            if let Some(asst_msg) = crate::responses::assistant_message_from_response_output(output)
+            {
+                full_msgs.push(asst_msg);
+            }
+        }
+        st.response_state.save_response(
+            tenant_id.as_deref(),
+            resp_id,
+            session_id.as_deref(),
+            full_msgs,
+        );
+    }
     // Preserve non-stream tool_calls as Responses function_call output items.
     if let Some(tcs) = openai
         .pointer("/choices/0/message/tool_calls")

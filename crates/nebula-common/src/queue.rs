@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
@@ -98,12 +98,48 @@ const DEFAULT_TENANT: &str = "__default__";
 /// cold-request starvation under sustained continuation traffic).
 const MAX_CONSECUTIVE_PRIORITY_HANDOFFS: usize = 4;
 
-#[derive(Default)]
+/// Default aging weight (turns per second waited) for Turn-Priority fairness
+/// (`score = turn_number + time_weight * wait_secs`), matching llm-d's
+/// `turn-priority` formula so shallow sessions age up and never starve.
+const DEFAULT_TURN_PRIORITY_TIME_WEIGHT: f64 = 0.5;
+const DEFAULT_TURN_PRIORITY_INACTIVITY_SECS: u64 = 120;
+const MAX_TURN_TRACKER_ENTRIES: usize = 10_000;
+
+struct PriorityWaiter {
+    id: u64,
+    turn_number: u64,
+    enqueued_at: Instant,
+    tx: oneshot::Sender<OwnedSemaphorePermit>,
+}
+
 struct PriorityWaiterState {
-    waiters: VecDeque<(u64, oneshot::Sender<OwnedSemaphorePermit>)>,
+    waiters: VecDeque<PriorityWaiter>,
     next_waiter_id: u64,
     consecutive_handoffs: usize,
     cold_waiters: usize,
+    time_weight: f64,
+}
+
+impl Default for PriorityWaiterState {
+    fn default() -> Self {
+        let time_weight = std::env::var("NEBULA_TURN_PRIORITY_TIME_WEIGHT")
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .filter(|w| w.is_finite() && *w >= 0.0)
+            .unwrap_or(DEFAULT_TURN_PRIORITY_TIME_WEIGHT);
+        Self {
+            waiters: VecDeque::new(),
+            next_waiter_id: 0,
+            consecutive_handoffs: 0,
+            cold_waiters: 0,
+            time_weight,
+        }
+    }
+}
+
+#[inline]
+fn turn_priority_score(turn_number: u64, wait: Duration, time_weight: f64) -> f64 {
+    (turn_number as f64) + time_weight * wait.as_secs_f64()
 }
 
 type PriorityWaiterQueue = Arc<Mutex<PriorityWaiterState>>;
@@ -153,8 +189,32 @@ impl Drop for EnginePermit {
                 return;
             }
             let mut handoff = Some(permit);
-            while let Some((_id, tx)) = st.waiters.pop_front() {
-                match tx.send(handoff.take().unwrap()) {
+            let now = Instant::now();
+            while !st.waiters.is_empty() {
+                let best_idx = st
+                    .waiters
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| {
+                        let sa = turn_priority_score(
+                            a.turn_number,
+                            now.saturating_duration_since(a.enqueued_at),
+                            st.time_weight,
+                        );
+                        let sb = turn_priority_score(
+                            b.turn_number,
+                            now.saturating_duration_since(b.enqueued_at),
+                            st.time_weight,
+                        );
+                        sa.partial_cmp(&sb)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            // On tie, prefer earlier waiter (lower id)
+                            .then_with(|| b.id.cmp(&a.id))
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                let waiter = st.waiters.remove(best_idx).expect("valid index");
+                match waiter.tx.send(handoff.take().unwrap()) {
                     Ok(()) => {
                         st.consecutive_handoffs += 1;
                         break;
@@ -300,6 +360,18 @@ impl EngineQueue {
         tenant: Option<&str>,
         priority_continuation: bool,
     ) -> Result<EnginePermit, QueueDeny> {
+        self.acquire_with_turn(tenant, priority_continuation, 1)
+            .await
+    }
+
+    /// Acquire a concurrency slot with Turn-Priority fairness scoring
+    /// (`score = turn_number + time_weight * wait_secs`).
+    pub async fn acquire_with_turn(
+        &self,
+        tenant: Option<&str>,
+        priority_continuation: bool,
+        turn_number: u64,
+    ) -> Result<EnginePermit, QueueDeny> {
         // Fast path: a slot is free *and* this replica is under its share of the
         // cluster-wide engine cap (N Gateways must not multiply it).
         if !self.over_cluster_cap() {
@@ -371,7 +443,12 @@ impl EngineQueue {
                 }
                 let id = q.next_waiter_id;
                 q.next_waiter_id = q.next_waiter_id.wrapping_add(1);
-                q.waiters.push_back((id, tx));
+                q.waiters.push_back(PriorityWaiter {
+                    id,
+                    turn_number: turn_number.max(1),
+                    enqueued_at: Instant::now(),
+                    tx,
+                });
                 id
             };
 
@@ -389,7 +466,7 @@ impl EngineQueue {
                                 .priority_waiters
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner());
-                            q.waiters.retain(|(id, _)| *id != self.waiter_id);
+                            q.waiters.retain(|w| w.id != self.waiter_id);
                         }
                         if let Ok(permit) = rx.try_recv() {
                             // Re-wrap and drop without incrementing `admitted*` so
@@ -438,7 +515,7 @@ impl EngineQueue {
                             .priority_waiters
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
-                        q.waiters.retain(|(id, _)| *id != waiter_id);
+                        q.waiters.retain(|w| w.id != waiter_id);
                     }
                     if let Ok(permit) = rx.try_recv() {
                         if self.over_cluster_cap() {
@@ -489,20 +566,85 @@ impl EngineQueue {
     }
 }
 
+#[derive(Debug, Clone)]
+struct TurnEntry {
+    turns: u64,
+    last_seen: Instant,
+}
+
+struct TurnTracker {
+    inactivity: Duration,
+    entries: HashMap<String, TurnEntry>,
+}
+
+impl TurnTracker {
+    fn new(inactivity: Duration) -> Self {
+        Self {
+            inactivity,
+            entries: HashMap::new(),
+        }
+    }
+
+    fn record(&mut self, key: &str, now: Instant) -> u64 {
+        if self.entries.len() >= MAX_TURN_TRACKER_ENTRIES && !self.entries.contains_key(key) {
+            self.entries
+                .retain(|_, v| now.saturating_duration_since(v.last_seen) < self.inactivity);
+            if self.entries.len() >= MAX_TURN_TRACKER_ENTRIES {
+                if let Some(oldest_k) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, v)| v.last_seen)
+                    .map(|(k, _)| k.clone())
+                {
+                    self.entries.remove(&oldest_k);
+                }
+            }
+        }
+        let entry = self.entries.entry(key.to_string()).or_insert(TurnEntry {
+            turns: 0,
+            last_seen: now,
+        });
+        if entry.turns > 0 && now.saturating_duration_since(entry.last_seen) >= self.inactivity {
+            entry.turns = 1;
+        } else {
+            entry.turns = entry.turns.saturating_add(1);
+        }
+        entry.last_seen = now;
+        entry.turns
+    }
+}
+
 /// Lazily-created per-model queues sharing one config.
 pub struct EngineQueues {
     cfg: QueueConfig,
     divisor: Arc<AtomicU32>,
     queues: Mutex<HashMap<String, Arc<EngineQueue>>>,
+    turn_tracker: Mutex<TurnTracker>,
 }
 
 impl EngineQueues {
     pub fn new(cfg: QueueConfig) -> Arc<Self> {
+        let inactivity_secs = std::env::var("NEBULA_TURN_PRIORITY_INACTIVITY_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_TURN_PRIORITY_INACTIVITY_SECS);
         Arc::new(Self {
             cfg,
             divisor: Arc::new(AtomicU32::new(1)),
             queues: Mutex::new(HashMap::new()),
+            turn_tracker: Mutex::new(TurnTracker::new(Duration::from_secs(inactivity_secs))),
         })
+    }
+
+    /// Record and return the current conversation turn depth for `(tenant, session_id)`.
+    /// Resets to `1` if the session has been idle longer than `turn_priority_inactivity`.
+    pub fn record_session_turn(&self, tenant: Option<&str>, session_id: Option<&str>) -> u64 {
+        let Some(sid) = session_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return 1;
+        };
+        let key = format!("{}:{}", tenant.unwrap_or(DEFAULT_TENANT), sid);
+        let mut tracker = self.turn_tracker.lock().unwrap_or_else(|e| e.into_inner());
+        tracker.record(&key, Instant::now())
     }
 
     pub fn config(&self) -> &QueueConfig {
@@ -734,5 +876,41 @@ mod tests {
         drop(p_cold);
         let p_last = prio_waiters.pop().unwrap().await.unwrap().unwrap();
         drop(p_last);
+    }
+
+    #[tokio::test]
+    async fn turn_priority_wakes_deeper_conversation_first() {
+        let q = EngineQueue::new(cfg(QueueMode::Fair, 1, 10, 500));
+        let cur = q.acquire_with_turn(Some("t"), false, 1).await.unwrap();
+
+        let q1 = q.clone();
+        let shallow = tokio::spawn(async move { q1.acquire_with_turn(Some("t"), true, 2).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let q2 = q.clone();
+        let deep = tokio::spawn(async move { q2.acquire_with_turn(Some("t"), true, 12).await });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        drop(cur);
+        // Deep session (turn 12) must wake ahead of shallow session (turn 2)
+        let p_deep = deep.await.unwrap().expect("deep waiter woken first");
+        assert!(
+            !shallow.is_finished(),
+            "shallow waiter should still be queued while deep waiter holds slot"
+        );
+        drop(p_deep);
+        let p_shallow = shallow.await.unwrap().expect("shallow waiter wakes next");
+        drop(p_shallow);
+    }
+
+    #[test]
+    fn turn_tracker_resets_after_inactivity() {
+        let mut tracker = TurnTracker::new(Duration::from_secs(120));
+        let t0 = Instant::now();
+        assert_eq!(tracker.record("t:s1", t0), 1);
+        assert_eq!(tracker.record("t:s1", t0 + Duration::from_secs(10)), 2);
+        assert_eq!(tracker.record("t:s1", t0 + Duration::from_secs(20)), 3);
+        // Idle >= 120s resets turn depth back to 1
+        assert_eq!(tracker.record("t:s1", t0 + Duration::from_secs(141)), 1);
     }
 }

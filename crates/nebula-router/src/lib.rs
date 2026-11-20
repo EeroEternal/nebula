@@ -11,6 +11,7 @@ use nebula_common::{
 pub mod first_byte;
 pub mod kv_events;
 pub mod kv_hash;
+pub mod latency_predictor;
 mod pd_split;
 pub mod prompt_hash;
 pub mod sse;
@@ -181,6 +182,19 @@ pub struct Router {
     /// and routes cold short requests directly to unsaturated Decode replicas.
     pd_bypass_tokens: usize,
     pd_short_bypass_total: AtomicU64,
+    /// Minimum remote matched tokens required before `pd_split` treats a prompt
+    /// as warm (`NEBULA_PD_MIN_CACHED_TOKEN_DELTA`, default 0).
+    pd_min_cached_token_delta: AtomicU64,
+    pd_warm_gated_total: AtomicU64,
+    /// When true (`NEBULA_PD_LOCKSTEP_REVISION=1`), `pd_split` requires a complete
+    /// revision (at least one Ready Prefill and one Ready Decode with matching
+    /// `plan_version`) and fails closed (`None` → 503) instead of cross-version
+    /// pairing or single-role fallback.
+    pd_lockstep_revision: std::sync::atomic::AtomicBool,
+    pd_lockstep_fail_closed_total: AtomicU64,
+    /// Phase 3: lightweight online TTFT/TPOT predictor for homogeneous pools
+    /// (`NEBULA_LATENCY_PREDICTOR=1`), falling back cleanly to heuristics when cold.
+    latency_predictor: latency_predictor::OnlineLatencyPredictor,
     /// Batch 6.4 (Account): prefill tokens the chosen replica already held, per model.
     /// `matched_blocks * block_size` for the replica that actually served the request, so this is
     /// the conservative form of the ROI numerator - it only counts cache hits we routed to.
@@ -249,6 +263,17 @@ impl Router {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(DEFAULT_PD_BYPASS_TOKENS);
+        let pd_min_cached_token_delta = std::env::var("NEBULA_PD_MIN_CACHED_TOKEN_DELTA")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let pd_lockstep_revision = std::env::var("NEBULA_PD_LOCKSTEP_REVISION")
+            .ok()
+            .map(|v| {
+                let s = v.trim().to_ascii_lowercase();
+                s == "1" || s == "true" || s == "yes"
+            })
+            .unwrap_or(false);
         let tool_pause_ttl_ms = std::env::var("NEBULA_TOOL_PAUSE_TTL_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -336,6 +361,11 @@ impl Router {
             pd_prefill_spillover_pending: AtomicU64::new(pd_prefill_spillover_pending),
             pd_bypass_tokens,
             pd_short_bypass_total: AtomicU64::new(0),
+            pd_min_cached_token_delta: AtomicU64::new(pd_min_cached_token_delta),
+            pd_warm_gated_total: AtomicU64::new(0),
+            pd_lockstep_revision: std::sync::atomic::AtomicBool::new(pd_lockstep_revision),
+            pd_lockstep_fail_closed_total: AtomicU64::new(0),
+            latency_predictor: latency_predictor::OnlineLatencyPredictor::default(),
             pd_warm_cache: DashMap::new(),
             pd_warm_tokens_by_prefix: DashMap::new(),
             pd_lookup_total: AtomicU64::new(0),
@@ -724,18 +754,110 @@ impl Router {
             .hashes_from_ids_for_model(model_uid, &ids);
         let warm = if has_roles {
             let matched = self.controller_warm_tokens(model_uid, &ids).await;
-            if matched > 0 {
-                if let Some(&first_h) = hashes.first() {
-                    self.record_pd_warm_prefix_tokens(model_uid, first_h, matched);
-                }
-                true
-            } else {
-                false
-            }
+            self.evaluate_pd_warm_threshold(model_uid, hashes.first().copied(), matched)
         } else {
             false
         };
         (Some(hashes), warm)
+    }
+
+    pub fn set_pd_min_cached_token_delta(&self, delta: u64) {
+        self.pd_min_cached_token_delta
+            .store(delta, Ordering::Relaxed);
+    }
+
+    pub fn pd_warm_gated_total(&self) -> u64 {
+        self.pd_warm_gated_total.load(Ordering::Relaxed)
+    }
+
+    pub fn set_pd_lockstep_revision(&self, enabled: bool) {
+        self.pd_lockstep_revision.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn pd_lockstep_fail_closed_total(&self) -> u64 {
+        self.pd_lockstep_fail_closed_total.load(Ordering::Relaxed)
+    }
+
+    pub fn latency_predictor(&self) -> &latency_predictor::OnlineLatencyPredictor {
+        &self.latency_predictor
+    }
+
+    pub fn record_latency_sample(
+        &self,
+        model_uid: &str,
+        features: latency_predictor::LatencyFeatures,
+        ttft_ms: Option<f64>,
+        tpot_ms: Option<f64>,
+    ) {
+        self.latency_predictor
+            .record_sample(model_uid, features, ttft_ms, tpot_ms);
+    }
+
+    /// Returns `true` when `model_uid` has at least one Ready endpoint with fresh
+    /// `/stats/` and **every** such endpoint is saturated (`pending_requests >= max_pending`
+    /// when `max_pending > 0`, or `kv_cache_usage >= max_kv_usage` when `max_kv_usage > 0.0`).
+    /// Used by Gateway ingress backpressure to hold requests in the centralized
+    /// fair queue and prevent Scheduling Regret.
+    pub fn is_model_pool_saturated(
+        &self,
+        model_uid: &str,
+        max_pending: u64,
+        max_kv_usage: f64,
+    ) -> bool {
+        if max_pending == 0 && max_kv_usage <= 0.0 {
+            return false;
+        }
+        let resolved = self.resolve_model(model_uid);
+        let now = now_ms();
+        let mut saw_fresh = false;
+        for entry in self.endpoints.iter() {
+            let ep = entry.value();
+            if ep.model_uid != resolved || ep.status != EndpointStatus::Ready {
+                continue;
+            }
+            let Some(st) = self.stats.get(&(ep.model_uid.clone(), ep.replica_id)) else {
+                continue;
+            };
+            let st = st.value();
+            if now.saturating_sub(st.last_updated_ms) > self.stats_max_age_ms {
+                continue;
+            }
+            saw_fresh = true;
+            let pending_sat = max_pending > 0 && st.pending_requests >= max_pending;
+            let kv_sat = max_kv_usage > 0.0 && st.kv_cache_usage.unwrap_or(0.0) >= max_kv_usage;
+            if !pending_sat && !kv_sat {
+                return false;
+            }
+        }
+        saw_fresh
+    }
+
+    /// Gate `pd_split` remote warm decisions on `minCachedTokenDelta` so tiny
+    /// shared-store matches do not trigger cross-node KV fetch overhead.
+    pub(crate) fn evaluate_pd_warm_threshold(
+        &self,
+        model_uid: &str,
+        first_hash: Option<[u8; 32]>,
+        matched: u64,
+    ) -> bool {
+        let min_delta = self.pd_min_cached_token_delta.load(Ordering::Relaxed);
+        if matched > 0 && matched >= min_delta {
+            if let Some(first_h) = first_hash {
+                self.record_pd_warm_prefix_tokens(model_uid, first_h, matched);
+            }
+            true
+        } else {
+            if matched > 0 {
+                self.pd_warm_gated_total.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    model_uid = %model_uid,
+                    matched,
+                    min_delta,
+                    "pd_split remote warm hit below minCachedTokenDelta; treating as cold"
+                );
+            }
+            false
+        }
     }
 
     /// Extract token IDs for an OpenAI-style or SGLang `/v1/score` body
@@ -1303,6 +1425,47 @@ impl Router {
         // to all candidates behind a visible counter. Replicated deployments never
         // enter this branch (all roles Mixed).
         if is_pd_split {
+            // Lockstep revision gating (llm-d DisaggregatedSet rollout-screener pattern):
+            // keep P and D within a single complete `plan_version` (having both Ready
+            // Prefill and Ready Decode) so rolling updates never pair incompatible
+            // revisions. When `NEBULA_PD_LOCKSTEP_REVISION=1`, fail closed (None → 503)
+            // if no complete revision exists.
+            let mut rev_counts: std::collections::HashMap<u64, (usize, usize)> =
+                std::collections::HashMap::new();
+            for (ep, _) in &candidates_data {
+                let entry = rev_counts.entry(ep.plan_version).or_insert((0, 0));
+                match ep.role {
+                    ReplicaRole::Prefill => entry.0 += 1,
+                    ReplicaRole::Decode => entry.1 += 1,
+                    ReplicaRole::Mixed => {}
+                }
+            }
+            let best_complete_rev = rev_counts
+                .iter()
+                .filter(|(_, (p, d))| *p > 0 && *d > 0)
+                .max_by_key(|(rev, (p, d))| (*p + *d, *rev))
+                .map(|(rev, _)| *rev);
+            let lockstep_strict = self.pd_lockstep_revision.load(Ordering::Relaxed);
+            if lockstep_strict {
+                let Some(chosen_rev) = best_complete_rev else {
+                    self.pd_lockstep_fail_closed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        model_uid = %model_uid,
+                        revisions = rev_counts.len(),
+                        "pd_split lockstep revision gate: no complete (Prefill+Decode) revision Ready; failing closed"
+                    );
+                    return Err(RouteError::NoEndpoint);
+                };
+                if rev_counts.len() > 1 {
+                    candidates_data.retain(|(ep, _)| ep.plan_version == chosen_rev);
+                }
+            } else if plan_version.is_none() && rev_counts.len() > 1 {
+                if let Some(chosen_rev) = best_complete_rev {
+                    candidates_data.retain(|(ep, _)| ep.plan_version == chosen_rev);
+                }
+            }
+
             let affinity_on_decode = ctx
                 .session_id
                 .as_deref()
@@ -1466,6 +1629,46 @@ impl Router {
         } else {
             scoped_prefix_owner.or(any_prefix_owner)
         };
+
+        if self.latency_predictor.is_enabled() && candidates_data.len() > 1 {
+            if let Some(deadline_ms) = ctx.deadline_ms {
+                let total_blocks = prefix_hashes.map(|hs| hs.len()).unwrap_or(0);
+                let input_tokens = total_blocks.saturating_mul(block_size) as f64;
+                let within_slo: Vec<(EndpointInfo, Option<EndpointStats>)> = candidates_data
+                    .iter()
+                    .filter(|(ep, s)| {
+                        let matched_blocks = scoped_prefix_matches
+                            .as_ref()
+                            .and_then(|m| m.get(&ep.replica_id).copied())
+                            .unwrap_or(0);
+                        let prefix_match_ratio = if total_blocks > 0 {
+                            (matched_blocks as f64 / total_blocks as f64).min(1.0)
+                        } else {
+                            0.0
+                        };
+                        let st = s.as_ref();
+                        let features = latency_predictor::LatencyFeatures {
+                            input_tokens,
+                            pending_requests: st.map(|x| x.pending_requests as f64).unwrap_or(0.0),
+                            running_requests: st
+                                .and_then(|x| x.running_requests)
+                                .map(|r| r as f64)
+                                .unwrap_or(0.0),
+                            kv_cache_usage: st.and_then(|x| x.kv_cache_usage).unwrap_or(0.0),
+                            prefix_match_ratio,
+                        };
+                        self.latency_predictor
+                            .predict_ttft_ms(model_uid, &features)
+                            .map(|pred| pred <= deadline_ms as f64)
+                            .unwrap_or(true)
+                    })
+                    .cloned()
+                    .collect();
+                if !within_slo.is_empty() && within_slo.len() < candidates_data.len() {
+                    candidates_data = within_slo;
+                }
+            }
+        }
 
         let candidates: Vec<Candidate> = candidates_data
             .iter()
@@ -3777,5 +3980,99 @@ mod session_and_prefix_consolidation_tests {
             assert_eq!(next, first);
         }
         assert_eq!(router.prefix_hint_hit_total(), 11);
+    }
+
+    #[test]
+    fn pd_split_min_cached_token_delta_gates_small_warm_hits() {
+        let router = Router::new();
+        router.set_pd_min_cached_token_delta(256);
+        let h = [1u8; 32];
+        assert!(!router.evaluate_pd_warm_threshold("m1", Some(h), 128));
+        assert_eq!(router.pd_warm_gated_total(), 1);
+        assert!(router.evaluate_pd_warm_threshold("m1", Some(h), 256));
+        assert_eq!(router.pd_warm_gated_total(), 1);
+    }
+
+    #[test]
+    fn pd_split_mixed_revisions_selects_complete_revision() {
+        let router = Router::new();
+        let mut p_v1 = ready_ep("m1", 0);
+        p_v1.plan_version = 1;
+        p_v1.role = ReplicaRole::Prefill;
+        let mut d_v1 = ready_ep("m1", 1);
+        d_v1.plan_version = 1;
+        d_v1.role = ReplicaRole::Decode;
+        // v2 only has Prefill Ready (Decode v2 not Ready yet)
+        let mut p_v2 = ready_ep("m1", 2);
+        p_v2.plan_version = 2;
+        p_v2.role = ReplicaRole::Prefill;
+        router.replace_all_endpoints(vec![p_v1, d_v1, p_v2]);
+
+        let ctx = ExecutionContext::default();
+        // Cold request should route to v1 Prefill (replica 0), never v2 Prefill (replica 2)
+        let cold = router.route(&ctx, "m1", None, false).unwrap();
+        assert_eq!(cold.plan_version, 1);
+        assert_eq!(cold.role, ReplicaRole::Prefill);
+        // Warm request should route to v1 Decode (replica 1)
+        let warm = router.route(&ctx, "m1", None, true).unwrap();
+        assert_eq!(warm.plan_version, 1);
+        assert_eq!(warm.role, ReplicaRole::Decode);
+    }
+
+    #[test]
+    fn pd_split_lockstep_revision_fails_closed_when_incomplete() {
+        let router = Router::new();
+        router.set_pd_lockstep_revision(true);
+        let mut p_v2 = ready_ep("m1", 0);
+        p_v2.plan_version = 2;
+        p_v2.role = ReplicaRole::Prefill;
+        router.replace_all_endpoints(vec![p_v2]);
+
+        let ctx = ExecutionContext::default();
+        assert!(matches!(
+            router.route(&ctx, "m1", None, false),
+            Err(RouteError::NoEndpoint)
+        ));
+        assert!(matches!(
+            router.route(&ctx, "m1", None, true),
+            Err(RouteError::NoEndpoint)
+        ));
+        assert_eq!(router.pd_lockstep_fail_closed_total(), 2);
+    }
+
+    #[test]
+    fn model_pool_saturation_requires_all_fresh_ready_endpoints_saturated() {
+        let router = Router::new();
+        router.replace_all_endpoints(vec![ready_ep("m1", 0), ready_ep("m1", 1)]);
+        let now = now_ms();
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 0,
+            last_updated_ms: now,
+            pending_requests: 16,
+            kv_cache_usage: Some(0.95),
+            ..Default::default()
+        });
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 2,
+            kv_cache_usage: Some(0.40),
+            ..Default::default()
+        });
+        // Replica 1 is still unsaturated
+        assert!(!router.is_model_pool_saturated("m1", 10, 0.9));
+
+        // Saturate replica 1 as well
+        router.upsert_stats(EndpointStats {
+            model_uid: "m1".into(),
+            replica_id: 1,
+            last_updated_ms: now,
+            pending_requests: 10,
+            kv_cache_usage: Some(0.50),
+            ..Default::default()
+        });
+        assert!(router.is_model_pool_saturated("m1", 10, 0.9));
     }
 }

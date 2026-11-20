@@ -43,6 +43,32 @@ pub struct RunningModel {
 
 /// Max time to wait for in-flight traffic before force-stopping a draining replica.
 const DRAIN_TIMEOUT_MS: u64 = 120_000;
+/// Default minimum grace window for Prefill replicas during drain so Decode peers
+/// can finish pulling offloaded KV blocks before the Prefill engine exits.
+const DEFAULT_PD_PREFILL_DRAIN_GRACE_MS: u64 = 5_000;
+
+fn prefill_drain_grace_ms() -> u64 {
+    std::env::var("NEBULA_PD_PREFILL_DRAIN_GRACE_MS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_PD_PREFILL_DRAIN_GRACE_MS)
+}
+
+fn should_finish_drain(
+    role: nebula_common::ReplicaRole,
+    pending: u64,
+    elapsed_ms: u64,
+    prefill_grace_ms: u64,
+    drain_timeout_ms: u64,
+) -> bool {
+    if elapsed_ms >= drain_timeout_ms {
+        return true;
+    }
+    if pending > 0 {
+        return false;
+    }
+    role != nebula_common::ReplicaRole::Prefill || elapsed_ms >= prefill_grace_ms
+}
 
 pub fn replica_key(model_uid: &str, replica_id: u32) -> ReplicaKey {
     (model_uid.to_string(), replica_id)
@@ -231,16 +257,17 @@ async fn drain_then_stop(
 ) -> anyhow::Result<()> {
     let key = replica_key(model_uid, replica_id);
     let now = now_ms();
-    let (just_started, started) = {
+    let (just_started, started, role) = {
         let mut guard = running.lock().await;
         let Some(rm) = guard.get_mut(&key) else {
             return Ok(());
         };
+        let role = rm.start_ctx.role;
         if rm.drain_started_ms.is_none() {
             rm.drain_started_ms = Some(now);
-            (true, now)
+            (true, now, role)
         } else {
-            (false, rm.drain_started_ms.unwrap_or(now))
+            (false, rm.drain_started_ms.unwrap_or(now), role)
         }
     };
 
@@ -261,15 +288,30 @@ async fn drain_then_stop(
     let pending = pending_requests(store, model_uid, replica_id)
         .await
         .unwrap_or(0);
-    let timed_out = now.saturating_sub(started) >= DRAIN_TIMEOUT_MS;
+    let elapsed_ms = now.saturating_sub(started);
+    let timed_out = elapsed_ms >= DRAIN_TIMEOUT_MS;
+    let prefill_grace_ms = prefill_drain_grace_ms();
 
-    if pending == 0 || timed_out {
+    if should_finish_drain(
+        role,
+        pending,
+        elapsed_ms,
+        prefill_grace_ms,
+        DRAIN_TIMEOUT_MS,
+    ) {
         if timed_out && pending > 0 {
             tracing::warn!(%model_uid, replica_id, pending, "drain timeout reached; force stopping");
         }
         finish_drain_stop(store, running, endpoint_state, model_uid, replica_id).await?;
     } else {
-        tracing::info!(%model_uid, replica_id, pending, "draining; waiting for in-flight to finish");
+        tracing::info!(
+            %model_uid,
+            replica_id,
+            ?role,
+            pending,
+            elapsed_ms,
+            "draining; waiting for in-flight or prefill KV transfer grace window"
+        );
         mark_endpoint_draining(
             store,
             endpoint_state,
@@ -894,5 +936,56 @@ mod tests {
             assignment_signature(&prefill),
             assignment_signature(&decode)
         );
+    }
+
+    #[test]
+    fn prefill_drain_waits_for_kv_transfer_grace_window() {
+        use nebula_common::ReplicaRole;
+        // Mixed / Decode stop immediately once pending == 0
+        assert!(should_finish_drain(
+            ReplicaRole::Mixed,
+            0,
+            100,
+            5_000,
+            120_000
+        ));
+        assert!(should_finish_drain(
+            ReplicaRole::Decode,
+            0,
+            100,
+            5_000,
+            120_000
+        ));
+        assert!(!should_finish_drain(
+            ReplicaRole::Decode,
+            1,
+            100,
+            5_000,
+            120_000
+        ));
+
+        // Prefill waits for prefill_grace_ms even after pending == 0
+        assert!(!should_finish_drain(
+            ReplicaRole::Prefill,
+            0,
+            1_000,
+            5_000,
+            120_000
+        ));
+        assert!(should_finish_drain(
+            ReplicaRole::Prefill,
+            0,
+            5_000,
+            5_000,
+            120_000
+        ));
+        // Timeout always forces stop
+        assert!(should_finish_drain(
+            ReplicaRole::Prefill,
+            2,
+            120_000,
+            5_000,
+            120_000
+        ));
     }
 }

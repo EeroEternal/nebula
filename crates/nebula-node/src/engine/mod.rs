@@ -117,6 +117,31 @@ pub trait Engine: Send + Sync {
     /// Health check. Returns true if the engine is healthy.
     async fn health_check(&self, handle: &EngineHandle) -> bool;
 
+    /// Whether this engine supports resident sleep/wake (offloading weights to
+    /// CPU RAM for near-instant warm scale-up / model swap, FMA pattern).
+    #[allow(dead_code)]
+    fn supports_sleep_wake(&self) -> bool {
+        false
+    }
+
+    /// Put a running engine instance into sleep mode (level 1: offload weights
+    /// to CPU RAM, keep CUDA context; level 2: discard weights).
+    #[allow(dead_code)]
+    async fn sleep(
+        &self,
+        _http: &reqwest::Client,
+        _handle: &EngineHandle,
+        _level: u8,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("sleep/wake not supported by {}", self.engine_type())
+    }
+
+    /// Wake a sleeping engine instance back onto its GPU.
+    #[allow(dead_code)]
+    async fn wake_up(&self, _http: &reqwest::Client, _handle: &EngineHandle) -> anyhow::Result<()> {
+        anyhow::bail!("sleep/wake not supported by {}", self.engine_type())
+    }
+
     /// Scrape runtime metrics and return unified EndpointStats.
     async fn scrape_stats(
         &self,

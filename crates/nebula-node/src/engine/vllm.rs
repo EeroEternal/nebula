@@ -104,6 +104,16 @@ pub struct VllmConfig {
     pub tensor_parallel_size: Option<u32>,
 }
 
+fn sleep_mode_enabled_from_env() -> bool {
+    std::env::var("NEBULA_VLLM_SLEEP_MODE")
+        .ok()
+        .map(|v| {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true" || s == "yes"
+        })
+        .unwrap_or(false)
+}
+
 pub struct VllmEngine {
     pub config: VllmConfig,
 }
@@ -142,6 +152,41 @@ impl Engine for VllmEngine {
 
     fn capabilities(&self) -> nebula_common::EngineCapability {
         nebula_common::static_capability_vllm()
+    }
+
+    fn supports_sleep_wake(&self) -> bool {
+        true
+    }
+
+    async fn sleep(
+        &self,
+        http: &reqwest::Client,
+        handle: &EngineHandle,
+        level: u8,
+    ) -> anyhow::Result<()> {
+        let base = handle.base_url.trim_end_matches('/');
+        if base.is_empty() {
+            anyhow::bail!("vllm handle missing base_url for /sleep");
+        }
+        let url = format!("{base}/sleep?level={}", level.clamp(1, 2));
+        let resp = http.post(&url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("vllm /sleep returned {}", resp.status());
+        }
+        Ok(())
+    }
+
+    async fn wake_up(&self, http: &reqwest::Client, handle: &EngineHandle) -> anyhow::Result<()> {
+        let base = handle.base_url.trim_end_matches('/');
+        if base.is_empty() {
+            anyhow::bail!("vllm handle missing base_url for /wake_up");
+        }
+        let url = format!("{base}/wake_up");
+        let resp = http.post(&url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("vllm /wake_up returned {}", resp.status());
+        }
+        Ok(())
     }
 
     async fn start(&self, ctx: EngineStartContext) -> anyhow::Result<EngineHandle> {
@@ -245,6 +290,10 @@ impl Engine for VllmEngine {
             vllm_args.push("sha256_cbor".into());
             seed
         });
+
+        if sleep_mode_enabled_from_env() && !vllm_args.iter().any(|a| a == "--enable-sleep-mode") {
+            vllm_args.push("--enable-sleep-mode".into());
+        }
 
         // pd_split needs the same pinned seed even without kv-events, or the
         // two roles' chunk keys diverge and the shared KV never matches.

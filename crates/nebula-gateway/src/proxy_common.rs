@@ -155,33 +155,23 @@ pub async fn prepare_upstream(
         .get(HEADER_INFERENCE_HINT)
         .and_then(|v| v.to_str().ok())
     {
-        if let Some(hint) = parse_and_sanitize_inference_hint(raw_hint) {
+        if parse_and_sanitize_inference_hint(raw_hint).is_some() {
             if hint_trusted {
-                if let Ok(hint_text) = serde_json::to_string(&hint) {
-                    if let Ok(v) = HeaderValue::from_str(&hint_text) {
-                        outbound.insert(HeaderName::from_static(HEADER_INFERENCE_HINT), v);
-                        st.metrics
-                            .hint_forwarded_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
+                st.metrics
+                    .hint_forwarded_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             } else {
-                outbound.remove(HeaderName::from_static(HEADER_INFERENCE_HINT));
                 st.metrics
                     .hint_untrusted_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         } else {
-            outbound.remove(HeaderName::from_static(HEADER_INFERENCE_HINT));
             st.metrics
                 .hint_rejected_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    outbound.insert(
-        HeaderName::from_static(HEADER_HINT_TRUSTED),
-        HeaderValue::from_static(if hint_trusted { "1" } else { "0" }),
-    );
+    sanitize_outbound_trust_boundary(&mut outbound, &mut ctx, hint_trusted);
 
     if let Some(ref model) = model {
         if let Ok(v) = HeaderValue::from_str(model) {
@@ -862,5 +852,112 @@ pub async fn forward_embedded(
                 ));
             }
         }
+    }
+}
+
+/// Enforce Gateway trust boundary on outbound headers and ExecutionContext:
+/// - Always strip client-supplied `x-nebula-internal-auth`
+/// - Override `ctx.hint_trusted` with the authenticated `hint_trusted` role decision
+/// - Strip untrusted `x-nebula-inference-hint` and `x-nebula-priority` when `!hint_trusted`
+fn sanitize_outbound_trust_boundary(
+    outbound: &mut HeaderMap,
+    ctx: &mut nebula_common::ExecutionContext,
+    hint_trusted: bool,
+) {
+    outbound.remove(HeaderName::from_static(nebula_common::HEADER_INTERNAL_AUTH));
+    ctx.hint_trusted = hint_trusted;
+    if !hint_trusted {
+        ctx.inference_hint = None;
+        ctx.priority = None;
+        outbound.remove(HeaderName::from_static(HEADER_INFERENCE_HINT));
+        outbound.remove(HeaderName::from_static(nebula_common::HEADER_PRIORITY));
+    } else if ctx.inference_hint.is_none() {
+        outbound.remove(HeaderName::from_static(HEADER_INFERENCE_HINT));
+    }
+    outbound.insert(
+        HeaderName::from_static(HEADER_HINT_TRUSTED),
+        HeaderValue::from_static(if hint_trusted { "1" } else { "0" }),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trust_boundary_strips_spoofed_headers_for_untrusted_role() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert(HEADER_HINT_TRUSTED, HeaderValue::from_static("1"));
+        inbound.insert(
+            HEADER_INFERENCE_HINT,
+            HeaderValue::from_static(r#"{"prefer_prefix_key":"shared-v1"}"#),
+        );
+        inbound.insert(
+            nebula_common::HEADER_PRIORITY,
+            HeaderValue::from_static("99"),
+        );
+        inbound.insert(
+            nebula_common::HEADER_INTERNAL_AUTH,
+            HeaderValue::from_static("forged-secret"),
+        );
+
+        let mut ctx = build_execution_context(&inbound, Some("tenant-a"), None);
+        let mut outbound = inbound.clone();
+        sanitize_outbound_trust_boundary(&mut outbound, &mut ctx, false);
+        inject_execution_context(&mut outbound, &ctx);
+
+        assert!(!ctx.hint_trusted);
+        assert!(ctx.inference_hint.is_none());
+        assert!(ctx.priority.is_none());
+        assert_eq!(
+            outbound
+                .get(HEADER_HINT_TRUSTED)
+                .and_then(|v| v.to_str().ok()),
+            Some("0")
+        );
+        assert!(outbound.get(HEADER_INFERENCE_HINT).is_none());
+        assert!(outbound.get(nebula_common::HEADER_PRIORITY).is_none());
+        assert!(outbound.get(nebula_common::HEADER_INTERNAL_AUTH).is_none());
+    }
+
+    #[test]
+    fn trust_boundary_preserves_hint_and_priority_for_trusted_role_but_strips_internal_auth() {
+        let mut inbound = HeaderMap::new();
+        inbound.insert(HEADER_HINT_TRUSTED, HeaderValue::from_static("0"));
+        inbound.insert(
+            HEADER_INFERENCE_HINT,
+            HeaderValue::from_static(r#"{"prefer_prefix_key":"shared-v1"}"#),
+        );
+        inbound.insert(
+            nebula_common::HEADER_PRIORITY,
+            HeaderValue::from_static("5"),
+        );
+        inbound.insert(
+            nebula_common::HEADER_INTERNAL_AUTH,
+            HeaderValue::from_static("forged-secret"),
+        );
+
+        let mut ctx = build_execution_context(&inbound, Some("tenant-a"), None);
+        let mut outbound = inbound.clone();
+        sanitize_outbound_trust_boundary(&mut outbound, &mut ctx, true);
+        inject_execution_context(&mut outbound, &ctx);
+
+        assert!(ctx.hint_trusted);
+        assert!(ctx.inference_hint.is_some());
+        assert_eq!(ctx.priority, Some(5));
+        assert_eq!(
+            outbound
+                .get(HEADER_HINT_TRUSTED)
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
+        assert!(outbound.get(HEADER_INFERENCE_HINT).is_some());
+        assert_eq!(
+            outbound
+                .get(nebula_common::HEADER_PRIORITY)
+                .and_then(|v| v.to_str().ok()),
+            Some("5")
+        );
+        assert!(outbound.get(nebula_common::HEADER_INTERNAL_AUTH).is_none());
     }
 }

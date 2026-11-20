@@ -330,6 +330,7 @@ async fn main() {
         tenant_admission,
         meta_snapshot,
         tool_pause: tool_pause::ToolPauseTracker::default(),
+        response_state: Arc::new(responses::ResponseStateStore::default()),
         member_registry,
         session_extract: nebula_common::SessionExtractConfig::from_env(),
     };

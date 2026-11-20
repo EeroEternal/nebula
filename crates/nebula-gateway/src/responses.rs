@@ -1,9 +1,134 @@
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
+
+const DEFAULT_RESPONSE_STATE_TTL_SECS: u64 = 3600;
+const MAX_RESPONSE_STATE_ENTRIES: usize = 4096;
+
+#[derive(Clone)]
+struct StoredResponseState {
+    messages: Vec<Value>,
+    root_session_id: String,
+    created_at: Instant,
+}
+
+/// Gateway-side bounded state store for `/v1/responses` `previous_response_id`
+/// continuation. Keeps `nebula-router` completely stateless by rehydrating
+/// conversation history at the Gateway boundary before forwarding.
+pub struct ResponseStateStore {
+    ttl: Duration,
+    entries: Mutex<HashMap<(Option<String>, String), StoredResponseState>>,
+}
+
+impl Default for ResponseStateStore {
+    fn default() -> Self {
+        let ttl_secs = std::env::var("NEBULA_RESPONSE_STATE_TTL_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_RESPONSE_STATE_TTL_SECS);
+        Self {
+            ttl: Duration::from_secs(ttl_secs),
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl ResponseStateStore {
+    pub fn rehydrate_chat_messages(
+        &self,
+        tenant_id: Option<&str>,
+        prev_response_id: &str,
+        new_messages: &[Value],
+    ) -> Option<(Vec<Value>, String)> {
+        let key = (tenant_id.map(str::to_string), prev_response_id.to_string());
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.get(&key)?;
+        if entry.created_at.elapsed() >= self.ttl {
+            map.remove(&key);
+            return None;
+        }
+        let mut merged = entry.messages.clone();
+        // Skip duplicate leading system instructions if the new turn re-supplies one
+        let start_idx = if !merged.is_empty()
+            && merged[0].get("role").and_then(|r| r.as_str()) == Some("system")
+            && new_messages
+                .first()
+                .and_then(|m| m.get("role"))
+                .and_then(|r| r.as_str())
+                == Some("system")
+        {
+            1
+        } else {
+            0
+        };
+        let root_sid = entry.root_session_id.clone();
+        merged.extend_from_slice(&new_messages[start_idx..]);
+        Some((merged, root_sid))
+    }
+
+    pub fn save_response(
+        &self,
+        tenant_id: Option<&str>,
+        response_id: &str,
+        root_session_id: Option<&str>,
+        full_messages: Vec<Value>,
+    ) {
+        let now = Instant::now();
+        let mut map = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_RESPONSE_STATE_ENTRIES {
+            map.retain(|_, v| now.duration_since(v.created_at) < self.ttl);
+            if map.len() >= MAX_RESPONSE_STATE_ENTRIES {
+                if let Some(oldest) = map
+                    .iter()
+                    .min_by_key(|(_, v)| v.created_at)
+                    .map(|(k, _)| k.clone())
+                {
+                    map.remove(&oldest);
+                }
+            }
+        }
+        let key = (tenant_id.map(str::to_string), response_id.to_string());
+        let session = root_session_id
+            .map(str::to_string)
+            .unwrap_or_else(|| response_id.to_string());
+        map.insert(
+            key,
+            StoredResponseState {
+                messages: full_messages,
+                root_session_id: session,
+                created_at: now,
+            },
+        );
+    }
+}
+
+/// Extract an OpenAI-chat-style assistant message from a `/v1/responses` output array
+/// so it can be appended to the stored conversation history.
+pub fn assistant_message_from_response_output(output: &[Value]) -> Option<Value> {
+    let mut text_parts = Vec::new();
+    for item in output {
+        if item.get("type").and_then(|v| v.as_str()) == Some("message") {
+            if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                for part in content {
+                    if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                        text_parts.push(t);
+                    }
+                }
+            }
+        }
+    }
+    if text_parts.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "role": "assistant",
+        "content": text_parts.join("")
+    }))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateResponseRequest {
@@ -389,5 +514,30 @@ mod tests {
                 .unwrap()["arguments"],
             "{\"x\":1}"
         );
+    }
+
+    #[test]
+    fn response_state_store_rehydrates_and_isolates_by_tenant() {
+        let store = ResponseStateStore::default();
+        let turn1 = vec![
+            json!({"role": "system", "content": "be concise"}),
+            json!({"role": "user", "content": "hello"}),
+            json!({"role": "assistant", "content": "hi there"}),
+        ];
+        store.save_response(Some("tenant-a"), "resp_1", None, turn1);
+
+        let turn2 = vec![json!({"role": "user", "content": "follow up"})];
+        // Tenant B cannot access Tenant A's previous_response_id
+        assert!(store
+            .rehydrate_chat_messages(Some("tenant-b"), "resp_1", &turn2)
+            .is_none());
+
+        // Tenant A rehydrates full history and keeps root session id
+        let (merged, root_sid) = store
+            .rehydrate_chat_messages(Some("tenant-a"), "resp_1", &turn2)
+            .expect("tenant-a should rehydrate");
+        assert_eq!(root_sid, "resp_1");
+        assert_eq!(merged.len(), 4);
+        assert_eq!(merged[3]["content"], "follow up");
     }
 }

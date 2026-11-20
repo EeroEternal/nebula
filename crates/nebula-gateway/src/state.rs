@@ -45,6 +45,9 @@ pub struct AppState {
     pub meta_snapshot: GatewayMetaSnapshot,
     /// Local Tool-Pause continuation tracker used in `remote` router mode.
     pub tool_pause: ToolPauseTracker,
+    /// Gateway-side bounded state store for `/v1/responses` `previous_response_id`
+    /// continuation (keeps `nebula-router` stateless).
+    pub response_state: Arc<crate::responses::ResponseStateStore>,
     /// `/gateways/` lease registry, present unless the divisor is pinned
     /// (`NEBULA_GATEWAY_QUOTA_MEMBERS`). Used for shutdown deregistration.
     pub member_registry: Option<Arc<crate::quota_members::MemberRegistry>>,
