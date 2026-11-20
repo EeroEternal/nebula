@@ -1,0 +1,11 @@
+{
+  "id": "stress-32k-v1",
+  "class": "stress_32k",
+  "prompt": "Analyze the full 32k context payload without prior shared prefix and return a structured summary.",
+  "target_input_tokens": 32000,
+  "prefix_hit_ratio": 0.0,
+  "max_tokens": 1024,
+  "concurrency": 64,
+  "request_count": 128,
+  "notes": "Target workload profile: ISL~32k, OSL~1k, prefix hit=0 (route to deepseek-v41-stress)"
+}

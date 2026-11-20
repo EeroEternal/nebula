@@ -195,6 +195,44 @@ class DeadlineSocket:
         ))
 
 
+def synthesize_prompt(
+    base_prompt: str,
+    target_input_tokens: int,
+    prefix_hit_ratio: float,
+    request_idx: int,
+    seed: int,
+) -> str:
+    """Build a deterministic prompt with target word-token length and shared prefix ratio."""
+    if not isinstance(target_input_tokens, int) or isinstance(target_input_tokens, bool) or target_input_tokens <= 0:
+        raise ValueError("target_input_tokens must be a positive integer")
+    if not finite_number(prefix_hit_ratio) or not (0.0 <= float(prefix_hit_ratio) < 1.0):
+        raise ValueError("prefix_hit_ratio must be in [0.0, 1.0)")
+    base_words = base_prompt.split()
+    shared_target = int(target_input_tokens * float(prefix_hit_ratio))
+    unique_target = max(1, target_input_tokens - shared_target)
+    parts: list[str] = []
+    if shared_target > 0:
+        # Shared prefix identical across all requests for this workload + seed.
+        prefix_words = list(base_words[:shared_target])
+        need = shared_target - len(prefix_words)
+        if need > 0:
+            prefix_words.extend(f"s{seed}_{i}" for i in range(need))
+        parts.extend(prefix_words)
+        suffix_words = [f"r{request_idx}u{i}" for i in range(unique_target)]
+        parts.extend(suffix_words)
+    else:
+        # Zero shared prefix: start with per-request unique tag so block 0 never collides.
+        parts.append(f"req{request_idx}_s{seed}")
+        rem = max(0, target_input_tokens - 1)
+        if rem > 0 and base_words:
+            take = min(rem, len(base_words))
+            parts.extend(base_words[:take])
+            rem -= take
+        if rem > 0:
+            parts.extend(f"r{request_idx}u{i}" for i in range(rem))
+    return " ".join(parts)
+
+
 def request_plan(args: argparse.Namespace, workload: dict[str, Any]) -> list[dict[str, Any]]:
     if args.trace:
         path = Path(args.trace)
@@ -207,10 +245,22 @@ def request_plan(args: argparse.Namespace, workload: dict[str, Any]) -> list[dic
         rng = random.Random(args.seed)
         offset = 0.0
         rows = []
-        for _ in range(workload["request_count"]):
+        target_input_tokens = workload.get("target_input_tokens")
+        prefix_hit_ratio = workload.get("prefix_hit_ratio", 0.0)
+        for req_idx in range(workload["request_count"]):
+            if target_input_tokens is not None:
+                prompt_text = synthesize_prompt(
+                    workload["prompt"],
+                    target_input_tokens,
+                    prefix_hit_ratio,
+                    req_idx,
+                    args.seed,
+                )
+            else:
+                prompt_text = workload["prompt"]
             rows.append({
                 "offset_s": offset,
-                "prompt": workload["prompt"],
+                "prompt": prompt_text,
                 "max_tokens": workload["max_tokens"],
             })
             if args.arrival != "closed":

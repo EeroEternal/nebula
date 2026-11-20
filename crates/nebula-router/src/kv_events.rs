@@ -104,6 +104,41 @@ pub fn parse_batch(payload: &[u8]) -> Vec<KvEvent> {
         .unwrap_or_default()
 }
 
+/// Extract the first valid positive `block_size` advertised by any `BlockStored`
+/// event in a msgpack batch payload (both map-form `"block_size"` and array-form
+/// index `4`). Used to auto-align router prefix hashing with engines such as
+/// zstep DeepSeek-V4.1 (`block_size = 128`).
+pub fn parse_batch_block_size(payload: &[u8]) -> Option<usize> {
+    let mut rd = payload;
+    let batch = rmpv::decode::read_value(&mut rd).ok()?;
+    let events = batch.as_array()?.get(1)?.as_array()?;
+    for ev in events {
+        let bs = match ev {
+            Value::Map(m) => {
+                let is_stored = m
+                    .iter()
+                    .find(|(k, _)| k.as_str() == Some("type"))
+                    .and_then(|(_, v)| v.as_str())
+                    == Some("BlockStored");
+                if !is_stored {
+                    continue;
+                }
+                m.iter()
+                    .find(|(k, _)| k.as_str() == Some("block_size"))
+                    .and_then(|(_, v)| v.as_u64())
+            }
+            Value::Array(arr) if arr.first().and_then(Value::as_str) == Some("BlockStored") => {
+                arr.get(4).and_then(Value::as_u64)
+            }
+            _ => None,
+        };
+        if let Some(n) = bs.and_then(|n| usize::try_from(n).ok()).filter(|&n| n > 0) {
+            return Some(n);
+        }
+    }
+    None
+}
+
 /// Parses a publisher topic into `(model_uid, replica_id)`.
 /// Engines publish on `"{model_uid}/{replica_id}"` (set via
 /// `--kv-events-config` by the node / k8s-controller).
@@ -194,6 +229,7 @@ pub struct PrefixIndex {
     map: DashMap<(String, Vec<u8>), OwnerMap>,
     tombstones: DashMap<TombstoneKey, TombstoneVal>,
     model_reset_watermark: DashMap<String, Watermark>,
+    observed_block_sizes: DashMap<String, usize>,
     watermark_lock: std::sync::RwLock<()>,
     epoch: u64,
     generation: AtomicU64,
@@ -211,12 +247,29 @@ impl PrefixIndex {
             map: DashMap::new(),
             tombstones: DashMap::new(),
             model_reset_watermark: DashMap::new(),
+            observed_block_sizes: DashMap::new(),
             watermark_lock: std::sync::RwLock::new(()),
             epoch,
             generation: AtomicU64::new(0),
             inserts_total: AtomicU64::new(0),
             stale_dropped_total: AtomicU64::new(0),
         })
+    }
+
+    /// Record the KV block size observed from an engine's `BlockStored` event.
+    pub fn record_observed_block_size(&self, model_uid: &str, block_size: usize) {
+        if block_size > 0 {
+            self.observed_block_sizes
+                .insert(model_uid.to_string(), block_size);
+        }
+    }
+
+    /// Return the latest KV block size observed from KV events for `model_uid`.
+    pub fn observed_block_size(&self, model_uid: &str) -> Option<usize> {
+        self.observed_block_sizes
+            .get(model_uid)
+            .map(|e| *e.value())
+            .filter(|&bs| bs > 0)
     }
 
     /// Publisher epoch identifier for this index instance.
@@ -611,6 +664,9 @@ impl PrefixIndex {
     /// allocated generation before its entries are applied.
     pub fn ingest_and_stamp_frames(&self, frames: &mut [bytes::Bytes]) -> (u64, u64) {
         let parsed = if let Some((model_uid, replica_id)) = parse_topic(&frames[0]) {
+            if let Some(bs) = parse_batch_block_size(&frames[2]) {
+                self.record_observed_block_size(&model_uid, bs);
+            }
             Some((model_uid, replica_id, parse_batch(&frames[2])))
         } else {
             tracing::warn!(
@@ -935,6 +991,9 @@ pub fn apply_control_with_watermark(
     if let Some(rest) = topic.strip_prefix("!snapshot/") {
         if let Some((model, replica)) = rest.rsplit_once('/') {
             if let Ok(replica) = replica.parse::<u32>() {
+                if let Some(bs) = parse_batch_block_size(payload) {
+                    index.record_observed_block_size(model, bs);
+                }
                 let events = parse_batch(payload);
                 index.apply_with_watermark(model, replica, &events, now_ms(), epoch, gen);
             }
@@ -996,6 +1055,9 @@ fn apply_frames_with_watermark(frames: &[bytes::Bytes], index: &PrefixIndex, epo
         );
         return;
     };
+    if let Some(bs) = parse_batch_block_size(&frames[2]) {
+        index.record_observed_block_size(&model_uid, bs);
+    }
     let events = parse_batch(&frames[2]);
     if !events.is_empty() {
         index.apply_with_watermark(&model_uid, replica_id, &events, now_ms(), epoch, gen);
@@ -1688,5 +1750,41 @@ mod tests {
         ];
         let _ = idx.ingest_and_stamp_frames(&mut removed_frames);
         assert_eq!(idx.lookup("zstep-dsv41", &full_hashes), None);
+    }
+
+    #[test]
+    fn parse_batch_block_size_records_engine_page_granularity() {
+        let idx = PrefixIndex::new();
+        let stored_map = Value::Array(vec![
+            Value::F64(1_700_000_000.0),
+            Value::Array(vec![Value::Map(vec![
+                (Value::from("type"), Value::from("BlockStored")),
+                (
+                    Value::from("block_hashes"),
+                    Value::Array(vec![Value::Binary(vec![1, 2, 3, 4, 5, 6, 7, 8])]),
+                ),
+                (Value::from("block_size"), Value::from(128u64)),
+            ])]),
+        ]);
+        let mut payload = Vec::new();
+        write_value(&mut payload, &stored_map).unwrap();
+        assert_eq!(parse_batch_block_size(&payload), Some(128));
+
+        let mut frames = vec![
+            bytes::Bytes::from("deepseek-v41-coding/0"),
+            bytes::Bytes::from(1u64.to_be_bytes().to_vec()),
+            bytes::Bytes::from(payload),
+        ];
+        let _ = idx.ingest_and_stamp_frames(&mut frames);
+        assert_eq!(idx.observed_block_size("deepseek-v41-coding"), Some(128));
+
+        let stored_arr = batch(vec![Value::Array(vec![
+            Value::from("BlockStored"),
+            Value::Array(vec![Value::Binary(vec![9, 9, 9, 9, 9, 9, 9, 9])]),
+            Value::Nil,
+            Value::Array(vec![]),
+            Value::from(64u64),
+        ])]);
+        assert_eq!(parse_batch_block_size(&stored_arr), Some(64));
     }
 }

@@ -394,6 +394,14 @@ impl PromptHasher {
         self.model_tokenizer_modes.remove(model_uid);
     }
 
+    /// True if an explicit per-model `block_size` was configured from model spec.
+    pub fn has_model_block_size(&self, model_uid: &str) -> bool {
+        self.model_block_sizes
+            .get(model_uid)
+            .map(|e| *e.value() > 0)
+            .unwrap_or(false)
+    }
+
     /// Effective prefix block size for `model_uid` (defaults to `DEFAULT_BLOCK_SIZE` = 16).
     pub fn block_size_for(&self, model_uid: &str) -> usize {
         self.model_block_sizes

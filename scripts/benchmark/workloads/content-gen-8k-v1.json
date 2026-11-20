@@ -1,0 +1,11 @@
+{
+  "id": "content-gen-8k-v1",
+  "class": "content_gen_8k",
+  "prompt": "Write a comprehensive, structured long-form technical article covering architecture, trade-offs, failure modes, and operational checklists.",
+  "target_input_tokens": 1000,
+  "prefix_hit_ratio": 0.0,
+  "max_tokens": 8192,
+  "concurrency": 16,
+  "request_count": 32,
+  "notes": "Target workload profile: ISL~1k, OSL~8k, prefix hit=0 (route to deepseek-v41-content-gen with dspark)"
+}
