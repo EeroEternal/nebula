@@ -68,6 +68,22 @@ fn build_launch_args(
     yaml_served_model_name: Option<&str>,
     yaml_gpu_util: Option<f32>,
 ) -> Vec<String> {
+    build_launch_args_with_kv_events(
+        cfg,
+        ctx,
+        yaml_served_model_name,
+        yaml_gpu_util,
+        std::env::var("NEBULA_KV_EVENTS_ENDPOINT").ok().as_deref(),
+    )
+}
+
+fn build_launch_args_with_kv_events(
+    cfg: &ZstepConfig,
+    ctx: &EngineStartContext,
+    yaml_served_model_name: Option<&str>,
+    yaml_gpu_util: Option<f32>,
+    kv_events_endpoint: Option<&str>,
+) -> Vec<String> {
     let mut zs_args: Vec<String> = Vec::new();
     if let Some(extra) = ctx.extra_args.as_ref() {
         zs_args.extend(extra.clone());
@@ -108,6 +124,16 @@ fn build_launch_args(
         if !zs_args.iter().any(|a| a == "--worker-root") {
             zs_args.push("--worker-root".into());
             zs_args.push(root.to_string());
+        }
+    }
+    if let Some(endpoint) = kv_events_endpoint.map(str::trim).filter(|s| !s.is_empty()) {
+        if !zs_args.iter().any(|a| a == "--kv-events-endpoint") {
+            zs_args.push("--kv-events-endpoint".into());
+            zs_args.push(endpoint.to_string());
+        }
+        if !zs_args.iter().any(|a| a == "--kv-events-topic") {
+            zs_args.push("--kv-events-topic".into());
+            zs_args.push(format!("{}/{}", ctx.model_uid, ctx.replica_id));
         }
     }
     zs_args
@@ -163,6 +189,11 @@ impl Engine for ZstepEngine {
             cfg_gpu_util,
         );
 
+        let kv_hash_seed = std::env::var("NEBULA_KV_EVENTS_ENDPOINT")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|_| std::env::var("NEBULA_KV_HASH_SEED").unwrap_or_else(|_| "42".to_string()));
+
         let mut cmd;
         let process_kind;
 
@@ -213,6 +244,9 @@ impl Engine for ZstepEngine {
                 .arg("TORCHINDUCTOR_CACHE_DIR=/model/.cache/torchinductor");
             cmd.arg("-e")
                 .arg("FLASHINFER_WORKSPACE_BASE=/model/.cache/flashinfer");
+            if let Some(ref seed) = kv_hash_seed {
+                cmd.arg("-e").arg(format!("NEBULA_KV_HASH_SEED={seed}"));
+            }
 
             let (program, prefix_args) = self.split_bin();
             cmd.arg("--entrypoint").arg(&program).arg(image);
@@ -242,6 +276,9 @@ impl Engine for ZstepEngine {
             if let Some(ref indices) = ctx.gpu_indices {
                 let devs: Vec<String> = indices.iter().map(|i| i.to_string()).collect();
                 cmd.env("CUDA_VISIBLE_DEVICES", devs.join(","));
+            }
+            if let Some(ref seed) = kv_hash_seed {
+                cmd.env("NEBULA_KV_HASH_SEED", seed);
             }
             cmd.current_dir(&self.config.cwd);
             cmd.arg("--model-dir")
@@ -552,6 +589,41 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--worker-root", "/model/zstep/worker"]));
         assert!(!args.iter().any(|a| a == "--enable-metrics"));
+    }
+
+    #[test]
+    fn build_launch_args_injects_kv_events_endpoint_and_topic() {
+        let cfg = ZstepConfig {
+            bin: "zs-server serve".into(),
+            cwd: ".".into(),
+            host: "0.0.0.0".into(),
+            docker_image: None,
+            model_dir: "/DATA/Model".into(),
+            tensor_parallel_size: None,
+            gpu_memory_utilization: None,
+            max_num_seqs: None,
+            worker_root: None,
+        };
+        let ctx = EngineStartContext {
+            model_uid: "dsv41".into(),
+            model_name: "/models/DeepSeek-V4.1".into(),
+            replica_id: 2,
+            port: 18080,
+            gpu_indices: Some(vec![0, 1]),
+            engine_config_path: "/nonexistent.yaml".into(),
+            extra_args: None,
+            ready_timeout: Duration::from_secs(60),
+            role: nebula_common::ReplicaRole::Mixed,
+            kv_sharing: None,
+        };
+        let args =
+            build_launch_args_with_kv_events(&cfg, &ctx, None, None, Some("tcp://127.0.0.1:5557"));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--kv-events-endpoint", "tcp://127.0.0.1:5557"]));
+        assert!(args
+            .windows(2)
+            .any(|w| w == ["--kv-events-topic", "dsv41/2"]));
     }
 
     #[test]
