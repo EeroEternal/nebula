@@ -1,0 +1,11 @@
+{
+  "id": "agent-50k-v1",
+  "class": "agent_50k_hit70",
+  "prompt": "You are an autonomous tool-using agent. Review the accumulated observation history, decide the next tool call or final answer, and keep output concise.",
+  "target_input_tokens": 50000,
+  "prefix_hit_ratio": 0.7,
+  "max_tokens": 1024,
+  "concurrency": 16,
+  "request_count": 32,
+  "notes": "Target workload profile: ISL~50k, OSL~1k, prefix hit~0.7 (route to deepseek-v41-agent)"
+}

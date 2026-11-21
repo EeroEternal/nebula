@@ -55,7 +55,7 @@ pub const DEFAULT_PREEMPTION_WINDOW_MS: u64 = 30_000;
 /// `tool_calls`. The pin protects the *spine* (system prompt + tool schemas), not the
 /// churning tail: measured on the rig at ~0.11 MB of L1 per pinned token, so 4k tokens
 /// is ~0.45 GB of a 5 GB L1 — the budget is what bounds this, not the wire format.
-pub const DEFAULT_TOOL_PAUSE_PIN_TOKENS: usize = 4_096;
+pub const DEFAULT_TOOL_PAUSE_PIN_TOKENS: usize = 65_536;
 /// Bounded stash of session spine token ids (ids, not hashes: `/pin` takes tokens).
 pub const TOOL_PAUSE_PIN_MAX_ENTRIES: usize = 1_024;
 
@@ -749,9 +749,8 @@ impl Router {
         };
         self.record_routed_prompt_tokens(model_uid, ids.len() as u64);
         self.remember_session_prefix(tenant_id, session_id, &ids);
-        let hashes = self
-            .prefix_hasher
-            .hashes_from_ids_for_model(model_uid, &ids);
+        let block_size = self.effective_block_size(model_uid);
+        let hashes = kv_hash::compute_block_hashes(&ids, block_size);
         let warm = if has_roles {
             let matched = self.controller_warm_tokens(model_uid, &ids).await;
             self.evaluate_pd_warm_threshold(model_uid, hashes.first().copied(), matched)
@@ -759,6 +758,19 @@ impl Router {
             false
         };
         (Some(hashes), warm)
+    }
+
+    /// Effective KV block size for `model_uid`: explicit model spec override takes
+    /// precedence, followed by the engine-advertised `block_size` observed via
+    /// `BlockStored` KV events (e.g. 128 for zstep DeepSeek-V4.1), falling back to
+    /// `DEFAULT_BLOCK_SIZE` (16).
+    pub fn effective_block_size(&self, model_uid: &str) -> usize {
+        if self.prefix_hasher.has_model_block_size(model_uid) {
+            return self.prefix_hasher.block_size_for(model_uid);
+        }
+        self.prefix_index
+            .observed_block_size(model_uid)
+            .unwrap_or_else(|| self.prefix_hasher.block_size_for(model_uid))
     }
 
     pub fn set_pd_min_cached_token_delta(&self, delta: u64) {
@@ -1410,7 +1422,7 @@ impl Router {
             owner
         });
 
-        let block_size = self.prefix_hasher.block_size_for(model_uid);
+        let block_size = self.effective_block_size(model_uid);
         let is_pd_split = candidates_data
             .iter()
             .any(|(ep, _)| ep.role != ReplicaRole::Mixed);
@@ -4074,5 +4086,25 @@ mod session_and_prefix_consolidation_tests {
             ..Default::default()
         });
         assert!(router.is_model_pool_saturated("m1", 10, 0.9));
+    }
+
+    #[test]
+    fn effective_block_size_auto_aligns_from_kv_events_and_respects_explicit_override() {
+        let router = Router::new();
+        assert_eq!(
+            router.effective_block_size("deepseek-v41-coding"),
+            kv_hash::DEFAULT_BLOCK_SIZE
+        );
+
+        router
+            .prefix_index()
+            .record_observed_block_size("deepseek-v41-coding", 128);
+        assert_eq!(router.effective_block_size("deepseek-v41-coding"), 128);
+
+        // Explicit model spec override takes precedence over observed KV events.
+        router
+            .prefix_hasher
+            .set_model_block_size("deepseek-v41-coding", 64);
+        assert_eq!(router.effective_block_size("deepseek-v41-coding"), 64);
     }
 }

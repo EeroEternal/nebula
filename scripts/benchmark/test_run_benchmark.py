@@ -398,6 +398,30 @@ class BenchmarkTests(unittest.TestCase):
             response.__enter__.return_value.read.return_value = b"other_total 3\n"
             self.assertIsNone(bench.cache_snapshot(args))
 
+    def test_synthetic_prompt_respects_target_length_and_prefix_hit_ratio(self):
+        args, workload = self.args("--requests", "2", "--seed", "7")
+        workload["target_input_tokens"] = 100
+        workload["prefix_hit_ratio"] = 0.7
+        rows = bench.request_plan(args, workload)
+        w0 = rows[0]["prompt"].split()
+        w1 = rows[1]["prompt"].split()
+        self.assertEqual(len(w0), 100)
+        self.assertEqual(len(w1), 100)
+        self.assertEqual(w0[:70], w1[:70])
+        self.assertNotEqual(w0[70:], w1[70:])
+
+        workload["prefix_hit_ratio"] = 0.0
+        rows_cold = bench.request_plan(args, workload)
+        c0 = rows_cold[0]["prompt"].split()
+        c1 = rows_cold[1]["prompt"].split()
+        self.assertEqual(len(c0), 100)
+        self.assertNotEqual(c0[0], c1[0])
+
+        with self.assertRaises(ValueError):
+            bench.synthesize_prompt("hi", 0, 0.5, 0, 1)
+        with self.assertRaises(ValueError):
+            bench.synthesize_prompt("hi", 100, 1.0, 0, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
